@@ -495,6 +495,19 @@ func (c *Client) AgentSummarizeSession(ctx context.Context, id string, sessionID
 	return nil
 }
 
+// AgentRegenerateTitle re-runs AI title generation for a session.
+func (c *Client) AgentRegenerateTitle(ctx context.Context, id string, sessionID string) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/sessions/%s/regenerate-title", id, sessionID), nil, nil, nil)
+	if err != nil {
+		return fmt.Errorf("failed to regenerate title: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to regenerate title: status code %d", rsp.StatusCode)
+	}
+	return nil
+}
+
 // InitiateAgentProcessing triggers agent initialization on the server.
 func (c *Client) InitiateAgentProcessing(ctx context.Context, id string) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/init", id), nil, nil, nil)
@@ -642,6 +655,36 @@ func (c *Client) GetPermissionsSkipRequests(ctx context.Context, id string) (boo
 		return false, fmt.Errorf("failed to decode permissions skip requests: %w", err)
 	}
 	return skip.Skip, nil
+}
+
+// SetPermissionsPlanMode toggles plan mode for a workspace.
+func (c *Client) SetPermissionsPlanMode(ctx context.Context, id string, plan bool) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/permissions/plan", id), nil, jsonBody(proto.PermissionPlanModeRequest{Plan: plan}), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return fmt.Errorf("failed to set plan mode: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to set plan mode: status code %d", rsp.StatusCode)
+	}
+	return nil
+}
+
+// GetPermissionsPlanMode retrieves whether plan mode is active for a workspace.
+func (c *Client) GetPermissionsPlanMode(ctx context.Context, id string) (bool, error) {
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/permissions/plan", id), nil, nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to get plan mode: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to get plan mode: status code %d", rsp.StatusCode)
+	}
+	var plan proto.PermissionPlanModeRequest
+	if err := json.NewDecoder(rsp.Body).Decode(&plan); err != nil {
+		return false, fmt.Errorf("failed to decode plan mode: %w", err)
+	}
+	return plan.Plan, nil
 }
 
 // GetConfig retrieves the workspace-specific configuration.
