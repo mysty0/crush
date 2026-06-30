@@ -1,1 +1,1 @@
-Find all references to a symbol by name via LSP; more accurate than grep for code symbols.
+Find all references to a symbol by name via LSP; more accurate than Grep for code symbols.
