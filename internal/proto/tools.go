@@ -23,7 +23,7 @@ type ToolResponse struct {
 	IsError  bool             `json:"is_error"`
 }
 
-const BashToolName = "bash"
+const BashToolName = "Bash"
 
 // BashParams represents the parameters for the bash tool.
 type BashParams struct {
@@ -59,7 +59,7 @@ type DownloadParams struct {
 // DownloadPermissionsParams represents the permission parameters for the download tool.
 type DownloadPermissionsParams = tools.DownloadPermissionsParams
 
-const EditToolName = "edit"
+const EditToolName = "Edit"
 
 // EditParams represents the parameters for the edit tool.
 type EditParams struct {
@@ -99,7 +99,7 @@ const AgenticFetchToolName = tools.AgenticFetchToolName
 // agentic_fetch tool.
 type AgenticFetchPermissionsParams = tools.AgenticFetchPermissionsParams
 
-const GlobToolName = "glob"
+const GlobToolName = "Glob"
 
 // GlobParams represents the parameters for the glob tool.
 type GlobParams struct {
@@ -113,7 +113,7 @@ type GlobResponseMetadata struct {
 	Truncated     bool `json:"truncated"`
 }
 
-const GrepToolName = "grep"
+const GrepToolName = "Grep"
 
 // GrepParams represents the parameters for the grep tool.
 type GrepParams struct {
@@ -154,7 +154,7 @@ type LSResponseMetadata struct {
 	Truncated     bool `json:"truncated"`
 }
 
-const MultiEditToolName = "multiedit"
+const MultiEditToolName = "MultiEdit"
 
 // MultiEditOperation represents a single edit operation in a multi-edit.
 type MultiEditOperation struct {
@@ -197,7 +197,7 @@ type SourcegraphResponseMetadata struct {
 	Truncated       bool `json:"truncated"`
 }
 
-const ViewToolName = "view"
+const ViewToolName = "Read"
 
 // ViewParams represents the parameters for the view tool.
 type ViewParams struct {
@@ -215,7 +215,7 @@ type ViewResponseMetadata struct {
 	Content  string `json:"content"`
 }
 
-const WriteToolName = "write"
+const WriteToolName = "Write"
 
 // WriteParams represents the parameters for the write tool.
 type WriteParams struct {
