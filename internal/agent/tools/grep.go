@@ -87,7 +87,7 @@ type GrepResponseMetadata struct {
 }
 
 const (
-	GrepToolName        = "grep"
+	GrepToolName        = "Grep"
 	maxGrepContentWidth = 500
 )
 
