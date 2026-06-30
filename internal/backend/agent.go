@@ -189,6 +189,20 @@ func (b *Backend) SummarizeSession(ctx context.Context, workspaceID, sessionID s
 	return ws.AgentCoordinator.Summarize(ctx, sessionID)
 }
 
+// RegenerateTitle re-runs AI title generation for a session.
+func (b *Backend) RegenerateTitle(ctx context.Context, workspaceID, sessionID string) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
+	}
+
+	if ws.AgentCoordinator == nil {
+		return ErrAgentNotInitialized
+	}
+
+	return ws.AgentCoordinator.RegenerateTitle(ctx, sessionID)
+}
+
 // QueuedPrompts returns the number of queued prompts for the session.
 func (b *Backend) QueuedPrompts(workspaceID, sessionID string) (int, error) {
 	ws, err := b.GetWorkspace(workspaceID)
