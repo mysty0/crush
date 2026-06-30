@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/claudecode"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/discover"
 	"github.com/charmbracelet/crush/internal/event"
@@ -102,6 +103,10 @@ type Coordinator interface {
 	Model() Model
 	UpdateModels(ctx context.Context) error
 	GenerateTitle(ctx context.Context, sessionID, prompt string)
+	// RegenerateTitle re-runs AI title generation for a session using its
+	// first user message. It returns an error if the session has no user
+	// message to title from.
+	RegenerateTitle(ctx context.Context, sessionID string) error
 }
 
 type coordinator struct {
@@ -719,6 +724,13 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// itself is still wrapped from the coder's side.
 	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
 
+	// Gate mutating tools on plan mode for the top-level agent. Sub-agents
+	// inherit the restriction transitively: while plan mode is active the
+	// coder cannot reach a point where it would delegate write work.
+	if !isSubAgent {
+		filteredTools = wrapToolsWithPlanMode(filteredTools, c.permissions)
+	}
+
 	return filteredTools, nil
 }
 
@@ -833,10 +845,29 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 		opts = append(opts, anthropic.WithBaseURL(baseURL))
 	}
 
+	// Route all Anthropic traffic through a transport that splits the
+	// leading Claude Code identity line into its own system block, which
+	// the subscription-OAuth endpoint requires (see cc_system_split.go).
+	// It is a no-op for non-Claude-Code system prompts.
+	var base http.RoundTripper = http.DefaultTransport
 	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
-		opts = append(opts, anthropic.WithHTTPClient(httpClient))
+		base = log.NewHTTPClient().Transport
 	}
+	// For the native Claude Code subscription provider, inject a fresh
+	// OAuth bearer token (read+refreshed from ~/.claude/.credentials.json)
+	// on every request. No api_key/shell helper is needed.
+	oauthSubscription := providerID == claudecode.ProviderID
+	if oauthSubscription {
+		os.Setenv("ANTHROPIC_API_KEY", "")
+		base = &claudecode.AuthTransport{Base: base, Source: claudecode.DefaultSource()}
+	}
+	// The subscription-OAuth endpoint requires the Claude Code identity as
+	// a discrete first system block. injectIdentity makes the transport
+	// guarantee that for every request (titles, summaries, sub-agents — not
+	// just the coder prompt). It is off for plain Anthropic API keys so we
+	// never spoof the identity onto non-subscription traffic.
+	httpClient := &http.Client{Transport: &ccSystemSplitTransport{base: base, injectIdentity: oauthSubscription}}
+	opts = append(opts, anthropic.WithHTTPClient(httpClient))
 	return anthropic.New(opts...)
 }
 
@@ -1177,6 +1208,58 @@ func (c *coordinator) GenerateTitle(ctx context.Context, sessionID, prompt strin
 		return
 	}
 	c.currentAgent.GenerateTitle(ctx, sessionID, prompt)
+}
+
+// RegenerateTitle re-runs AI title generation for a session using the whole
+// conversation as context (not just the first message), so the title reflects
+// where the session actually went.
+func (c *coordinator) RegenerateTitle(ctx context.Context, sessionID string) error {
+	if c.currentAgent == nil {
+		return errCoderAgentNotConfigured
+	}
+	msgs, err := c.messages.List(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to list messages: %w", err)
+	}
+	prompt := conversationText(msgs)
+	if prompt == "" {
+		return errors.New("session has no content to generate a title from")
+	}
+	c.currentAgent.GenerateTitle(ctx, sessionID, prompt)
+	return nil
+}
+
+// titleContextMaxChars caps how much conversation text is fed to title
+// generation. The most recent text is kept (tail slice) so the title reflects
+// where the session ended up, while keeping the request small and cheap.
+const titleContextMaxChars = 4000
+
+// conversationText flattens the user and assistant text of a session into a
+// single string for title generation. Tool, system, and empty messages are
+// skipped. The result is tail-sliced to titleContextMaxChars so recent
+// context wins when the conversation is long.
+func conversationText(msgs []message.Message) string {
+	var b strings.Builder
+	for _, msg := range msgs {
+		if msg.Role != message.User && msg.Role != message.Assistant {
+			continue
+		}
+		for _, part := range msg.Parts {
+			tc, ok := part.(message.TextContent)
+			if !ok || tc.Text == "" {
+				continue
+			}
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(tc.Text)
+		}
+	}
+	text := strings.TrimSpace(b.String())
+	if len(text) > titleContextMaxChars {
+		text = text[len(text)-titleContextMaxChars:]
+	}
+	return text
 }
 
 // refreshTokenIfExpired proactively refreshes the OAuth token if it has expired.
