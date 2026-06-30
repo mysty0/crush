@@ -4,10 +4,10 @@ package tools
 const AgenticFetchToolName = "agentic_fetch"
 
 // WebFetchToolName is the name of the web_fetch tool.
-const WebFetchToolName = "web_fetch"
+const WebFetchToolName = "WebFetch"
 
 // WebSearchToolName is the name of the web_search tool for sub-agents.
-const WebSearchToolName = "web_search"
+const WebSearchToolName = "WebSearch"
 
 // LargeContentThreshold is the size threshold for saving content to a file.
 const LargeContentThreshold = 50000 // 50KB
