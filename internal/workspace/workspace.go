@@ -93,6 +93,9 @@ type Workspace interface {
 	AgentQueuedPromptsList(sessionID string) []string
 	AgentClearQueue(sessionID string)
 	AgentSummarize(ctx context.Context, sessionID string) error
+	// AgentRegenerateTitle re-runs AI title generation for a session using
+	// its first user message.
+	AgentRegenerateTitle(ctx context.Context, sessionID string) error
 	UpdateAgentModel(ctx context.Context) error
 	InitCoderAgent(ctx context.Context) error
 	GetDefaultSmallModel(providerID string) config.SelectedModel
@@ -111,6 +114,11 @@ type Workspace interface {
 	PermissionDeny(perm permission.PermissionRequest) bool
 	PermissionSkipRequests() bool
 	PermissionSetSkipRequests(skip bool)
+	// PermissionPlanMode reports whether plan mode is active. In plan mode
+	// mutating tools are blocked so the agent can only research and propose a
+	// plan.
+	PermissionPlanMode() bool
+	PermissionSetPlanMode(plan bool)
 
 	// FileTracker
 	FileTrackerRecordRead(ctx context.Context, sessionID, path string)
