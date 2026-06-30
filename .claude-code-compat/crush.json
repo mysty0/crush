@@ -1,0 +1,20 @@
+{
+  "$schema": "https://charm.land/crush.json",
+  "providers": {
+    "claude-code": {
+      "name": "Claude Code (subscription)",
+      "type": "anthropic",
+      "base_url": "https://api.anthropic.com"
+    }
+  },
+  "models": {
+    "large": {
+      "provider": "claude-code",
+      "model": "claude-opus-4-8"
+    },
+    "small": {
+      "provider": "claude-code",
+      "model": "claude-sonnet-4-6"
+    }
+  }
+}
