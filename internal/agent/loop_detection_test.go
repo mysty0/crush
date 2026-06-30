@@ -117,7 +117,7 @@ func TestHasRepeatedToolCalls(t *testing.T) {
 			steps[i] = makeEmptyStep()
 		}
 		for i := 8; i < 10; i++ {
-			steps[i] = makeToolStep("write", `{"file":"b.go"}`, "ok")
+			steps[i] = makeToolStep("Write", `{"file":"b.go"}`, "ok")
 		}
 		result := hasRepeatedToolCalls(steps, 10, 5)
 		if result {
@@ -132,7 +132,7 @@ func TestHasRepeatedToolCalls(t *testing.T) {
 			if i%2 == 0 {
 				steps[i] = makeToolStep("read", `{"file":"a.go"}`, "content-a")
 			} else {
-				steps[i] = makeToolStep("write", `{"file":"b.go"}`, "content-b")
+				steps[i] = makeToolStep("Write", `{"file":"b.go"}`, "content-b")
 			}
 		}
 		result := hasRepeatedToolCalls(steps, 10, 5)
