@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/claudecode"
 	"github.com/charmbracelet/crush/internal/commands"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/ui/common"
@@ -437,6 +438,15 @@ func (c *Commands) defaultCommands() []*CommandItem {
 	// Only show compact command if there's an active session
 	if c.hasSession {
 		commands = append(commands, NewCommandItem(c.com.Styles, "summarize", "Summarize Session", "", ActionSummarize{SessionID: c.sessionID}))
+		commands = append(commands, NewCommandItem(c.com.Styles, "rename_session", "Rename Session", "", ActionRenameSession{}))
+		commands = append(commands, NewCommandItem(c.com.Styles, "regenerate_title", "Regenerate Title", "", ActionRegenerateTitle{}))
+	}
+
+	// Only show plan usage for the Claude Code subscription provider, whose
+	// OAuth token can query Anthropic's plan usage endpoint. API-key
+	// providers have no equivalent endpoint.
+	if cfg := c.com.Config(); cfg != nil && cfg.Models[config.SelectedModelTypeLarge].Provider == claudecode.ProviderID {
+		commands = append(commands, NewCommandItem(c.com.Styles, "usage", "Plan Usage", "", ActionOpenDialog{DialogID: UsageID}))
 	}
 
 	// Add reasoning toggle for models that support it
@@ -518,6 +528,7 @@ func (c *Commands) defaultCommands() []*CommandItem {
 	commands = append(
 		commands,
 		NewCommandItem(c.com.Styles, "toggle_yolo", "Toggle Yolo Mode", "ctrl+y", ActionToggleYoloMode{}),
+		NewCommandItem(c.com.Styles, "toggle_plan", "Toggle Plan Mode", "", ActionTogglePlanMode{}),
 		NewCommandItem(c.com.Styles, "toggle_help", "Toggle Help", "ctrl+g", ActionToggleHelp{}),
 		NewCommandItem(c.com.Styles, "init", "Initialize Project", "", ActionInitializeProject{}),
 	)
