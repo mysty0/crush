@@ -199,6 +199,12 @@ type PermissionSkipRequest struct {
 	Skip bool `json:"skip"`
 }
 
+// PermissionPlanModeRequest represents a request to toggle plan mode, which
+// blocks mutating tools so the agent can only research and propose a plan.
+type PermissionPlanModeRequest struct {
+	Plan bool `json:"plan"`
+}
+
 // LSPEventType represents the type of LSP event.
 type LSPEventType string
 
