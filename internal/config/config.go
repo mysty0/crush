@@ -732,26 +732,26 @@ const maxRecentModelsPerType = 5
 func allToolNames() []string {
 	return []string{
 		"agent",
-		"bash",
+		"Bash",
 		"crush_info",
 		"crush_logs",
 		"job_output",
 		"job_kill",
 		"download",
-		"edit",
-		"multiedit",
+		"Edit",
+		"MultiEdit",
 		"lsp_diagnostics",
 		"lsp_references",
 		"lsp_restart",
 		"fetch",
 		"agentic_fetch",
-		"glob",
-		"grep",
+		"Glob",
+		"Grep",
 		"ls",
 		"sourcegraph",
-		"todos",
-		"view",
-		"write",
+		"TodoWrite",
+		"Read",
+		"Write",
 		"list_mcp_resources",
 		"read_mcp_resource",
 	}
@@ -766,7 +766,7 @@ func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 }
 
 func resolveReadOnlyTools(tools []string) []string {
-	readOnlyTools := []string{"glob", "grep", "ls", "sourcegraph", "view"}
+	readOnlyTools := []string{"Glob", "Grep", "ls", "sourcegraph", "Read"}
 	// filter to only include tools that are in allowedtools (include mode)
 	return filterSlice(tools, readOnlyTools, true)
 }
