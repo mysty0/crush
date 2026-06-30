@@ -21,6 +21,7 @@ import (
 
 	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
+	"github.com/charmbracelet/crush/internal/claudecode"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/discover"
 	"github.com/charmbracelet/crush/internal/env"
@@ -360,6 +361,17 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 			}
 		}
 		c.Providers.Set(string(p.ID), prepared)
+	}
+
+	// Native Claude Code subscription provider: populate the model list
+	// from /v1/models (with a built-in fallback) before generic discovery
+	// runs, so the picker shows every subscription model and the provider
+	// is never dropped for having an empty list.
+	if pc, ok := c.Providers.Get(claudecode.ProviderID); ok && !pc.Disable && len(pc.Models) == 0 {
+		mctx, mcancel := context.WithTimeout(ctx, 5*time.Second)
+		pc.Models = claudecode.CachedModels(mctx)
+		mcancel()
+		c.Providers.Set(claudecode.ProviderID, pc)
 	}
 
 	// Discover models concurrently for custom providers that need it.
