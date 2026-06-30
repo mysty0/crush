@@ -20,36 +20,36 @@ func TestPermissionService_AllowedCommands(t *testing.T) {
 	}{
 		{
 			name:         "tool in allowlist",
-			allowedTools: []string{"bash", "view"},
-			toolName:     "bash",
+			allowedTools: []string{"Bash", "Read"},
+			toolName:     "Bash",
 			action:       "execute",
 			expected:     true,
 		},
 		{
 			name:         "tool:action in allowlist",
-			allowedTools: []string{"bash:execute", "edit:create"},
-			toolName:     "bash",
+			allowedTools: []string{"Bash:execute", "Edit:create"},
+			toolName:     "Bash",
 			action:       "execute",
 			expected:     true,
 		},
 		{
 			name:         "tool not in allowlist",
-			allowedTools: []string{"view", "ls"},
-			toolName:     "bash",
+			allowedTools: []string{"Read", "ls"},
+			toolName:     "Bash",
 			action:       "execute",
 			expected:     false,
 		},
 		{
 			name:         "tool:action not in allowlist",
-			allowedTools: []string{"bash:read", "edit:create"},
-			toolName:     "bash",
+			allowedTools: []string{"Bash:read", "Edit:create"},
+			toolName:     "Bash",
 			action:       "execute",
 			expected:     false,
 		},
 		{
 			name:         "empty allowlist",
 			allowedTools: []string{},
-			toolName:     "bash",
+			toolName:     "Bash",
 			action:       "execute",
 			expected:     false,
 		},
@@ -101,7 +101,7 @@ func TestPermissionService_SkipMode(t *testing.T) {
 
 	result, err := service.Request(t.Context(), CreatePermissionRequest{
 		SessionID:   "test-session",
-		ToolName:    "bash",
+		ToolName:    "Bash",
 		Action:      "execute",
 		Description: "test command",
 		Path:        "/tmp",
@@ -112,6 +112,70 @@ func TestPermissionService_SkipMode(t *testing.T) {
 	if !result {
 		t.Error("expected permission to be granted in skip mode")
 	}
+}
+
+func TestPermissionService_PlanMode(t *testing.T) {
+	t.Parallel()
+
+	t.Run("blocks mutating tools with ErrPlanModeActive", func(t *testing.T) {
+		t.Parallel()
+		// Skip mode is on to prove plan mode takes precedence over it.
+		service := NewPermissionService("/tmp", true, []string{"Bash"})
+		service.SetPlanMode(true)
+
+		for _, tool := range []string{"Bash", "Edit", "MultiEdit", "Write", "download"} {
+			granted, err := service.Request(t.Context(), CreatePermissionRequest{
+				SessionID: "s",
+				ToolName:  tool,
+				Action:    "execute",
+				Path:      "/tmp",
+			})
+			require.ErrorIs(t, err, ErrPlanModeActive, "tool %s should be blocked", tool)
+			assert.False(t, granted, "tool %s should not be granted", tool)
+		}
+	})
+
+	t.Run("allows read-only tools in plan mode", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", true, nil)
+		service.SetPlanMode(true)
+
+		granted, err := service.Request(t.Context(), CreatePermissionRequest{
+			SessionID: "s",
+			ToolName:  "ls",
+			Action:    "read",
+			Path:      "/tmp",
+		})
+		require.NoError(t, err)
+		assert.True(t, granted)
+	})
+
+	t.Run("disabling plan mode restores normal behavior", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", true, nil)
+		service.SetPlanMode(true)
+		require.True(t, service.PlanMode())
+
+		service.SetPlanMode(false)
+		require.False(t, service.PlanMode())
+
+		granted, err := service.Request(t.Context(), CreatePermissionRequest{
+			SessionID: "s",
+			ToolName:  "Write",
+			Action:    "write",
+			Path:      "/tmp",
+		})
+		require.NoError(t, err)
+		assert.True(t, granted, "skip mode should grant once plan mode is off")
+	})
+}
+
+func TestPlanModeBlocksTool(t *testing.T) {
+	t.Parallel()
+	assert.True(t, PlanModeBlocksTool("Bash"))
+	assert.True(t, PlanModeBlocksTool("Write"))
+	assert.False(t, PlanModeBlocksTool("ls"))
+	assert.False(t, PlanModeBlocksTool("View"))
 }
 
 func TestPermissionService_HookApproval(t *testing.T) {
@@ -125,7 +189,7 @@ func TestPermissionService_HookApproval(t *testing.T) {
 		granted, err := service.Request(ctx, CreatePermissionRequest{
 			SessionID:   "s1",
 			ToolCallID:  "call-42",
-			ToolName:    "bash",
+			ToolName:    "Bash",
 			Action:      "execute",
 			Description: "hook-approved command",
 			Path:        "/tmp",
@@ -152,7 +216,7 @@ func TestPermissionService_HookApproval(t *testing.T) {
 			granted, err = service.Request(ctx, CreatePermissionRequest{
 				SessionID:   "s1",
 				ToolCallID:  "call-other",
-				ToolName:    "bash",
+				ToolName:    "Bash",
 				Action:      "execute",
 				Description: "unrelated call",
 				Path:        "/tmp",
@@ -177,7 +241,7 @@ func TestPermissionService_HookApproval(t *testing.T) {
 		granted, err := service.Request(ctx, CreatePermissionRequest{
 			SessionID:  "s1",
 			ToolCallID: "call-99",
-			ToolName:   "view",
+			ToolName:   "Read",
 			Action:     "read",
 			Path:       "/tmp",
 		})
