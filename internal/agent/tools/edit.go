@@ -41,7 +41,7 @@ type EditResponseMetadata struct {
 	NewContent string `json:"new_content,omitempty"`
 }
 
-const EditToolName = "edit"
+const EditToolName = "Edit"
 
 var (
 	oldStringNotFoundErr        = fantasy.NewTextErrorResponse("old_string not found in file. Make sure it matches exactly, including whitespace and line breaks.")
