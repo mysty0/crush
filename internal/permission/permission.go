@@ -2,6 +2,7 @@ package permission
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,31 @@ import (
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/google/uuid"
 )
+
+// ErrPlanModeActive is returned by Request when plan mode is active and a
+// mutating tool is invoked. Tools propagate this error so the model sees a
+// clear explanation instead of a generic denial: in plan mode it should only
+// research and propose a plan, not change anything.
+var ErrPlanModeActive = errors.New("plan mode is active: do not modify anything. Investigate and then present a concise plan for the user to review and approve before exiting plan mode")
+
+// planModeBlockedTools lists the mutating tools that are blocked while plan
+// mode is active. Read-only tools (view, grep, glob, ls, lsp_*, fetch, etc.)
+// are intentionally absent so the agent can still research.
+var planModeBlockedTools = map[string]struct{}{
+	"Bash":      {},
+	"Edit":      {},
+	"MultiEdit": {},
+	"Write":     {},
+	"download":  {},
+}
+
+// PlanModeBlocksTool reports whether the named tool is blocked while plan mode
+// is active. It is the single source of truth for the block list, shared by
+// the permission service and the agent's plan-mode tool decorator.
+func PlanModeBlocksTool(toolName string) bool {
+	_, blocked := planModeBlockedTools[toolName]
+	return blocked
+}
 
 // hookApprovalKey is the unexported context key used to mark a tool call as
 // pre-approved by a PreToolUse hook. The value is the tool call ID so an
@@ -81,6 +107,12 @@ type Service interface {
 	AutoApproveSession(sessionID string)
 	SetSkipRequests(skip bool)
 	SkipRequests() bool
+	// SetPlanMode enables or disables plan mode. While plan mode is active,
+	// mutating tools are blocked so the agent can only research and propose a
+	// plan.
+	SetPlanMode(plan bool)
+	// PlanMode reports whether plan mode is currently active.
+	PlanMode() bool
 	SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification]
 }
 
@@ -102,6 +134,7 @@ type permissionService struct {
 	autoApproveSessions   map[string]bool
 	autoApproveSessionsMu sync.RWMutex
 	skip                  atomic.Bool
+	planMode              atomic.Bool
 	allowedTools          []string
 
 	// used to make sure we only process one request at a time
@@ -179,6 +212,19 @@ func (s *permissionService) Deny(permission PermissionRequest) bool {
 }
 
 func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRequest) (bool, error) {
+	// Plan mode blocks mutating tools outright, taking precedence over skip
+	// mode, allowlists, and hook approvals. The agent must propose a plan
+	// before any changes are made.
+	if s.planMode.Load() {
+		if PlanModeBlocksTool(opts.ToolName) {
+			s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+				ToolCallID: opts.ToolCallID,
+				Denied:     true,
+			})
+			return false, ErrPlanModeActive
+		}
+	}
+
 	if s.skip.Load() {
 		return true, nil
 	}
@@ -293,6 +339,14 @@ func (s *permissionService) SetSkipRequests(skip bool) {
 
 func (s *permissionService) SkipRequests() bool {
 	return s.skip.Load()
+}
+
+func (s *permissionService) SetPlanMode(plan bool) {
+	s.planMode.Store(plan)
+}
+
+func (s *permissionService) PlanMode() bool {
+	return s.planMode.Load()
 }
 
 func NewPermissionService(workingDir string, skip bool, allowedTools []string) Service {
