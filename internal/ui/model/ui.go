@@ -1548,6 +1548,64 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		m.com.Workspace.PermissionSetSkipRequests(yolo)
 		m.setEditorPrompt(yolo)
 		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionTogglePlanMode:
+		plan := !m.com.Workspace.PermissionPlanMode()
+		m.com.Workspace.PermissionSetPlanMode(plan)
+		if plan {
+			cmds = append(cmds, util.CmdHandler(util.NewInfoMsg("Plan mode ON — the agent will research and propose a plan without making changes.")))
+		} else {
+			cmds = append(cmds, util.CmdHandler(util.NewInfoMsg("Plan mode OFF — the agent can make changes again.")))
+		}
+		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionRegenerateTitle:
+		if !m.hasSession() {
+			cmds = append(cmds, util.ReportWarn("No active session to title."))
+			m.dialog.CloseDialog(dialog.CommandsID)
+			break
+		}
+		sessionID := m.session.ID
+		cmds = append(cmds, func() tea.Msg {
+			if err := m.com.Workspace.AgentRegenerateTitle(context.Background(), sessionID); err != nil {
+				return util.ReportError(err)()
+			}
+			return util.CmdHandler(util.NewInfoMsg("Regenerating session title..."))()
+		})
+		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionRenameSession:
+		if !m.hasSession() {
+			cmds = append(cmds, util.ReportWarn("No active session to rename."))
+			m.dialog.CloseDialog(dialog.CommandsID)
+			break
+		}
+		if msg.Title == "" {
+			// Open an input prompt seeded with the current title as the
+			// placeholder, then re-dispatch with the entered value.
+			m.dialog.CloseDialog(dialog.CommandsID)
+			argsDialog := dialog.NewArguments(
+				m.com,
+				"Rename Session",
+				"",
+				[]commands.Argument{{
+					ID:          "title",
+					Title:       "Title",
+					Description: m.session.Title,
+					Required:    true,
+				}},
+				dialog.ActionRenameSession{},
+			)
+			m.dialog.OpenDialog(argsDialog)
+			break
+		}
+		newTitle := strings.TrimSpace(msg.Title)
+		updated := *m.session
+		updated.Title = newTitle
+		cmds = append(cmds, func() tea.Msg {
+			if _, err := m.com.Workspace.SaveSession(context.Background(), updated); err != nil {
+				return util.ReportError(err)()
+			}
+			return nil
+		})
+		m.dialog.CloseDialog(dialog.ArgumentsID)
 	case dialog.ActionSelectNotificationStyle:
 		cfg := m.com.Config()
 		if cfg != nil && cfg.Options != nil {
@@ -3715,6 +3773,10 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openNotificationsDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.UsageID:
+		if cmd := m.openUsageDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case dialog.FilePickerID:
 		if cmd := m.openFilesDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -3814,6 +3876,18 @@ func (m *UI) openNotificationsDialog() tea.Cmd {
 	notificationsDialog := dialog.NewNotifications(m.com)
 	m.dialog.OpenDialog(notificationsDialog)
 	return nil
+}
+
+// openUsageDialog opens the plan usage dialog and starts fetching the
+// subscription usage limits.
+func (m *UI) openUsageDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.UsageID) {
+		m.dialog.BringToFront(dialog.UsageID)
+		return nil
+	}
+
+	m.dialog.OpenDialog(dialog.NewUsage(m.com))
+	return m.dialog.StartLoading()
 }
 
 // openSessionsDialog opens the sessions dialog. If the dialog is already open,
