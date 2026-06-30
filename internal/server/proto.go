@@ -915,6 +915,26 @@ func (c *controllerV1) handlePostWorkspaceAgentSessionSummarize(w http.ResponseW
 	w.WriteHeader(http.StatusOK)
 }
 
+// handlePostWorkspaceAgentSessionRegenerateTitle re-runs AI title generation.
+//
+//	@Summary		Regenerate session title
+//	@Tags			agent
+//	@Param			id	path	string	true	"Workspace ID"
+//	@Param			sid	path	string	true	"Session ID"
+//	@Success		200
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/agent/sessions/{sid}/regenerate-title [post]
+func (c *controllerV1) handlePostWorkspaceAgentSessionRegenerateTitle(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	if err := c.backend.RegenerateTitle(r.Context(), id, sid); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // handlePostWorkspaceAgentSessionShell runs a shell command in the workspace.
 //
 //	@Summary		Run shell command
@@ -1069,6 +1089,54 @@ func (c *controllerV1) handleGetWorkspacePermissionsSkip(w http.ResponseWriter, 
 		return
 	}
 	jsonEncode(w, proto.PermissionSkipRequest{Skip: skip})
+}
+
+// handlePostWorkspacePermissionsPlan toggles plan mode for a workspace.
+//
+//	@Summary		Set plan mode
+//	@Tags			permissions
+//	@Accept			json
+//	@Param			id		path	string							true	"Workspace ID"
+//	@Param			request	body	proto.PermissionPlanModeRequest	true	"Permission plan mode request"
+//	@Success		200
+//	@Failure		400	{object}	proto.Error
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/permissions/plan [post]
+func (c *controllerV1) handlePostWorkspacePermissionsPlan(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var req proto.PermissionPlanModeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		c.server.logError(r, "Failed to decode request", "error", err)
+		jsonError(w, http.StatusBadRequest, "failed to decode request")
+		return
+	}
+
+	if err := c.backend.SetPermissionsPlanMode(id, req.Plan); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+}
+
+// handleGetWorkspacePermissionsPlan returns whether plan mode is active.
+//
+//	@Summary		Get plan mode status
+//	@Tags			permissions
+//	@Produce		json
+//	@Param			id	path		string							true	"Workspace ID"
+//	@Success		200	{object}	proto.PermissionPlanModeRequest
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/permissions/plan [get]
+func (c *controllerV1) handleGetWorkspacePermissionsPlan(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	plan, err := c.backend.GetPermissionsPlanMode(id)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	jsonEncode(w, proto.PermissionPlanModeRequest{Plan: plan})
 }
 
 // handleError maps backend errors to HTTP status codes and writes the
