@@ -20,7 +20,7 @@ import (
 	"github.com/charmbracelet/crush/internal/fsext"
 )
 
-const GlobToolName = "glob"
+const GlobToolName = "Glob"
 
 //go:embed glob.md.tpl
 var globDescriptionTmpl []byte
