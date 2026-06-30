@@ -17,7 +17,7 @@ Common shell builtins and core utils available on Windows.
 
 <usage_notes>
 - Command required, working_dir optional (defaults to current directory)
-- IMPORTANT: Use Grep/Glob/Agent tools instead of 'find'/'grep'. Use View/LS tools instead of 'cat'/'head'/'tail'/'ls'
+- IMPORTANT: Use Grep/Glob/Agent tools instead of 'find'/'grep'. Use Read/LS tools instead of 'cat'/'head'/'tail'/'ls'
 - Chain with ';' or '&&', avoid newlines except in quoted strings
 - Each command runs in independent shell (no state persistence between calls)
 - Prefer absolute paths over 'cd' (use 'cd' only if user explicitly requests)
