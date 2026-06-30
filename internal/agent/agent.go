@@ -59,7 +59,10 @@ const (
 	smallContextWindowRatio     = 0.2
 )
 
-var userAgent = fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", version.Version)
+var userAgent = cmp.Or(
+	os.Getenv("CRUSH_USER_AGENT"),
+	fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", version.Version),
+)
 
 //go:embed templates/title.md
 var titlePrompt []byte
@@ -1475,7 +1478,7 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool
 			fmt.Sprintf(
 				"<system_reminder>%s</system_reminder>",
 				`This is a reminder that your todo list is currently empty. DO NOT mention this to the user explicitly because they are already aware.
-If you are working on tasks that would benefit from a todo list please use the "todos" tool to create one.
+If you are working on tasks that would benefit from a todo list please use the "TodoWrite" tool to create one.
 If not, please feel free to ignore. Again do not mention this message to the user.`,
 			),
 		))
