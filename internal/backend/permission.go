@@ -58,3 +58,25 @@ func (b *Backend) GetPermissionsSkip(workspaceID string) (bool, error) {
 
 	return ws.Permissions.SkipRequests(), nil
 }
+
+// SetPermissionsPlanMode toggles plan mode, which blocks mutating tools so
+// the agent can only research and propose a plan.
+func (b *Backend) SetPermissionsPlanMode(workspaceID string, plan bool) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
+	}
+
+	ws.Permissions.SetPlanMode(plan)
+	return nil
+}
+
+// GetPermissionsPlanMode returns whether plan mode is active.
+func (b *Backend) GetPermissionsPlanMode(workspaceID string) (bool, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return false, err
+	}
+
+	return ws.Permissions.PlanMode(), nil
+}
