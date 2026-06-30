@@ -260,6 +260,10 @@ func (w *ClientWorkspace) AgentSummarize(ctx context.Context, sessionID string) 
 	return w.client.AgentSummarizeSession(ctx, w.workspaceID(), sessionID)
 }
 
+func (w *ClientWorkspace) AgentRegenerateTitle(ctx context.Context, sessionID string) error {
+	return w.client.AgentRegenerateTitle(ctx, w.workspaceID(), sessionID)
+}
+
 func (w *ClientWorkspace) UpdateAgentModel(ctx context.Context) error {
 	return w.client.UpdateAgent(ctx, w.workspaceID())
 }
@@ -339,6 +343,18 @@ func (w *ClientWorkspace) PermissionSkipRequests() bool {
 
 func (w *ClientWorkspace) PermissionSetSkipRequests(skip bool) {
 	_ = w.client.SetPermissionsSkipRequests(context.Background(), w.workspaceID(), skip)
+}
+
+func (w *ClientWorkspace) PermissionPlanMode() bool {
+	plan, err := w.client.GetPermissionsPlanMode(context.Background(), w.workspaceID())
+	if err != nil {
+		return false
+	}
+	return plan
+}
+
+func (w *ClientWorkspace) PermissionSetPlanMode(plan bool) {
+	_ = w.client.SetPermissionsPlanMode(context.Background(), w.workspaceID(), plan)
 }
 
 // -- FileTracker --
