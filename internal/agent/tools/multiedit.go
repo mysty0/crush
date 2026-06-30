@@ -52,7 +52,7 @@ type MultiEditResponseMetadata struct {
 	EditsFailed  []FailedEdit `json:"edits_failed,omitempty"`
 }
 
-const MultiEditToolName = "multiedit"
+const MultiEditToolName = "MultiEdit"
 
 //go:embed multiedit.md
 var multieditDescription string
