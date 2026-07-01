@@ -542,6 +542,14 @@ func (a *AssistantMessageItem) isSpinning() bool {
 	return (isThinking || !isFinished) && !hasContent && !hasToolCalls
 }
 
+// HasNoOutput returns true if the assistant message has not produced any
+// visible output yet (no content, no thinking text, no tool calls) even if
+// it is currently mid-thinking. Used to decide whether canceling this
+// message would discard any generated output.
+func (a *AssistantMessageItem) HasNoOutput() bool {
+	return a.isSpinning()
+}
+
 // SetMessage is used to update the underlying message. Only the
 // sub-section caches whose source text or extras changed are
 // invalidated; the others survive and serve cache hits on the next

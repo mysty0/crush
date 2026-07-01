@@ -3732,7 +3732,9 @@ func cancelTimerCmd() tea.Cmd {
 
 // cancelAgent handles the cancel key press. The first press sets isCanceling to true
 // and starts a timer. The second press (before the timer expires) actually
-// cancels the agent.
+// cancels the agent. If the agent hasn't produced any output yet (no
+// content, thinking, or tool calls), the first press cancels immediately
+// since there is nothing to lose.
 func (m *UI) cancelAgent() tea.Cmd {
 	if !m.hasSession() {
 		return nil
@@ -3745,17 +3747,7 @@ func (m *UI) cancelAgent() tea.Cmd {
 	if m.isCanceling {
 		// Second escape press — actually cancel.
 		m.isCanceling = false
-
-		// Cancel a running bang command if one is in progress.
-		if m.bangCancel != nil {
-			m.bangCancel()
-			m.bangCancel = nil
-		}
-
-		m.com.Workspace.AgentCancel(m.session.ID)
-		// Stop the spinning todo indicator.
-		m.todoIsSpinning = false
-		m.renderPills()
+		m.doCancelAgent()
 		return nil
 	}
 
@@ -3765,9 +3757,31 @@ func (m *UI) cancelAgent() tea.Cmd {
 		return nil
 	}
 
+	// Nothing has been generated yet, so cancel immediately without the
+	// confirmation step — there's no output to lose.
+	if m.bangCancel == nil && m.chat.LastMessageHasNoOutput() {
+		m.doCancelAgent()
+		return nil
+	}
+
 	// First escape press - set canceling state and start timer.
 	m.isCanceling = true
 	return cancelTimerCmd()
+}
+
+// doCancelAgent cancels any running bang command and the agent, and stops
+// the spinning todo indicator.
+func (m *UI) doCancelAgent() {
+	// Cancel a running bang command if one is in progress.
+	if m.bangCancel != nil {
+		m.bangCancel()
+		m.bangCancel = nil
+	}
+
+	m.com.Workspace.AgentCancel(m.session.ID)
+	// Stop the spinning todo indicator.
+	m.todoIsSpinning = false
+	m.renderPills()
 }
 
 // openDialog opens a dialog by its ID.

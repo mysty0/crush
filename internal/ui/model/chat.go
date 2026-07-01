@@ -741,6 +741,26 @@ func (m *Chat) MessageItem(id string) chat.MessageItem {
 	return item
 }
 
+// LastMessageHasNoOutput returns true if canceling the agent right now
+// would not discard any generated output. This is the case when the last
+// item in the chat is the user's own message (the assistant hasn't
+// started responding yet) or an assistant message that hasn't produced
+// any content, thinking, or tool calls yet (still spinning).
+func (m *Chat) LastMessageHasNoOutput() bool {
+	if m.list.Len() == 0 {
+		return true
+	}
+	item := m.list.ItemAt(m.list.Len() - 1)
+	switch it := item.(type) {
+	case *chat.UserMessageItem:
+		return true
+	case *chat.AssistantMessageItem:
+		return it.HasNoOutput()
+	default:
+		return false
+	}
+}
+
 // ToggleExpandedSelectedItem expands the selected message item if it is expandable.
 func (m *Chat) ToggleExpandedSelectedItem() {
 	if expandable, ok := m.list.SelectedItem().(chat.Expandable); ok {
