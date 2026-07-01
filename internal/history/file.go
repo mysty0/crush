@@ -21,6 +21,7 @@ type File struct {
 	Path      string
 	Content   string
 	Version   int64
+	MessageID string
 	CreatedAt int64
 	UpdatedAt int64
 }
@@ -28,10 +29,10 @@ type File struct {
 // Service manages file versions and history for sessions.
 type Service interface {
 	pubsub.Subscriber[File]
-	Create(ctx context.Context, sessionID, path, content string) (File, error)
+	Create(ctx context.Context, sessionID, messageID, path, content string) (File, error)
 
 	// CreateVersion creates a new version of a file.
-	CreateVersion(ctx context.Context, sessionID, path, content string) (File, error)
+	CreateVersion(ctx context.Context, sessionID, messageID, path, content string) (File, error)
 
 	Get(ctx context.Context, id string) (File, error)
 	GetByPathAndSession(ctx context.Context, path, sessionID string) (File, error)
@@ -55,14 +56,14 @@ func NewService(q *db.Queries, db *sql.DB) Service {
 	}
 }
 
-func (s *service) Create(ctx context.Context, sessionID, path, content string) (File, error) {
-	return s.createWithVersion(ctx, sessionID, path, content, InitialVersion)
+func (s *service) Create(ctx context.Context, sessionID, messageID, path, content string) (File, error) {
+	return s.createWithVersion(ctx, sessionID, messageID, path, content, InitialVersion)
 }
 
 // CreateVersion creates a new version of a file with auto-incremented version
 // number. If no previous versions exist for the path, it creates the initial
 // version. The provided content is stored as the new version.
-func (s *service) CreateVersion(ctx context.Context, sessionID, path, content string) (File, error) {
+func (s *service) CreateVersion(ctx context.Context, sessionID, messageID, path, content string) (File, error) {
 	// Get the latest version for this path
 	files, err := s.q.ListFilesByPath(ctx, path)
 	if err != nil {
@@ -71,17 +72,17 @@ func (s *service) CreateVersion(ctx context.Context, sessionID, path, content st
 
 	if len(files) == 0 {
 		// No previous versions, create initial
-		return s.Create(ctx, sessionID, path, content)
+		return s.Create(ctx, sessionID, messageID, path, content)
 	}
 
 	// Get the latest version
 	latestFile := files[0] // Files are ordered by version DESC, created_at DESC
 	nextVersion := latestFile.Version + 1
 
-	return s.createWithVersion(ctx, sessionID, path, content, nextVersion)
+	return s.createWithVersion(ctx, sessionID, messageID, path, content, nextVersion)
 }
 
-func (s *service) createWithVersion(ctx context.Context, sessionID, path, content string, version int64) (File, error) {
+func (s *service) createWithVersion(ctx context.Context, sessionID, messageID, path, content string, version int64) (File, error) {
 	// Maximum number of retries for transaction conflicts
 	const maxRetries = 3
 	var file File
@@ -105,6 +106,7 @@ func (s *service) createWithVersion(ctx context.Context, sessionID, path, conten
 			Path:      path,
 			Content:   content,
 			Version:   version,
+			MessageID: sql.NullString{String: messageID, Valid: messageID != ""},
 		})
 		if txErr != nil {
 			// Rollback the transaction
@@ -211,6 +213,7 @@ func (s *service) fromDBItem(item db.File) File {
 		Path:      item.Path,
 		Content:   item.Content,
 		Version:   item.Version,
+		MessageID: item.MessageID.String,
 		CreatedAt: item.CreatedAt,
 		UpdatedAt: item.UpdatedAt,
 	}

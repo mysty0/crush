@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/rewind"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
@@ -216,6 +217,14 @@ func (w *AppWorkspace) AgentSummarize(ctx context.Context, sessionID string) err
 		return errors.New("agent coordinator not initialized")
 	}
 	return w.app.AgentCoordinator.Summarize(ctx, sessionID)
+}
+
+func (w *AppWorkspace) RewindListPoints(ctx context.Context, sessionID string) ([]rewind.RewindPoint, error) {
+	return w.app.Rewind.ListRewindPoints(ctx, sessionID)
+}
+
+func (w *AppWorkspace) Rewind(ctx context.Context, sessionID, messageID string, mode rewind.Mode) (rewind.Result, error) {
+	return w.app.Rewind.Rewind(ctx, sessionID, messageID, mode)
 }
 
 func (w *AppWorkspace) AgentRegenerateTitle(ctx context.Context, sessionID string) error {

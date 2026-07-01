@@ -23,6 +23,7 @@ import (
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/rewind"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
@@ -258,6 +259,19 @@ func (w *ClientWorkspace) AgentClearQueue(sessionID string) {
 
 func (w *ClientWorkspace) AgentSummarize(ctx context.Context, sessionID string) error {
 	return w.client.AgentSummarizeSession(ctx, w.workspaceID(), sessionID)
+}
+
+// errRewindClientUnsupported is returned by the client/server workspace
+// because rewind is not yet plumbed through the HTTP protocol. Rewind is
+// available in the default in-process (AppWorkspace) mode.
+var errRewindClientUnsupported = errors.New("rewind is not supported in client/server mode yet")
+
+func (w *ClientWorkspace) RewindListPoints(ctx context.Context, sessionID string) ([]rewind.RewindPoint, error) {
+	return nil, errRewindClientUnsupported
+}
+
+func (w *ClientWorkspace) Rewind(ctx context.Context, sessionID, messageID string, mode rewind.Mode) (rewind.Result, error) {
+	return rewind.Result{}, errRewindClientUnsupported
 }
 
 func (w *ClientWorkspace) AgentRegenerateTitle(ctx context.Context, sessionID string) error {

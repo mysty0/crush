@@ -48,23 +48,29 @@ func HasIncompleteTodos(todos []Todo) bool {
 }
 
 type Session struct {
-	ID               string
-	ParentSessionID  string
-	Title            string
-	MessageCount     int64
-	PromptTokens     int64
-	CompletionTokens int64
-	EstimatedUsage   bool
-	SummaryMessageID string
-	Cost             float64
-	Todos            []Todo
-	CreatedAt        int64
-	UpdatedAt        int64
+	ID                  string
+	ParentSessionID     string
+	Title               string
+	MessageCount        int64
+	PromptTokens        int64
+	CompletionTokens    int64
+	EstimatedUsage      bool
+	SummaryMessageID    string
+	ForkedFromSessionID string
+	ForkedAtMessageID   string
+	Cost                float64
+	Todos               []Todo
+	CreatedAt           int64
+	UpdatedAt           int64
 }
 
 type Service interface {
 	pubsub.Subscriber[Session]
 	Create(ctx context.Context, title string) (Session, error)
+	// CreateFork creates a new top-level session that records its origin
+	// (forkedFromSessionID) and the message it was rewound to
+	// (forkedAtMessageID). The fork is independent; the origin is untouched.
+	CreateFork(ctx context.Context, title, forkedFromSessionID, forkedAtMessageID string) (Session, error)
 	CreateTitleSession(ctx context.Context, parentSessionID string) (Session, error)
 	CreateTaskSession(ctx context.Context, toolCallID, parentSessionID, title string) (Session, error)
 	Get(ctx context.Context, id string) (Session, error)
@@ -97,6 +103,22 @@ func (s *service) Create(ctx context.Context, title string) (Session, error) {
 	dbSession, err := s.q.CreateSession(ctx, db.CreateSessionParams{
 		ID:    uuid.New().String(),
 		Title: title,
+	})
+	if err != nil {
+		return Session{}, err
+	}
+	session := s.fromDBItem(dbSession)
+	s.Publish(pubsub.CreatedEvent, session)
+	event.SessionCreated()
+	return session, nil
+}
+
+func (s *service) CreateFork(ctx context.Context, title, forkedFromSessionID, forkedAtMessageID string) (Session, error) {
+	dbSession, err := s.q.CreateSession(ctx, db.CreateSessionParams{
+		ID:                  uuid.New().String(),
+		Title:               title,
+		ForkedFromSessionID: sql.NullString{String: forkedFromSessionID, Valid: forkedFromSessionID != ""},
+		ForkedAtMessageID:   sql.NullString{String: forkedAtMessageID, Valid: forkedAtMessageID != ""},
 	})
 	if err != nil {
 		return Session{}, err
@@ -301,17 +323,19 @@ func (s *service) fromDBItem(item db.Session) Session {
 		slog.Error("Failed to unmarshal todos", "session_id", item.ID, "error", err)
 	}
 	return Session{
-		ID:               item.ID,
-		ParentSessionID:  item.ParentSessionID.String,
-		Title:            item.Title,
-		MessageCount:     item.MessageCount,
-		PromptTokens:     item.PromptTokens,
-		CompletionTokens: item.CompletionTokens,
-		SummaryMessageID: item.SummaryMessageID.String,
-		Cost:             item.Cost,
-		Todos:            todos,
-		CreatedAt:        item.CreatedAt,
-		UpdatedAt:        item.UpdatedAt,
+		ID:                  item.ID,
+		ParentSessionID:     item.ParentSessionID.String,
+		Title:               item.Title,
+		MessageCount:        item.MessageCount,
+		PromptTokens:        item.PromptTokens,
+		CompletionTokens:    item.CompletionTokens,
+		SummaryMessageID:    item.SummaryMessageID.String,
+		ForkedFromSessionID: item.ForkedFromSessionID.String,
+		ForkedAtMessageID:   item.ForkedAtMessageID.String,
+		Cost:                item.Cost,
+		Todos:               todos,
+		CreatedAt:           item.CreatedAt,
+		UpdatedAt:           item.UpdatedAt,
 	}
 }
 

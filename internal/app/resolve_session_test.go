@@ -32,6 +32,12 @@ func (m *mockSessionService) CreateTitleSession(context.Context, string) (sessio
 	return session.Session{}, nil
 }
 
+func (m *mockSessionService) CreateFork(_ context.Context, title, _, _ string) (session.Session, error) {
+	s := session.Session{ID: "fork-session-id", Title: title}
+	m.created = append(m.created, s)
+	return s, nil
+}
+
 func (m *mockSessionService) CreateTaskSession(context.Context, string, string, string) (session.Session, error) {
 	return session.Session{}, nil
 }

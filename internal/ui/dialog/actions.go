@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/rewind"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/ui/common"
@@ -67,6 +68,20 @@ type (
 	ActionInitializeProject           struct{}
 	ActionSummarize                   struct {
 		SessionID string
+	}
+	// ActionRewindSelectPoint is sent from the rewind dialog when a
+	// rewind point (user message) is chosen. It advances the dialog to
+	// the mode-selection step.
+	ActionRewindSelectPoint struct {
+		MessageID string
+	}
+	// ActionRewindConfirm is sent when the user confirms a rewind mode.
+	// The UI performs the rewind and, for fork modes, switches to the new
+	// session.
+	ActionRewindConfirm struct {
+		SessionID string
+		MessageID string
+		Mode      rewind.Mode
 	}
 	// ActionSelectReasoningEffort is a message indicating a reasoning effort
 	// has been selected.

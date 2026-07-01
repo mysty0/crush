@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/rewind"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
 )
@@ -93,6 +94,15 @@ type Workspace interface {
 	AgentQueuedPromptsList(sessionID string) []string
 	AgentClearQueue(sessionID string)
 	AgentSummarize(ctx context.Context, sessionID string) error
+
+	// RewindListPoints returns the user messages a session can be rewound
+	// to, newest first.
+	RewindListPoints(ctx context.Context, sessionID string) ([]rewind.RewindPoint, error)
+	// Rewind rewinds a session to a message using the given mode, forking
+	// the conversation and/or restoring files on disk. It returns the new
+	// forked session ID (empty for code-only rewinds) and how many files
+	// were restored.
+	Rewind(ctx context.Context, sessionID, messageID string, mode rewind.Mode) (rewind.Result, error)
 	// AgentRegenerateTitle re-runs AI title generation for a session using
 	// its first user message.
 	AgentRegenerateTitle(ctx context.Context, sessionID string) error

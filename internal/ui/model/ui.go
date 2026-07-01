@@ -673,6 +673,24 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.startLSPs(paths))
 
+	case rewindDoneMsg:
+		var note string
+		if msg.result.FilesRestored > 0 {
+			note = fmt.Sprintf("Restored %d file%s.", msg.result.FilesRestored, rewindFilesPlural(msg.result.FilesRestored))
+		}
+		if msg.result.ForkedSessionID != "" {
+			// Switch to the forked session.
+			cmds = append(cmds, m.loadSession(msg.result.ForkedSessionID))
+			if note == "" {
+				note = "Rewound to a new forked session."
+			} else {
+				note = "Rewound to a new forked session. " + note
+			}
+		}
+		if note != "" {
+			cmds = append(cmds, util.CmdHandler(util.NewInfoMsg(note)))
+		}
+
 	case sendMessageMsg:
 		cmds = append(cmds, m.sendMessage(msg.Content, msg.Attachments...))
 
@@ -1657,6 +1675,21 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			return nil
 		})
 		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionRewindConfirm:
+		if m.isAgentBusy() {
+			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before rewinding..."))
+			break
+		}
+		m.dialog.CloseDialog(dialog.RewindID)
+		m.dialog.CloseDialog(dialog.CommandsID)
+		sessionID, messageID, mode := msg.SessionID, msg.MessageID, msg.Mode
+		cmds = append(cmds, func() tea.Msg {
+			res, err := m.com.Workspace.Rewind(context.Background(), sessionID, messageID, mode)
+			if err != nil {
+				return util.ReportError(err)()
+			}
+			return rewindDoneMsg{result: res, mode: mode}
+		})
 	case dialog.ActionToggleHelp:
 		m.status.ToggleHelp()
 		m.dialog.CloseDialog(dialog.CommandsID)
@@ -3825,6 +3858,10 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openFilesDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.RewindID:
+		if cmd := m.openRewindDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case dialog.QuitID:
 		if cmd := m.openQuitDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -3932,6 +3969,23 @@ func (m *UI) openUsageDialog() tea.Cmd {
 
 	m.dialog.OpenDialog(dialog.NewUsage(m.com))
 	return m.dialog.StartLoading()
+}
+
+// openRewindDialog opens the rewind dialog for the current session.
+func (m *UI) openRewindDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.RewindID) {
+		m.dialog.BringToFront(dialog.RewindID)
+		return nil
+	}
+	if m.session == nil {
+		return util.ReportWarn("No active session to rewind.")
+	}
+	rewindDialog, err := dialog.NewRewind(m.com, m.session.ID)
+	if err != nil {
+		return util.ReportError(err)
+	}
+	m.dialog.OpenDialog(rewindDialog)
+	return nil
 }
 
 // openSessionsDialog opens the sessions dialog. If the dialog is already open,

@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/crush/internal/diff"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/history"
+	"github.com/charmbracelet/crush/internal/rewind"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/tmux"
 	"github.com/charmbracelet/crush/internal/ui/common"
@@ -27,6 +28,21 @@ type loadSessionMsg struct {
 	session   *session.Session
 	files     []SessionFile
 	readFiles []string
+}
+
+// rewindDoneMsg is emitted after a rewind completes. For fork modes it
+// carries the new session to switch to.
+type rewindDoneMsg struct {
+	result rewind.Result
+	mode   rewind.Mode
+}
+
+// rewindFilesPlural returns the plural suffix for a file count.
+func rewindFilesPlural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // lspFilePaths returns deduplicated file paths from both modified and read
