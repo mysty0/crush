@@ -86,7 +86,7 @@ func TestBashTool_CustomAutoBackgroundThreshold(t *testing.T) {
 	require.Contains(t, resp.Content, "moved to background")
 
 	bgManager := shell.GetBackgroundShellManager()
-	require.NoError(t, bgManager.Kill(meta.ShellID))
+	require.NoError(t, bgManager.Kill(ctx, meta.ShellID))
 }
 
 type recordingPermissionService struct {

@@ -336,8 +336,10 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 					break waitLoop
 				case <-ctx.Done():
 					// Incoming context was cancelled before we moved to background
-					// Kill the shell and return error
-					bgManager.Kill(bgShell.ID)
+					// Kill the shell and return error. Use a fresh context here
+					// since ctx is already done — Kill's own internal timeout
+					// still bounds how long this waits.
+					bgManager.Kill(context.Background(), bgShell.ID)
 					return fantasy.ToolResponse{}, ctx.Err()
 				}
 			}

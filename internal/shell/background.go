@@ -17,6 +17,15 @@ const (
 	MaxBackgroundJobs = 50
 	// CompletedJobRetentionMinutes is how long to keep completed jobs before auto-cleanup (8 hours)
 	CompletedJobRetentionMinutes = 8 * 60
+	// killWaitTimeout bounds how long Kill waits for a background shell to
+	// exit after being cancelled. Some processes (e.g. detached grandchild
+	// processes spawned via `tmux run-shell -b`, or other tools that
+	// inherit stdio handles) can outlive their direct child and keep
+	// stdout/stderr pipes open indefinitely, so ExecStream never returns
+	// and shell.done never closes. Without this backstop, Kill would block
+	// forever and freeze the calling tool call (and the whole agent turn)
+	// with no way for the user to cancel out of it.
+	killWaitTimeout = 10 * time.Second
 )
 
 // syncBuffer is a thread-safe wrapper around bytes.Buffer.
@@ -143,16 +152,30 @@ func (m *BackgroundShellManager) Remove(id string) error {
 	return nil
 }
 
-// Kill terminates a background shell by ID.
-func (m *BackgroundShellManager) Kill(id string) error {
+// Kill terminates a background shell by ID. It cancels the shell's context
+// and waits for it to exit, bounded by the caller's context (ctx.Done())
+// and an internal timeout (killWaitTimeout) so a process that outlives
+// cancellation — e.g. a detached grandchild holding stdio pipes open —
+// cannot block the caller indefinitely.
+func (m *BackgroundShellManager) Kill(ctx context.Context, id string) error {
 	shell, ok := m.shells.Take(id)
 	if !ok {
 		return fmt.Errorf("background shell not found: %s", id)
 	}
 
 	shell.cancel()
-	<-shell.done
-	return nil
+
+	timeout := time.NewTimer(killWaitTimeout)
+	defer timeout.Stop()
+
+	select {
+	case <-shell.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timeout.C:
+		return fmt.Errorf("timed out waiting for background shell %s to terminate", id)
+	}
 }
 
 // BackgroundShellInfo contains information about a background shell.

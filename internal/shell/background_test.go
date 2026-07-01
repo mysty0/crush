@@ -71,7 +71,7 @@ func TestBackgroundShellManager_Get(t *testing.T) {
 	}
 
 	// Clean up
-	manager.Kill(bgShell.ID)
+	manager.Kill(ctx, bgShell.ID)
 }
 
 func TestBackgroundShellManager_Kill(t *testing.T) {
@@ -88,7 +88,7 @@ func TestBackgroundShellManager_Kill(t *testing.T) {
 	}
 
 	// Kill it
-	err = manager.Kill(bgShell.ID)
+	err = manager.Kill(ctx, bgShell.ID)
 	if err != nil {
 		t.Errorf("failed to kill background shell: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestBackgroundShellManager_KillNonExistent(t *testing.T) {
 
 	manager := newBackgroundShellManager()
 
-	err := manager.Kill("non-existent-id")
+	err := manager.Kill(t.Context(), "non-existent-id")
 	if err == nil {
 		t.Error("expected error when killing non-existent shell")
 	}
@@ -132,7 +132,7 @@ func TestBackgroundShell_IsDone(t *testing.T) {
 	require.Eventually(t, bgShell.IsDone, 5*time.Second, 50*time.Millisecond, "expected shell to be done")
 
 	// Clean up
-	manager.Kill(bgShell.ID)
+	manager.Kill(ctx, bgShell.ID)
 }
 
 func TestBackgroundShell_WithBlockFuncs(t *testing.T) {
@@ -166,7 +166,7 @@ func TestBackgroundShell_WithBlockFuncs(t *testing.T) {
 	}
 
 	// Clean up
-	manager.Kill(bgShell.ID)
+	manager.Kill(ctx, bgShell.ID)
 }
 
 func TestBackgroundShellManager_List(t *testing.T) {
@@ -213,8 +213,8 @@ func TestBackgroundShellManager_List(t *testing.T) {
 	}
 
 	// Clean up
-	manager.Kill(bgShell1.ID)
-	manager.Kill(bgShell2.ID)
+	manager.Kill(ctx, bgShell1.ID)
+	manager.Kill(ctx, bgShell2.ID)
 }
 
 func TestBackgroundShellManager_KillAll(t *testing.T) {
