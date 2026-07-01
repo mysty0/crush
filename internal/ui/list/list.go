@@ -125,8 +125,11 @@ func (l *List) AtBottom() bool {
 		return true
 	}
 
-	// Calculate the height from offsetIdx to the end.
-	var totalHeight int
+	// Calculate the height from offsetIdx to the end, starting the
+	// accumulator at -offsetLine so it already accounts for the lines of
+	// the first item that are scrolled past. This keeps the early-exit
+	// check below consistent with the final comparison.
+	totalHeight := -l.offsetLine
 	for idx := l.offsetIdx; idx < len(l.items); idx++ {
 		if totalHeight > l.height {
 			// No need to calculate further, we're already past the viewport height
@@ -140,7 +143,7 @@ func (l *List) AtBottom() bool {
 		totalHeight += itemHeight
 	}
 
-	return totalHeight-l.offsetLine <= l.height
+	return totalHeight <= l.height
 }
 
 // SetReverse shows the list in reverse order.

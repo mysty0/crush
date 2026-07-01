@@ -141,6 +141,30 @@ func TestList_RemoveItem_DropsEntry(t *testing.T) {
 	require.Equal(t, 2, b.renderHits, "re-added item must re-render")
 }
 
+// TestList_AtBottom_TallItemStraddlingViewport covers a regression
+// where AtBottom() returned false right after ScrollToBottom() when
+// the item at the scroll offset is taller than the viewport and is
+// followed by another (smaller) item — e.g. a long tool-output
+// message followed by a trailing info footer. The early-exit
+// optimization in AtBottom() compared the raw accumulated height to
+// the viewport height without accounting for offsetLine, so it
+// could report "not at bottom" for a position ScrollToBottom() had
+// just placed the list at. This broke chat auto-follow: after
+// scrolling through history and back down, follow mode would never
+// re-engage past a tall message.
+func TestList_AtBottom_TallItemStraddlingViewport(t *testing.T) {
+	t.Parallel()
+
+	tall := newTrackedItem("tall", strings.Repeat("line\n", 25), false) // 26 lines
+	footer := newTrackedItem("footer", "footer", false)                 // 1 line
+
+	l := NewList(tall, footer)
+	l.SetSize(40, 20) // viewport shorter than the tall item
+
+	l.ScrollToBottom()
+	require.True(t, l.AtBottom(), "must report at bottom immediately after ScrollToBottom")
+}
+
 // TestList_FrozenItem_NotReRendered covers §4.5.1: items that report
 // Finished() == true on entry creation are marked frozen after the
 // first render and are never re-rendered until width change or
