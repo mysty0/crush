@@ -441,6 +441,12 @@ func (m *Chat) AtBottom() bool {
 	return m.list.AtBottom()
 }
 
+// Dragging returns whether the mouse button is currently held down over
+// the chat view (i.e. a text-selection drag is in progress).
+func (m *Chat) Dragging() bool {
+	return m.mouseDown
+}
+
 // Follow returns whether the chat view is in follow mode (auto-scroll to
 // bottom on new messages).
 func (m *Chat) Follow() bool {
