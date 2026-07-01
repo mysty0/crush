@@ -65,6 +65,43 @@ type Chat struct {
 	mouseDragX    int // Current X in item content
 	mouseDragY    int // Current Y in item
 
+	// Keyboard visual-selection mode ("v"/"V", vim-style). Active
+	// selection is single-item scoped: kbVisualItem identifies which item,
+	// and the anchor/cursor track a position within its rendered lines
+	// (content-space: line index + display-column, both 0-indexed,
+	// pointing AT a character per vim cursor semantics). See
+	// chat_visual.go.
+	//
+	// Entering with "v" starts in a cursor-only sub-state (kbSelecting
+	// false): movement repositions the cursor — and the anchor tracks
+	// right along with it, so the highlight is always just the single
+	// character under the cursor, acting as a visible "normal mode"
+	// cursor block. Pressing "v" again locks the anchor in place
+	// (kbSelecting true) and subsequent movement grows the selection
+	// from there, matching vim's v-then-move flow. Entering with "V"
+	// (line-wise) skips the cursor-only stage and starts selecting
+	// immediately, since a single line is already a meaningful default
+	// selection.
+	kbVisualActive bool
+	kbVisualLine   bool // true = "V" (line-wise) mode
+	kbSelecting    bool // true once the anchor is locked and growing
+	kbVisualItem   int
+	kbAnchorLine   int
+	kbAnchorCol    int
+	kbCursorLine   int
+	kbCursorCol    int
+
+	// cursorItem/cursorLine/cursorCol remember the last known text
+	// position within a message (content-space, same as the kb* fields
+	// above) — set by a single mouse click, and kept in sync while
+	// keyboard visual-selection mode moves the cursor. EnterVisual reads
+	// this so "v"/"V" starts from wherever the user last pointed instead
+	// of always resetting to the top of the message. cursorItem is -1
+	// when no position has been recorded yet.
+	cursorItem int
+	cursorLine int
+	cursorCol  int
+
 	// Click tracking for double/triple clicks
 	lastClickTime time.Time
 	lastClickX    int
@@ -129,6 +166,7 @@ func NewChat(com *common.Common, scrollbarMode string) *Chat {
 	c.list = l
 	c.mouseDownItem = -1
 	c.mouseDragItem = -1
+	c.cursorItem = -1
 	return c
 }
 
@@ -733,6 +771,16 @@ func (m *Chat) ScrollSelectedShellHorizontal(delta int) {
 // HandleKeyMsg handles key events for the chat component.
 func (m *Chat) HandleKeyMsg(key tea.KeyMsg) (bool, tea.Cmd) {
 	if m.list.Focused() {
+		switch key.String() {
+		case "v":
+			if m.EnterVisual(false) {
+				return true, nil
+			}
+		case "V":
+			if m.EnterVisual(true) {
+				return true, nil
+			}
+		}
 		if handler, ok := m.list.SelectedItem().(chat.KeyEventHandler); ok {
 			return handler.HandleKeyEvent(key)
 		}
@@ -789,6 +837,13 @@ func (m *Chat) HandleMouseDown(x, y int) (bool, tea.Cmd) {
 		m.mouseDragItem = itemIdx
 		m.mouseDragX = x
 		m.mouseDragY = itemY
+
+		// Remember where the click landed in content space so a later
+		// "v"/"V" (EnterVisual) starts from this position instead of
+		// always resetting to the top of the message.
+		m.cursorItem = itemIdx
+		m.cursorLine = itemY
+		m.cursorCol = max(x-chat.MessageLeftPaddingTotal, 0)
 
 		// Schedule delayed click action (e.g., expansion) after a short delay.
 		// If a double-click occurs, the clickID will be invalidated.
@@ -978,6 +1033,10 @@ func (m *Chat) applyHighlightRange(idx, selectedIdx int, item list.Item) list.It
 
 // getHighlightRange returns the current highlight range.
 func (m *Chat) getHighlightRange() (startItemIdx, startLine, startCol, endItemIdx, endLine, endCol int) {
+	if m.kbVisualActive {
+		return m.keyboardHighlightRange()
+	}
+
 	if m.mouseDownItem < 0 {
 		return -1, -1, -1, -1, -1, -1
 	}

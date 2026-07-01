@@ -2116,6 +2116,20 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 		return m.handleDialogMsg(msg)
 	}
 
+	// Keyboard visual-selection mode ("v"/"V") takes full priority over
+	// normal chat navigation while active: movement, word-motion, and
+	// yank keys drive the in-message selection cursor instead of
+	// switching messages or scrolling.
+	if m.chat.InVisualMode() {
+		handled, cmd := m.chat.HandleVisualKeyMsg(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if handled {
+			return tea.Batch(cmds...)
+		}
+	}
+
 	// Handle cancel key when agent is busy.
 	if key.Matches(msg, m.keyMap.Chat.Cancel) {
 		if m.isAgentBusy() {
