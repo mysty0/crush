@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/tmux"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/ui/util"
@@ -104,6 +105,40 @@ func (m *UI) reportCurrentSession(sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		if err := m.com.Workspace.SetCurrentSession(context.Background(), sessionID); err != nil {
 			slog.Debug("Failed to report current session", "session_id", sessionID, "error", err)
+		}
+		return nil
+	}
+}
+
+// syncTmuxSession updates tmux pane user options with the current
+// session's ID and title, when tmux integration is enabled and Crush is
+// running inside tmux. This lets external tooling (e.g. a
+// tmux-resurrect restore hook) relaunch Crush attached to the same
+// session after a tmux server restart. The call is fire-and-forget:
+// errors are logged at debug and never surfaced to the user.
+func (m *UI) syncTmuxSession() tea.Cmd {
+	if m.session == nil {
+		return nil
+	}
+	cfg := m.com.Config()
+	if cfg == nil || cfg.Options == nil || !cfg.Options.TmuxIntegration {
+		return nil
+	}
+	if !tmux.Available() {
+		return nil
+	}
+	sessionID, title := m.session.ID, m.session.Title
+	cwd := m.com.Workspace.WorkingDir()
+	return func() tea.Msg {
+		ctx := context.Background()
+		if err := tmux.SetSessionID(ctx, sessionID); err != nil {
+			slog.Debug("Failed to set tmux session id", "error", err)
+		}
+		if err := tmux.SetSessionTitle(ctx, title); err != nil {
+			slog.Debug("Failed to set tmux session title", "error", err)
+		}
+		if err := tmux.RecordSession(ctx, cwd, sessionID, title); err != nil {
+			slog.Debug("Failed to record tmux session mapping", "error", err)
 		}
 		return nil
 	}

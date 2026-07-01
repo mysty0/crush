@@ -531,6 +531,11 @@
           },
           "type": "array",
           "description": "List of skill names to disable and hide from the agent"
+        },
+        "tmux_integration": {
+          "type": "boolean",
+          "description": "Sync the active session ID and title into tmux pane user options (@crush_session_id, @crush_session_title) for external tooling such as session-restore scripts. Only takes effect when running inside tmux.",
+          "default": false
         }
       },
       "additionalProperties": false,

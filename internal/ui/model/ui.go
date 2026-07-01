@@ -632,6 +632,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.session = msg.session
 		m.sessionFiles = msg.files
 		cmds = append(cmds, m.startLSPs(msg.lspFilePaths()))
+		if cmd := m.syncTmuxSession(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		msgs, err := m.com.Workspace.ListMessages(context.Background(), m.session.ID)
 		if err != nil {
 			cmds = append(cmds, util.ReportError(err))
@@ -719,7 +722,13 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.session != nil && msg.Payload.ID == m.session.ID {
 			prevHasInProgress := hasInProgressTodo(m.session.Todos)
 			prevPillsHeight := m.pillsAreaHeight()
+			prevTitle := m.session.Title
 			m.session = &msg.Payload
+			if m.session.Title != prevTitle {
+				if cmd := m.syncTmuxSession(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
 			if !prevHasInProgress && hasInProgressTodo(m.session.Todos) {
 				m.todoIsSpinning = true
 				cmds = append(cmds, m.todoSpinner.Tick)

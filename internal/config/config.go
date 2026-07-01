@@ -297,6 +297,7 @@ type Options struct {
 	DisableNotifications      bool         `json:"disable_notifications,omitempty" jsonschema:"description=Deprecated: Use notification_style instead. Disable desktop notifications,default=false"`
 	NotificationStyle         string       `json:"notification_style,omitempty" jsonschema:"description=Notification style to use. Options: auto (default), native, osc, bell, disabled. Auto selects based on environment: native for local sessions, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
 	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
+	TmuxIntegration           bool         `json:"tmux_integration,omitempty" jsonschema:"description=Sync the active session ID and title into tmux pane user options (@crush_session_id\\, @crush_session_title) for external tooling such as session-restore scripts. Only takes effect when running inside tmux.,default=false"`
 }
 
 type MCPs map[string]MCPConfig
