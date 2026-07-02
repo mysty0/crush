@@ -98,6 +98,9 @@ type ToolRenderOpts struct {
 	Compact         bool
 	IsSpinning      bool
 	Status          ToolStatus
+	// PartialOutput holds incremental output streamed while the tool is
+	// still running (before Result is set).
+	PartialOutput string
 }
 
 // IsPending returns true if the tool call is still pending (not finished and
@@ -158,6 +161,9 @@ type baseToolMessageItem struct {
 	sty             *styles.Styles
 	anim            *anim.Anim
 	expandedContent bool
+	// partialOutput holds incremental output streamed while the tool is
+	// still running, shown until the final result arrives.
+	partialOutput string
 }
 
 var _ Expandable = (*baseToolMessageItem)(nil)
@@ -287,6 +293,18 @@ func (t *baseToolMessageItem) ID() string {
 	return t.toolCall.ID
 }
 
+// SetPartialOutput records incremental output streamed while the tool is
+// still running and invalidates the render cache so it shows immediately.
+// It is a no-op once the tool has a final result.
+func (t *baseToolMessageItem) SetPartialOutput(output string) {
+	if t.result != nil || t.partialOutput == output {
+		return
+	}
+	t.partialOutput = output
+	t.clearCache()
+	t.Bump()
+}
+
 // StartAnimation starts the assistant message animation if it should be spinning.
 func (t *baseToolMessageItem) StartAnimation() tea.Cmd {
 	if !t.isSpinning() {
@@ -333,6 +351,7 @@ func (t *baseToolMessageItem) RawRender(width int) string {
 			Compact:         t.isCompact,
 			IsSpinning:      t.isSpinning(),
 			Status:          t.computeStatus(),
+			PartialOutput:   t.partialOutput,
 		})
 
 		// Prepend hook indicator if hooks ran for this tool call.
@@ -651,6 +670,14 @@ func toolOutputPlainContent(sty *styles.Styles, content string, width int, expan
 		}
 		ln = " " + ln
 		if lipgloss.Width(ln) > width {
+			if expanded {
+				// When expanded, wrap long lines onto multiple rows so
+				// the full content is readable instead of being cut off.
+				for _, wrapped := range strings.Split(ansi.Hardwrap(ln, width, false), "\n") {
+					out = append(out, sty.Tool.ContentLine.Width(width).Render(wrapped))
+				}
+				continue
+			}
 			ln = ansi.Truncate(ln, width, "…")
 		}
 		out = append(out, sty.Tool.ContentLine.Width(width).Render(ln))

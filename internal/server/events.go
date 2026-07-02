@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/backend"
@@ -118,6 +119,15 @@ func wrapEvent(ev any) *pubsub.Payload {
 		return envelope(pubsub.PayloadTypeSkillsEvent, pubsub.Event[proto.SkillsEvent]{
 			Type:    e.Type,
 			Payload: skillsEventToProto(e.Payload),
+		})
+	case pubsub.Event[agenttools.BashProgressEvent]:
+		return envelope(pubsub.PayloadTypeBashProgress, pubsub.Event[proto.BashProgress]{
+			Type: e.Type,
+			Payload: proto.BashProgress{
+				SessionID:  e.Payload.SessionID,
+				ToolCallID: e.Payload.ToolCallID,
+				Output:     e.Payload.Output,
+			},
 		})
 	default:
 		slog.Warn("Unrecognized event type for SSE wrapping", "type", fmt.Sprintf("%T", ev))

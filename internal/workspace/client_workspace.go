@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/config"
@@ -790,6 +791,15 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 		return pubsub.Event[skills.Event]{
 			Type:    e.Type,
 			Payload: skills.Event{States: states},
+		}
+	case pubsub.Event[proto.BashProgress]:
+		return pubsub.Event[agenttools.BashProgressEvent]{
+			Type: e.Type,
+			Payload: agenttools.BashProgressEvent{
+				SessionID:  e.Payload.SessionID,
+				ToolCallID: e.Payload.ToolCallID,
+				Output:     e.Payload.Output,
+			},
 		}
 	default:
 		slog.Warn("Unknown event type in translateEvent", "type", fmt.Sprintf("%T", ev))

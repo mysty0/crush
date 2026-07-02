@@ -245,13 +245,46 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				}
 			}
 
+			// onBlocked turns a default-banned command (e.g. curl, wget) into a
+			// permission prompt instead of an outright rejection. In skip/YOLO
+			// mode permissions.Request returns true immediately, so banned
+			// commands run without prompting; otherwise the user gets the
+			// standard Allow / Allow-for-session / Deny prompt, and choosing
+			// "Allow for session" lifts the ban for that command for the rest
+			// of the session.
+			onBlocked := func(blockCtx context.Context, args []string) error {
+				if len(args) == 0 {
+					return nil
+				}
+				cmd := args[0]
+				granted, err := permissions.Request(
+					blockCtx,
+					permission.CreatePermissionRequest{
+						SessionID:   sessionID,
+						Path:        cmd,
+						ToolCallID:  call.ID + "-blocked-" + cmd,
+						ToolName:    BashToolName,
+						Action:      "execute-blocked",
+						Description: fmt.Sprintf("The command %q is blocked by default for safety. Allow it to run?", cmd),
+						Params:      BashPermissionsParams(params),
+					},
+				)
+				if err != nil {
+					return err
+				}
+				if !granted {
+					return fmt.Errorf("command is not allowed: %q", cmd)
+				}
+				return nil
+			}
+
 			// If explicitly requested as background, start immediately with detached context
 			if params.RunInBackground {
 				startTime := time.Now()
 				bgManager := shell.GetBackgroundShellManager()
 				bgManager.Cleanup()
 				// Use background context so it continues after tool returns
-				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description)
+				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), onBlocked, params.Command, params.Description)
 				if err != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("error starting background shell: %w", err)
 				}
@@ -306,7 +339,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			// Start with detached context so it can survive if moved to background
 			bgManager := shell.GetBackgroundShellManager()
 			bgManager.Cleanup()
-			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description)
+			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), onBlocked, params.Command, params.Description)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("error starting shell: %w", err)
 			}
@@ -331,6 +364,9 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 					if done {
 						break waitLoop
 					}
+					// Stream accumulated output so the UI can render it
+					// live while the command is still running.
+					PublishBashProgress(sessionID, call.ID, formatOutput(stdout, stderr, nil))
 				case <-timeout:
 					stdout, stderr, done, execErr = bgShell.GetOutput()
 					break waitLoop

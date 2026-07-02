@@ -44,6 +44,9 @@ type RunOptions struct {
 	// BlockFuncs is an optional list of deny-list matchers applied before
 	// each command reaches the exec layer. nil disables blocking entirely.
 	BlockFuncs []BlockFunc
+	// OnBlocked, when set, is consulted whenever a command matches a
+	// BlockFunc, and can allow it through or reject it. nil hard-blocks.
+	OnBlocked BlockedFunc
 	// TermWidth is the terminal width in columns for PTY execution.
 	// Zero uses a default of 200.
 	TermWidth int
@@ -84,7 +87,7 @@ func Run(ctx context.Context, opts RunOptions) (err error) {
 		return fmt.Errorf("could not parse command: %w", err)
 	}
 
-	runner, err := newRunner(opts.Cwd, opts.Env, opts.Stdin, stdout, stderr, opts.BlockFuncs)
+	runner, err := newRunner(opts.Cwd, opts.Env, opts.Stdin, stdout, stderr, opts.BlockFuncs, opts.OnBlocked)
 	if err != nil {
 		return fmt.Errorf("could not run command: %w", err)
 	}
@@ -183,14 +186,14 @@ func RunAndCapturePTY(ctx context.Context, opts RunOptions) (CaptureResult, erro
 // newRunner constructs an [interp.Runner] configured with the standard
 // Crush handler stack. Shared by the stateless [Run] entrypoint and the
 // stateful [Shell] so the two surfaces cannot drift.
-func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writer, blockFuncs []BlockFunc) (*interp.Runner, error) {
+func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writer, blockFuncs []BlockFunc, onBlocked BlockedFunc) (*interp.Runner, error) {
 	env = withNonInteractiveEnv(env)
 	return interp.New(
 		interp.StdIO(stdin, stdout, stderr),
 		interp.Interactive(false),
 		interp.Env(expand.ListEnviron(env...)),
 		interp.Dir(cwd),
-		execHandlerOption(blockFuncs),
+		execHandlerOption(blockFuncs, onBlocked),
 	)
 }
 
@@ -204,10 +207,10 @@ func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writ
 // isolation. Without isolation, shells like zsh that set up job control
 // when sourcing framework files can send SIGINT/SIGTERM to Crush's process
 // group and crash the parent.
-func execHandlerOption(blockFuncs []BlockFunc) interp.RunnerOption {
+func execHandlerOption(blockFuncs []BlockFunc, onBlocked BlockedFunc) interp.RunnerOption {
 	base := processGroupExecHandler(defaultKillTimeout)
 	handler := base
-	for _, mw := range slices.Backward(standardHandlers(blockFuncs)) {
+	for _, mw := range slices.Backward(standardHandlers(blockFuncs, onBlocked)) {
 		handler = mw(handler)
 	}
 	// ExecHandlers always appends DefaultExecHandler which lacks process
@@ -294,11 +297,11 @@ func withoutHerdrEnv(env []string) []string {
 //     script exec's rather than the outer path-prefixed wrapper;
 //  3. block list;
 //  4. optional Go coreutils (only when useGoCoreUtils is on).
-func standardHandlers(blockFuncs []BlockFunc) []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+func standardHandlers(blockFuncs []BlockFunc, onBlocked BlockedFunc) []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	handlers := []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc{
 		builtinHandler(),
-		scriptDispatchHandler(blockFuncs),
-		blockHandler(blockFuncs),
+		scriptDispatchHandler(blockFuncs, onBlocked),
+		blockHandler(blockFuncs, onBlocked),
 	}
 	if useGoCoreUtils {
 		handlers = append(handlers, coreutils.ExecHandler)
@@ -327,8 +330,11 @@ func builtinHandler() func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 
 // blockHandler returns middleware that rejects commands matched by any of
 // the provided [BlockFunc]s before they reach the underlying exec path.
-// A nil or empty blockFuncs slice is a no-op.
-func blockHandler(blockFuncs []BlockFunc) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+// A nil or empty blockFuncs slice is a no-op. When a command is matched and
+// onBlocked is non-nil, onBlocked decides the outcome: returning nil lets the
+// command run (e.g. the user granted permission), a non-nil error blocks it.
+// A nil onBlocked rejects matched commands with the default error.
+func blockHandler(blockFuncs []BlockFunc, onBlocked BlockedFunc) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		return func(ctx context.Context, args []string) error {
 			if len(args) == 0 {
@@ -336,6 +342,12 @@ func blockHandler(blockFuncs []BlockFunc) func(next interp.ExecHandlerFunc) inte
 			}
 			for _, blockFunc := range blockFuncs {
 				if blockFunc(args) {
+					if onBlocked != nil {
+						if err := onBlocked(ctx, args); err != nil {
+							return err
+						}
+						return next(ctx, args)
+					}
 					return fmt.Errorf("command is not allowed for security reasons: %q", args[0])
 				}
 			}

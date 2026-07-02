@@ -40,13 +40,35 @@ type BashToolRenderContext struct{}
 // RenderTool implements the [ToolRenderer] interface.
 func (b *BashToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
-	if opts.IsPending() {
-		return pendingTool(sty, "Bash", opts.Anim, opts.Compact)
-	}
 
 	var params tools.BashParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
 		params.Command = "failed to parse command"
+	}
+
+	// While the command is still running (no result yet), show the
+	// command header plus any output streamed so far so the user sees
+	// progress in real time. The tool call is marked Finished as soon as
+	// its input is parsed — well before execution completes — so we key
+	// this on the absence of a result rather than IsPending().
+	if !opts.HasResult() && !opts.IsCanceled() {
+		if opts.Compact || params.Command == "" {
+			return pendingTool(sty, "Bash", opts.Anim, opts.Compact)
+		}
+		cmd := strings.ReplaceAll(params.Command, "\n", " ")
+		cmd = strings.ReplaceAll(cmd, "\t", "    ")
+		header := toolHeader(sty, opts.Status, "Bash", cappedWidth, opts, cmd)
+		if opts.PartialOutput == "" {
+			// No output yet: fall back to the standard pending spinner.
+			return pendingTool(sty, "Bash", opts.Anim, opts.Compact)
+		}
+		// Output is streaming in: show the header + output. The header
+		// already carries a status icon, so we deliberately do NOT append
+		// a second "Bash" spinner line here — doing so rendered what
+		// looked like a duplicate, stuck Bash item beneath the output.
+		bodyWidth := cappedWidth - toolBodyLeftPaddingTotal
+		body := sty.Tool.Body.Render(toolOutputPlainContent(sty, opts.PartialOutput, bodyWidth, opts.ExpandedContent))
+		return joinToolParts(header, body)
 	}
 
 	// Check if this is a background job.

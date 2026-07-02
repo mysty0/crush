@@ -1,6 +1,8 @@
 package shell
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -108,6 +110,58 @@ func TestCommandBlocking(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOnBlockedEscalation(t *testing.T) {
+	blockCurl := []BlockFunc{
+		func(args []string) bool { return len(args) > 0 && args[0] == "curl" },
+	}
+
+	t.Run("onBlocked allowing lets the command run", func(t *testing.T) {
+		var seen []string
+		sh := NewShell(&Options{
+			WorkingDir: t.TempDir(),
+			BlockFuncs: blockCurl,
+			OnBlocked: func(_ context.Context, args []string) error {
+				seen = args
+				return nil // grant
+			},
+		})
+
+		// curl isn't installed in the test env, so we only assert that the
+		// error is NOT the security block — i.e. the command was allowed
+		// through to exec.
+		_, _, err := sh.Exec(t.Context(), "curl https://example.com")
+		if err != nil && strings.Contains(err.Error(), "not allowed for security reasons") {
+			t.Fatalf("command was hard-blocked despite onBlocked granting: %v", err)
+		}
+		require.Equal(t, []string{"curl", "https://example.com"}, seen)
+	})
+
+	t.Run("onBlocked denying blocks the command with its error", func(t *testing.T) {
+		sh := NewShell(&Options{
+			WorkingDir: t.TempDir(),
+			BlockFuncs: blockCurl,
+			OnBlocked: func(_ context.Context, args []string) error {
+				return fmt.Errorf("denied by user: %q", args[0])
+			},
+		})
+
+		_, _, err := sh.Exec(t.Context(), "curl https://example.com")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "denied by user")
+	})
+
+	t.Run("nil onBlocked preserves the default hard block", func(t *testing.T) {
+		sh := NewShell(&Options{
+			WorkingDir: t.TempDir(),
+			BlockFuncs: blockCurl,
+		})
+
+		_, _, err := sh.Exec(t.Context(), "curl https://example.com")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not allowed for security reasons")
+	})
 }
 
 func TestArgumentsBlocker(t *testing.T) {

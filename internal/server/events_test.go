@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -179,4 +180,33 @@ func TestRunCompleteToProto_Error(t *testing.T) {
 	require.NoError(t, json.Unmarshal(env.Payload, &decoded))
 	require.Equal(t, "context canceled", decoded.Payload.Error)
 	require.True(t, decoded.Payload.Cancelled)
+}
+
+// TestBashProgressToProto_RoundTrip verifies that incremental bash output
+// events survive the SSE envelope so the server-mode TUI can stream
+// foreground command output live. Without this the event is dropped at
+// the client/server boundary and output only appears once the command
+// finishes.
+func TestBashProgressToProto_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	src := pubsub.Event[agenttools.BashProgressEvent]{
+		Type: pubsub.UpdatedEvent,
+		Payload: agenttools.BashProgressEvent{
+			SessionID:  "S",
+			ToolCallID: "tc-1",
+			Output:     "line one\nline two",
+		},
+	}
+
+	env := wrapEvent(src)
+	require.NotNil(t, env)
+	require.Equal(t, pubsub.PayloadTypeBashProgress, env.Type)
+
+	var decoded pubsub.Event[proto.BashProgress]
+	require.NoError(t, json.Unmarshal(env.Payload, &decoded))
+	require.Equal(t, pubsub.UpdatedEvent, decoded.Type)
+	require.Equal(t, "S", decoded.Payload.SessionID)
+	require.Equal(t, "tc-1", decoded.Payload.ToolCallID)
+	require.Equal(t, "line one\nline two", decoded.Payload.Output)
 }

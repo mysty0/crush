@@ -61,6 +61,12 @@ func (noopLogger) InfoPersist(msg string, keysAndValues ...any) {}
 // BlockFunc is a function that determines if a command should be blocked
 type BlockFunc func(args []string) bool
 
+// BlockedFunc is called when a command is matched by a [BlockFunc]. Returning
+// nil lets the command run anyway (e.g. after the user grants permission); a
+// non-nil error blocks it with that error. A nil BlockedFunc means blocked
+// commands are rejected outright with the default "not allowed" error.
+type BlockedFunc func(ctx context.Context, args []string) error
+
 // Shell provides cross-platform shell execution with optional state persistence
 type Shell struct {
 	env        []string
@@ -68,6 +74,7 @@ type Shell struct {
 	mu         sync.Mutex
 	logger     Logger
 	blockFuncs []BlockFunc
+	onBlocked  BlockedFunc
 }
 
 // Options for creating a new shell
@@ -76,6 +83,10 @@ type Options struct {
 	Env        []string
 	Logger     Logger
 	BlockFuncs []BlockFunc
+	// OnBlocked, when set, is consulted whenever a command matches a
+	// BlockFunc. It can allow the command through (return nil) or reject it
+	// (return an error). Nil preserves the default hard-block behavior.
+	OnBlocked BlockedFunc
 }
 
 // NewShell creates a new shell instance with the given options
@@ -112,6 +123,7 @@ func NewShell(opts *Options) *Shell {
 		env:        env,
 		logger:     logger,
 		blockFuncs: opts.BlockFuncs,
+		onBlocked:  opts.OnBlocked,
 	}
 }
 
@@ -241,7 +253,7 @@ func splitArgsFlags(parts []string) (args []string, flags []string) {
 // newInterp creates a new interpreter with the current shell state. A nil
 // stdin is equivalent to an empty input stream.
 func (s *Shell) newInterp(stdin io.Reader, stdout, stderr io.Writer) (*interp.Runner, error) {
-	return newRunner(s.cwd, s.env, stdin, stdout, stderr, s.blockFuncs)
+	return newRunner(s.cwd, s.env, stdin, stdout, stderr, s.blockFuncs, s.onBlocked)
 }
 
 // updateShellFromRunner updates the shell from the interpreter after execution.

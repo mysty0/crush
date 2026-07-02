@@ -1033,6 +1033,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textarea.MoveToEnd()
 		m.syncBangModeFromTextarea()
 		cmds = append(cmds, m.updateTextareaWithPrevHeight(msg, prevHeight))
+	case pubsub.Event[agenttools.BashProgressEvent]:
+		if item := m.chat.MessageItem(msg.Payload.ToolCallID); item != nil {
+			if streamer, ok := item.(chat.PartialOutputSetter); ok {
+				streamer.SetPartialOutput(msg.Payload.Output)
+				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+		}
 	case shellStreamMsg:
 		if item := m.chat.MessageItem(msg.PendingID); item != nil {
 			if shellItem, ok := item.(*chat.ShellItem); ok {
@@ -1304,6 +1313,12 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 		}
 	case message.Assistant:
 		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil)
+		// Drop any items that already exist in the chat. Tool items are
+		// keyed by tool-call ID, and updateSessionMessage may have
+		// already created them from an earlier UpdatedEvent that arrived
+		// before this CreatedEvent; re-adding them here would leave an
+		// orphaned duplicate (e.g. a bash item stuck on its spinner).
+		items = m.dropExistingItems(items)
 		for _, item := range items {
 			if animatable, ok := item.(chat.Animatable); ok {
 				if cmd := animatable.StartAnimation(); cmd != nil {
@@ -1362,6 +1377,19 @@ func (m *UI) handleClickFocus(msg tea.MouseClickMsg) (cmd tea.Cmd) {
 		m.chat.Focus()
 	}
 	return cmd
+}
+
+// dropExistingItems filters out items whose ID is already present in the
+// chat list, so appending them would not create a visible duplicate.
+func (m *UI) dropExistingItems(items []chat.MessageItem) []chat.MessageItem {
+	filtered := items[:0]
+	for _, item := range items {
+		if m.chat.MessageItem(item.ID()) != nil {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
 }
 
 // updateSessionMessage updates an existing message in the current session in
