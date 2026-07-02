@@ -262,7 +262,7 @@ func NewToolMessageItem(
 	default:
 		if IsDockerMCPTool(toolCall.Name) {
 			item = NewDockerMCPToolMessageItem(sty, toolCall, result, canceled)
-		} else if strings.HasPrefix(toolCall.Name, "mcp_") {
+		} else if strings.HasPrefix(toolCall.Name, "mcp__") {
 			item = NewMCPToolMessageItem(sty, toolCall, result, canceled)
 		} else {
 			item = NewGenericToolMessageItem(sty, toolCall, result, canceled)

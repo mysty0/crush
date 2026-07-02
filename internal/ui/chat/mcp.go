@@ -32,12 +32,14 @@ type MCPToolRenderContext struct{}
 // RenderTool implements the [ToolRenderer] interface.
 func (b *MCPToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
-	toolNameParts := strings.SplitN(opts.ToolCall.Name, "_", 3)
-	if len(toolNameParts) != 3 {
+	// Wire format is mcp__<server>__<tool>; strip the prefix then split the
+	// server and tool on the __ delimiter.
+	mcpServerTool := strings.SplitN(strings.TrimPrefix(opts.ToolCall.Name, "mcp__"), "__", 2)
+	if len(mcpServerTool) != 2 {
 		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid tool name"}, cappedWidth)
 	}
-	mcpName := humanizedToolName(toolNameParts[1])
-	toolName := humanizedToolName(toolNameParts[2])
+	mcpName := humanizedToolName(mcpServerTool[0])
+	toolName := humanizedToolName(mcpServerTool[1])
 
 	mcpName = sty.Tool.MCPName.Render(mcpName)
 	toolName = sty.Tool.MCPToolName.Render(toolName)

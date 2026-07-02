@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
@@ -12,12 +13,14 @@ import (
 )
 
 // whitelistDockerTools contains Docker MCP tools that don't require permission.
+// Names use the Claude Code fully-qualified format (mcp__<server>__<tool>) so
+// they match the wire names produced by Tool.Name.
 var whitelistDockerTools = []string{
-	"mcp_docker_mcp-find",
-	"mcp_docker_mcp-add",
-	"mcp_docker_mcp-remove",
-	"mcp_docker_mcp-config-set",
-	"mcp_docker_code-mode",
+	"mcp__docker__mcp-find",
+	"mcp__docker__mcp-add",
+	"mcp__docker__mcp-remove",
+	"mcp__docker__mcp-config-set",
+	"mcp__docker__code-mode",
 }
 
 // GetMCPTools gets all the currently available MCP tools.
@@ -56,7 +59,30 @@ func (m *Tool) ProviderOptions() fantasy.ProviderOptions {
 }
 
 func (m *Tool) Name() string {
-	return fmt.Sprintf("mcp_%s_%s", m.mcpName, m.tool.Name)
+	// Match Claude Code's fully-qualified MCP tool name exactly:
+	// mcp__<server>__<tool>, with each part normalized to the API-safe
+	// pattern ^[a-zA-Z0-9_-]{1,64}$. The subscription-OAuth endpoint
+	// fingerprints first-party Claude Code by these tool names; the single
+	// underscore form (mcp_<server>_<tool>) causes the request to be billed
+	// as a third-party app ("extra usage") instead of against the plan.
+	return fmt.Sprintf("mcp__%s__%s", normalizeNameForMCP(m.mcpName), normalizeNameForMCP(m.tool.Name))
+}
+
+// normalizeNameForMCP replaces any character outside ^[a-zA-Z0-9_-] with an
+// underscore, mirroring Claude Code's normalizeNameForMCP. This keeps MCP tool
+// names within Anthropic's ^[a-zA-Z0-9_-]{1,64}$ tool-name pattern.
+func normalizeNameForMCP(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 func (m *Tool) MCP() string {

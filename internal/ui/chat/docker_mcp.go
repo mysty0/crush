@@ -43,7 +43,7 @@ func (d *DockerMCPToolRenderContext) RenderTool(sty *styles.Styles, width int, o
 		params = make(map[string]any)
 	}
 
-	tool := strings.TrimPrefix(opts.ToolCall.Name, "mcp_"+config.DockerMCPName+"_")
+	tool := strings.TrimPrefix(opts.ToolCall.Name, "mcp__"+config.DockerMCPName+"__")
 
 	mainParam := opts.ToolCall.Input
 	extraArgs := map[string]string{}
@@ -279,5 +279,5 @@ func (d *DockerMCPToolRenderContext) makeCompactHeader(sty *styles.Styles, tool 
 
 // IsDockerMCPTool returns true if the tool name is a Docker MCP tool.
 func IsDockerMCPTool(name string) bool {
-	return strings.HasPrefix(name, "mcp_"+config.DockerMCPName+"_")
+	return strings.HasPrefix(name, "mcp__"+config.DockerMCPName+"__")
 }

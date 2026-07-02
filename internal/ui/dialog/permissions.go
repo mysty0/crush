@@ -506,12 +506,12 @@ func (p *Permissions) renderKeyValue(key, value string, width int) string {
 func (p *Permissions) renderToolName(width int) string {
 	toolName := p.permission.ToolName
 
-	// Check if this is an MCP tool (format: mcp_<mcpname>_<toolname>).
-	if strings.HasPrefix(toolName, "mcp_") {
-		parts := strings.SplitN(toolName, "_", 3)
-		if len(parts) == 3 {
-			mcpName := prettyName(parts[1])
-			toolPart := prettyName(parts[2])
+	// Check if this is an MCP tool (format: mcp__<mcpname>__<toolname>).
+	if strings.HasPrefix(toolName, "mcp__") {
+		parts := strings.SplitN(strings.TrimPrefix(toolName, "mcp__"), "__", 2)
+		if len(parts) == 2 {
+			mcpName := prettyName(parts[0])
+			toolPart := prettyName(parts[1])
 			toolName = fmt.Sprintf("%s %s %s", mcpName, styles.ArrowRightIcon, toolPart)
 		}
 	}
@@ -687,7 +687,7 @@ func (p *Permissions) renderDefaultContent(width int) string {
 	t := p.com.Styles
 	var content string
 	// do not add the description for mcp tools
-	if !strings.HasPrefix(p.permission.ToolName, "mcp_") {
+	if !strings.HasPrefix(p.permission.ToolName, "mcp__") {
 		content = p.permission.Description
 	}
 

@@ -753,8 +753,8 @@ func allToolNames() []string {
 		"TodoWrite",
 		"Read",
 		"Write",
-		"list_mcp_resources",
-		"read_mcp_resource",
+		"ListMcpResourcesTool",
+		"ReadMcpResourceTool",
 	}
 }
 

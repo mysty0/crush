@@ -23,7 +23,7 @@ type ListMCPResourcesPermissionsParams struct {
 	MCPName string `json:"mcp_name"`
 }
 
-const ListMCPResourcesToolName = "list_mcp_resources"
+const ListMCPResourcesToolName = "ListMcpResourcesTool"
 
 //go:embed list_mcp_resources.md
 var listMCPResourcesDescription string

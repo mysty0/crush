@@ -25,7 +25,7 @@ type ReadMCPResourcePermissionsParams struct {
 	URI     string `json:"uri"`
 }
 
-const ReadMCPResourceToolName = "read_mcp_resource"
+const ReadMCPResourceToolName = "ReadMcpResourceTool"
 
 //go:embed read_mcp_resource.md
 var readMCPResourceDescription string
