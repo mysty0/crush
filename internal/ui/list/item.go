@@ -38,6 +38,20 @@ type Item interface {
 	Finished() bool
 }
 
+// HeightEstimator is an optional interface for items that can cheaply
+// estimate their rendered height without performing a full (expensive)
+// Render. The list uses this for scrollbar math (TotalHeight/Offset) so
+// that opening a long conversation does not have to render every
+// off-screen item up front. The estimate need not be exact — it is
+// replaced by the true height as soon as the item is actually rendered
+// (i.e. scrolled into view). Visible items are always rendered exactly.
+type HeightEstimator interface {
+	// EstimatedHeight returns an approximate rendered height in lines
+	// for the given width. Cheaper is better; correctness of the
+	// scrollbar improves as items are scrolled into view.
+	EstimatedHeight(width int) int
+}
+
 // Versioned is a tiny embeddable helper that satisfies Item.Version()
 // and provides a Bump() method to call from every state-mutating
 // method. Items typically embed *Versioned alongside their other

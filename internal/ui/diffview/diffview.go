@@ -3,8 +3,10 @@ package diffview
 import (
 	"fmt"
 	"image/color"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
@@ -19,6 +21,15 @@ import (
 const (
 	leadingSymbolsSize = 2
 	lineNumPadding     = 1
+)
+
+// lexerCache memoizes chroma lexer lookups by file path across DiffView
+// instances. Matching a path against every registered lexer's filename
+// globs is expensive and previously dominated CPU when rendering many
+// diffs (e.g. loading a long session).
+var (
+	lexerCacheMu sync.RWMutex
+	lexerCache   = map[string]chroma.Lexer{}
 )
 
 type file struct {
@@ -801,6 +812,25 @@ func (dv *DiffView) getChromaLexer() chroma.Lexer {
 		return dv.cachedLexer
 	}
 
+	// Look up the lexer in the shared, process-wide cache first. A new
+	// DiffView is created per diff render, so its per-instance cache does
+	// not survive across the many diffs shown when e.g. loading a long
+	// session; matching a file name against every registered lexer
+	// (a filepath.Match per lexer) is expensive and dominated profiles.
+	// Key by extension (or base name) so diffs of different files sharing
+	// a language reuse the same lexer.
+	key := strings.ToLower(filepath.Ext(dv.before.path))
+	if key == "" {
+		key = strings.ToLower(filepath.Base(dv.before.path))
+	}
+	lexerCacheMu.RLock()
+	cached, ok := lexerCache[key]
+	lexerCacheMu.RUnlock()
+	if ok {
+		dv.cachedLexer = cached
+		return cached
+	}
+
 	l := lexers.Match(dv.before.path)
 	if l == nil {
 		l = lexers.Analyse(dv.before.content)
@@ -809,6 +839,9 @@ func (dv *DiffView) getChromaLexer() chroma.Lexer {
 		l = lexers.Fallback
 	}
 	dv.cachedLexer = chroma.Coalesce(l)
+	lexerCacheMu.Lock()
+	lexerCache[key] = dv.cachedLexer
+	lexerCacheMu.Unlock()
 	return dv.cachedLexer
 }
 

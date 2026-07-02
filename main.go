@@ -22,10 +22,19 @@ import (
 )
 
 func main() {
-	if os.Getenv("CRUSH_PROFILE") != "" {
+	if profile := os.Getenv("CRUSH_PROFILE"); profile != "" {
+		// Allow overriding the pprof listen address (default :6060 often
+		// collides with other tools like the Coder agent). Any value
+		// other than a bare "1"/"true" is treated as the listen address.
+		addr := "localhost:6060"
+		switch profile {
+		case "1", "true", "TRUE", "on":
+		default:
+			addr = profile
+		}
 		go func() {
-			slog.Info("Serving pprof at localhost:6060")
-			if httpErr := http.ListenAndServe("localhost:6060", nil); httpErr != nil {
+			slog.Info("Serving pprof", "addr", addr)
+			if httpErr := http.ListenAndServe(addr, nil); httpErr != nil {
 				slog.Error("Failed to pprof listen", "error", httpErr)
 			}
 		}()

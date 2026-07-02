@@ -307,12 +307,22 @@ func drawCachedBuffer(scr uv.Screen, area uv.Rectangle, buf uv.ScreenBuffer) {
 
 // SetSize sets the size of the chat view port.
 func (m *Chat) SetSize(width, height int) {
-	// Reserve space for scrollbar if content exceeds viewport height.
-	listWidth := width
-	if m.list.TotalHeight() > height {
-		listWidth = max(0, width-1)
+	// Reserve space for scrollbar if content exceeds the viewport height.
+	//
+	// Rendering every item is expensive for large sessions, and the list
+	// caches renders per width — so measuring at one width and then
+	// switching to another forces a full, throwaway re-render. To avoid
+	// that, measure first at the scrollbar-reserved (narrower) width.
+	// Narrower content is always at least as tall, so:
+	//   - if it still overflows, a scrollbar is needed and we keep this
+	//     width (the render cache is reused by the next Draw);
+	//   - if it fits, no scrollbar is needed and we widen to the full
+	//     width. This only re-renders in the cheap, small-content case.
+	narrowWidth := max(0, width-1)
+	m.list.SetSize(narrowWidth, height)
+	if m.list.TotalHeight() <= height {
+		m.list.SetSize(width, height)
 	}
-	m.list.SetSize(listWidth, height)
 	// Anchor to bottom if we were at the bottom.
 	if m.AtBottom() {
 		m.ScrollToBottom()

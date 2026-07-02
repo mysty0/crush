@@ -333,6 +333,26 @@ func (t *baseToolMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
 	return t.anim.Animate(msg)
 }
 
+// EstimatedHeight implements list.HeightEstimator. It cheaply estimates
+// the tool item's rendered height without invoking the (potentially
+// expensive) tool renderer, so the list can size its scrollbar without
+// rendering every off-screen tool call. Collapsed tool output is capped
+// at responseContextHeight lines, so the estimate is bounded and refined
+// to the exact height once the item is scrolled into view.
+func (t *baseToolMessageItem) EstimatedHeight(width int) int {
+	// Header line(s) plus, if there is a result, a bounded number of
+	// body lines (collapsed output is capped at responseContextHeight).
+	const headerLines = 1
+	if t.result == nil || t.result.Content == "" {
+		return headerLines + 1
+	}
+	bodyLines := strings.Count(t.result.Content, "\n") + 1
+	if bodyLines > responseContextHeight {
+		bodyLines = responseContextHeight + 1 // + truncation notice
+	}
+	return headerLines + bodyLines + 1
+}
+
 // RawRender implements [MessageItem].
 func (t *baseToolMessageItem) RawRender(width int) string {
 	toolItemWidth := width - MessageLeftPaddingTotal

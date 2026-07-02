@@ -206,6 +206,47 @@ func (a *AssistantMessageItem) ID() string {
 	return a.message.ID
 }
 
+// EstimatedHeight implements list.HeightEstimator. It cheaply estimates
+// the rendered height (in lines) from the raw content and reasoning text
+// without running the expensive markdown renderer, so the list can size
+// its scrollbar without rendering every off-screen message. The estimate
+// is refined to the exact height as soon as the item is scrolled into
+// view and actually rendered.
+func (a *AssistantMessageItem) EstimatedHeight(width int) int {
+	w := cappedMessageWidth(width)
+	if w <= 0 {
+		w = 80
+	}
+	content := a.message.Content().Text
+	thinking := a.message.ReasoningContent().Thinking
+	return estimateWrappedLines(content, w) + estimateWrappedLines(thinking, w) + 1
+}
+
+// estimateWrappedLines approximates how many terminal rows a block of
+// text occupies at the given width by counting newlines and adding wrap
+// rows for lines longer than the width. It intentionally trades accuracy
+// for speed.
+func estimateWrappedLines(text string, width int) int {
+	if text == "" {
+		return 0
+	}
+	if width <= 0 {
+		width = 80
+	}
+	lines := 0
+	for _, ln := range strings.Split(text, "\n") {
+		// Use rune count as a cheap width proxy; good enough for a
+		// scrollbar estimate that gets corrected on render.
+		n := len([]rune(ln))
+		if n <= width {
+			lines++
+		} else {
+			lines += (n + width - 1) / width
+		}
+	}
+	return lines
+}
+
 // RawRender implements [MessageItem].
 func (a *AssistantMessageItem) RawRender(width int) string {
 	cappedWidth := cappedMessageWidth(width)

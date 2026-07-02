@@ -175,11 +175,7 @@ func (l *List) TotalHeight() int {
 	}
 	total := 0
 	for idx := range l.items {
-		entry := l.renderItemEntry(idx)
-		if entry == nil {
-			continue
-		}
-		total += entry.height
+		total += l.itemHeightForSum(idx)
 		if l.gap > 0 && idx < len(l.items)-1 {
 			total += l.gap
 		}
@@ -189,12 +185,35 @@ func (l *List) TotalHeight() int {
 	return total
 }
 
+// itemHeightForSum returns a height for the item at idx suitable for
+// scrollbar math (TotalHeight / Offset). It never triggers a full
+// render: if the item has already been rendered its exact cached height
+// is used; otherwise a cheap estimate is used (falling back to a small
+// constant for items that do not implement HeightEstimator). This keeps
+// opening a long conversation from rendering every off-screen item.
+func (l *List) itemHeightForSum(idx int) int {
+	if idx < 0 || idx >= len(l.items) {
+		return 0
+	}
+	rawItem := l.items[idx]
+	if entry := l.cache[rawItem]; entry != nil && entry.width == l.width {
+		return entry.height
+	}
+	if est, ok := rawItem.(HeightEstimator); ok {
+		if h := est.EstimatedHeight(l.width); h > 0 {
+			return h
+		}
+	}
+	// Fallback for items without an estimator: assume a single line.
+	// They will be corrected to their true height once rendered.
+	return 1
+}
+
 // Offset returns the current scroll offset in lines from the top.
 func (l *List) Offset() int {
 	offset := 0
 	for idx := 0; idx < l.offsetIdx; idx++ {
-		item := l.getItem(idx)
-		offset += item.height
+		offset += l.itemHeightForSum(idx)
 		if l.gap > 0 && idx < len(l.items)-1 {
 			offset += l.gap
 		}
