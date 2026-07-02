@@ -31,7 +31,17 @@ func NewBashToolMessageItem(
 	result *message.ToolResult,
 	canceled bool,
 ) ToolMessageItem {
-	return newBaseToolMessageItem(sty, toolCall, result, &BashToolRenderContext{}, canceled)
+	t := &BashToolMessageItem{}
+	t.baseToolMessageItem = newBaseToolMessageItem(sty, toolCall, result, &BashToolRenderContext{}, canceled)
+	// The tool call is marked Finished as soon as its input is parsed —
+	// before the command actually runs — so the default spinning logic
+	// (!Finished) would freeze the spinner during execution. Keep spinning
+	// until a result arrives (or the turn is canceled) so the animation
+	// reflects that the command is still running.
+	t.spinningFunc = func(state SpinningState) bool {
+		return !state.HasResult() && !state.IsCanceled()
+	}
+	return t
 }
 
 // BashToolRenderContext renders bash tool messages.
@@ -58,14 +68,19 @@ func (b *BashToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 		cmd := strings.ReplaceAll(params.Command, "\n", " ")
 		cmd = strings.ReplaceAll(cmd, "\t", "    ")
 		header := toolHeader(sty, opts.Status, "Bash", cappedWidth, opts, cmd)
-		if opts.PartialOutput == "" {
-			// No output yet: fall back to the standard pending spinner.
-			return pendingTool(sty, "Bash", opts.Anim, opts.Compact)
+		// Keep the running animation next to the command header so the
+		// command line stays visible while it runs. We render just the
+		// bare animation (not a full "Bash" pending line) to avoid a
+		// second, duplicate Bash header.
+		if opts.Anim != nil {
+			if animView := opts.Anim.Render(); animView != "" {
+				header += " " + animView
+			}
 		}
-		// Output is streaming in: show the header + output. The header
-		// already carries a status icon, so we deliberately do NOT append
-		// a second "Bash" spinner line here — doing so rendered what
-		// looked like a duplicate, stuck Bash item beneath the output.
+		if opts.PartialOutput == "" {
+			return header
+		}
+		// Output is streaming in: show the header + output.
 		bodyWidth := cappedWidth - toolBodyLeftPaddingTotal
 		body := sty.Tool.Body.Render(toolOutputPlainContent(sty, opts.PartialOutput, bodyWidth, opts.ExpandedContent))
 		return joinToolParts(header, body)
