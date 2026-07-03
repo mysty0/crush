@@ -46,19 +46,22 @@ func (c *blockingCoordinator) RunAccepted(ctx context.Context, accept *agent.Acc
 	return nil, nil
 }
 
-func (c *blockingCoordinator) BeginAccepted(sessionID string) *agent.AcceptedRun { return nil }
-func (c *blockingCoordinator) Cancel(string)                                     {}
-func (c *blockingCoordinator) CancelAll()                                        {}
-func (c *blockingCoordinator) IsBusy() bool                                      { return false }
-func (c *blockingCoordinator) IsSessionBusy(string) bool                         { return false }
-func (c *blockingCoordinator) QueuedPrompts(string) int                          { return 0 }
-func (c *blockingCoordinator) QueuedPromptsList(string) []string                 { return nil }
-func (c *blockingCoordinator) ClearQueue(string)                                 {}
-func (c *blockingCoordinator) Summarize(context.Context, string) error           { return nil }
-func (c *blockingCoordinator) Model() agent.Model                                { return agent.Model{} }
-func (c *blockingCoordinator) UpdateModels(context.Context) error                { return nil }
-func (c *blockingCoordinator) GenerateTitle(context.Context, string, string)     {}
-func (c *blockingCoordinator) RegenerateTitle(context.Context, string) error     { return nil }
+func (c *blockingCoordinator) BeginAccepted(sessionID string) *agent.AcceptedRun    { return nil }
+func (c *blockingCoordinator) Cancel(string)                                        {}
+func (c *blockingCoordinator) CancelAll()                                           {}
+func (c *blockingCoordinator) IsBusy() bool                                         { return false }
+func (c *blockingCoordinator) IsSessionBusy(string) bool                            { return false }
+func (c *blockingCoordinator) QueuedPrompts(string) int                             { return 0 }
+func (c *blockingCoordinator) QueuedPromptsList(string) []string                    { return nil }
+func (c *blockingCoordinator) ClearQueue(string)                                    {}
+func (c *blockingCoordinator) Summarize(context.Context, string) error              { return nil }
+func (c *blockingCoordinator) Model() agent.Model                                   { return agent.Model{} }
+func (c *blockingCoordinator) UpdateModels(context.Context) error                   { return nil }
+func (c *blockingCoordinator) GenerateTitle(context.Context, string, string)        {}
+func (c *blockingCoordinator) RegenerateTitle(context.Context, string) error        { return nil }
+func (c *blockingCoordinator) SendToSubAgent(context.Context, string, string) error { return nil }
+
+func (c *blockingCoordinator) CancelSubAgent(string) {}
 
 // insertAgentWorkspace installs a synthetic workspace with the given
 // coordinator (or none) and a workspace run context, mirroring the

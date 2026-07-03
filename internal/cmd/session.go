@@ -16,6 +16,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
@@ -280,9 +281,9 @@ func runSessionShow(cmd *cobra.Command, args []string) error {
 
 	msgPtrs := messagePtrs(msgs)
 	if sessionShowJSON {
-		return outputSessionJSON(cmd.OutOrStdout(), sess, msgPtrs)
+		return outputSessionJSON(ctx, svc, cmd.OutOrStdout(), sess, msgPtrs)
 	}
-	return outputSessionHuman(ctx, svc.cfg, sess, msgPtrs)
+	return outputSessionHuman(ctx, svc, sess, msgPtrs)
 }
 
 func runSessionDelete(cmd *cobra.Command, args []string) error {
@@ -387,9 +388,9 @@ func runSessionLast(cmd *cobra.Command, _ []string) error {
 
 	msgPtrs := messagePtrs(msgs)
 	if sessionLastJSON {
-		return outputSessionJSON(cmd.OutOrStdout(), sess, msgPtrs)
+		return outputSessionJSON(ctx, svc, cmd.OutOrStdout(), sess, msgPtrs)
 	}
-	return outputSessionHuman(ctx, svc.cfg, sess, msgPtrs)
+	return outputSessionHuman(ctx, svc, sess, msgPtrs)
 }
 
 const (
@@ -405,7 +406,21 @@ func messagePtrs(msgs []message.Message) []*message.Message {
 	return ptrs
 }
 
-func outputSessionJSON(w io.Writer, sess session.Session, msgs []*message.Message) error {
+// maxSubAgentDepth bounds how many levels of nested sub-agent
+// conversations (e.g. an "agent" tool call whose transcript itself
+// contains another "agent" tool call) are followed and embedded. This
+// only guards against pathological/circular data; real conversations
+// rarely nest more than one or two levels deep.
+const maxSubAgentDepth = 8
+
+// isSubAgentToolName reports whether name is a tool that dispatches a
+// sub-agent turn with its own session (see agent.runSubAgent), whose
+// transcript should be discoverable from the parent session.
+func isSubAgentToolName(name string) bool {
+	return name == agent.AgentToolName || name == tools.AgenticFetchToolName
+}
+
+func outputSessionJSON(ctx context.Context, svc *sessionServices, w io.Writer, sess session.Session, msgs []*message.Message) error {
 	skills := extractSkillsFromMessages(msgs)
 	output := sessionShowOutput{
 		Meta: sessionShowMeta{
@@ -420,18 +435,7 @@ func outputSessionJSON(w io.Writer, sess session.Session, msgs []*message.Messag
 			TotalTokens:      sess.PromptTokens + sess.CompletionTokens,
 			Skills:           skills,
 		},
-		Messages: make([]sessionShowMessage, len(msgs)),
-	}
-
-	for i, msg := range msgs {
-		output.Messages[i] = sessionShowMessage{
-			ID:       msg.ID,
-			Role:     string(msg.Role),
-			Created:  time.Unix(msg.CreatedAt, 0).Format(time.RFC3339),
-			Model:    msg.Model,
-			Provider: msg.Provider,
-			Parts:    convertParts(msg.Parts),
-		}
+		Messages: buildSessionShowMessages(ctx, svc, msgs, maxSubAgentDepth),
 	}
 
 	enc := json.NewEncoder(w)
@@ -439,10 +443,102 @@ func outputSessionJSON(w io.Writer, sess session.Session, msgs []*message.Messag
 	return enc.Encode(output)
 }
 
-func outputSessionHuman(ctx context.Context, cfg *config.ConfigStore, sess session.Session, msgs []*message.Message) error {
+// buildSessionShowMessages converts msgs into their JSON representation,
+// recursively embedding any sub-agent tool call's own conversation
+// (up to depth levels) inline via sessionShowPart.SubAgent. Without
+// this, a "session show" of a session that spawned a sub-agent (e.g.
+// via the "agent" tool) would not surface what that sub-agent
+// actually did: its transcript lives in a separate child session that
+// isn't listed by "session list" and has no other discovery path.
+func buildSessionShowMessages(ctx context.Context, svc *sessionServices, msgs []*message.Message, depth int) []sessionShowMessage {
+	out := make([]sessionShowMessage, len(msgs))
+	for i, msg := range msgs {
+		out[i] = sessionShowMessage{
+			ID:       msg.ID,
+			Role:     string(msg.Role),
+			Created:  time.Unix(msg.CreatedAt, 0).Format(time.RFC3339),
+			Model:    msg.Model,
+			Provider: msg.Provider,
+			Parts:    convertParts(msg.Parts),
+		}
+		if depth <= 0 {
+			continue
+		}
+		for pi, part := range out[i].Parts {
+			if part.Type != "tool_call" || !isSubAgentToolName(part.Name) {
+				continue
+			}
+			subSessionID := svc.sessions.CreateAgentToolSessionID(msg.ID, part.ToolCallID)
+			subMsgs, err := svc.messages.List(ctx, subSessionID)
+			if err != nil || len(subMsgs) == 0 {
+				continue
+			}
+			out[i].Parts[pi].SubAgent = &sessionShowSubAgent{
+				SessionID: subSessionID,
+				Messages:  buildSessionShowMessages(ctx, svc, messagePtrs(subMsgs), depth-1),
+			}
+		}
+	}
+	return out
+}
+
+// loadNestedToolItems populates the nested transcript on any sub-agent
+// tool call items (e.g. "agent"/"agentic_fetch") found in items, up to
+// depth levels, so "session show" renders a sub-agent's activity
+// inline the same way the TUI does (see UI.loadNestedToolCalls),
+// rather than showing just a bare, collapsed tool call.
+func loadNestedToolItems(ctx context.Context, svc *sessionServices, sty *styles.Styles, items []chat.MessageItem, depth int) {
+	if depth <= 0 {
+		return
+	}
+	for _, item := range items {
+		nestedContainer, ok := item.(chat.NestedToolContainer)
+		if !ok {
+			continue
+		}
+		toolItem, ok := item.(chat.ToolMessageItem)
+		if !ok {
+			continue
+		}
+
+		tc := toolItem.ToolCall()
+		subSessionID := svc.sessions.CreateAgentToolSessionID(toolItem.MessageID(), tc.ID)
+
+		subMsgs, err := svc.messages.List(ctx, subSessionID)
+		if err != nil || len(subMsgs) == 0 {
+			continue
+		}
+
+		subMsgPtrs := messagePtrs(subMsgs)
+		subToolResults := chat.BuildToolResultMap(subMsgPtrs)
+
+		var nestedTools []chat.ToolMessageItem
+		for _, subMsg := range subMsgPtrs {
+			subItems := chat.ExtractMessageItems(sty, subMsg, subToolResults)
+			for _, subItem := range subItems {
+				if nestedToolItem, ok := subItem.(chat.ToolMessageItem); ok {
+					if compactable, ok := nestedToolItem.(chat.Compactable); ok {
+						compactable.SetCompact(true)
+					}
+					nestedTools = append(nestedTools, nestedToolItem)
+				}
+			}
+		}
+
+		nestedMessageItems := make([]chat.MessageItem, len(nestedTools))
+		for i, nt := range nestedTools {
+			nestedMessageItems[i] = nt
+		}
+		loadNestedToolItems(ctx, svc, sty, nestedMessageItems, depth-1)
+
+		nestedContainer.SetNestedTools(nestedTools)
+	}
+}
+
+func outputSessionHuman(ctx context.Context, svc *sessionServices, sess session.Session, msgs []*message.Message) error {
 	var providerID string
-	if cfg != nil {
-		providerID = cfg.Config().Models[config.SelectedModelTypeLarge].Provider
+	if svc.cfg != nil {
+		providerID = svc.cfg.Config().Models[config.SelectedModelTypeLarge].Provider
 	}
 	styles := styles.ThemeForProvider(providerID)
 	toolResults := chat.BuildToolResultMap(msgs)
@@ -486,6 +582,7 @@ func outputSessionHuman(ctx context.Context, cfg *config.ConfigStore, sess sessi
 	first := true
 	for _, msg := range msgs {
 		items := chat.ExtractMessageItems(&styles, msg, toolResults)
+		loadNestedToolItems(ctx, svc, &styles, items, maxSubAgentDepth)
 		for _, item := range items {
 			if !first {
 				fmt.Fprintln(&buf)
@@ -612,6 +709,12 @@ type sessionShowPart struct {
 	Name       string `json:"name,omitempty"`
 	Input      string `json:"input,omitempty"`
 
+	// SubAgent is populated on "agent"/"agentic_fetch" tool_call parts
+	// with the sub-agent's own conversation, embedded inline so it's
+	// discoverable without knowing its (otherwise-hidden) child session
+	// ID. See buildSessionShowMessages.
+	SubAgent *sessionShowSubAgent `json:"sub_agent,omitempty"`
+
 	// Tool result
 	Content  string `json:"content,omitempty"`
 	IsError  bool   `json:"is_error,omitempty"`
@@ -627,6 +730,13 @@ type sessionShowPart struct {
 	// Finish
 	Reason string `json:"reason,omitempty"`
 	Time   int64  `json:"time,omitempty"`
+}
+
+// sessionShowSubAgent holds a sub-agent's own conversation, embedded
+// inline on the tool_call part that spawned it.
+type sessionShowSubAgent struct {
+	SessionID string               `json:"session_id"`
+	Messages  []sessionShowMessage `json:"messages"`
 }
 
 func extractSkillsFromMessages(msgs []*message.Message) []sessionShowSkill {

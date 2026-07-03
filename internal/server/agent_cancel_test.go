@@ -85,6 +85,10 @@ func (s *runCoordinator) GenerateTitle(context.Context, string, string) {}
 
 func (s *runCoordinator) RegenerateTitle(context.Context, string) error { return nil }
 
+func (s *runCoordinator) SendToSubAgent(context.Context, string, string) error { return nil }
+
+func (s *runCoordinator) CancelSubAgent(string) {}
+
 func (s *runCoordinator) capturedCtx() context.Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()

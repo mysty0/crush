@@ -37,6 +37,14 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 	if err != nil {
 		return nil, err
 	}
+	// Track the task-agent instance so SendToSubAgent can steer a
+	// running sub-agent turn by session ID. buildTools (and therefore
+	// this function) rebuilds the agent on every UpdateModels call, so
+	// this is always the latest instance; a follow-up sent while an
+	// older instance is still mid-turn would miss it, but that only
+	// happens if the user switches models while a sub-agent is
+	// running, an edge case not worth extra bookkeeping for.
+	c.taskAgent.Set(agent)
 	return fantasy.NewParallelAgentTool(
 		AgentToolName,
 		agentToolDescription,
