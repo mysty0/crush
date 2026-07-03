@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/pkg/catwalk"
+	"github.com/charmbracelet/crush/internal/agent"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/history"
@@ -102,6 +103,17 @@ type Workspace interface {
 	// AgentCancelSubAgent cancels a currently-running sub-agent turn.
 	// It is a no-op if the sub-agent session is not currently busy.
 	AgentCancelSubAgent(subAgentSessionID string)
+
+	// AgentRunningWorkflows returns a snapshot of every background
+	// workflow (dispatched via the "Workflow" tool), running or
+	// recently finished but not yet cleared.
+	AgentRunningWorkflows() []agent.WorkflowStatus
+	// AgentWorkflowStatus returns the current status of a workflow by
+	// its (workflow) session ID.
+	AgentWorkflowStatus(workflowSessionID string) (agent.WorkflowStatus, bool)
+	// AgentCancelWorkflow cancels a running background workflow by its
+	// (workflow) session ID.
+	AgentCancelWorkflow(workflowSessionID string)
 
 	// RewindListPoints returns the user messages a session can be rewound
 	// to, newest first.

@@ -89,6 +89,12 @@ func (s *runCoordinator) SendToSubAgent(context.Context, string, string) error {
 
 func (s *runCoordinator) CancelSubAgent(string) {}
 
+func (s *runCoordinator) RunningWorkflows() []agent.WorkflowStatus { return nil }
+func (s *runCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
+	return agent.WorkflowStatus{}, false
+}
+func (s *runCoordinator) CancelWorkflow(string) {}
+
 func (s *runCoordinator) capturedCtx() context.Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()

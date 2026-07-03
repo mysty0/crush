@@ -541,6 +541,8 @@ func (app *App) setupEvents() {
 	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "run-completions", app.runCompletions.Subscribe, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "mcp", mcp.SubscribeEvents, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "bash-progress", agenttools.SubscribeBashProgress, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "workflow-progress", agenttools.SubscribeWorkflowProgress, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "workflow-status", agenttools.SubscribeWorkflowStatus, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "lsp", SubscribeLSPEvents, app.events)
 	if app.Skills != nil {
 		setupSubscriber(ctx, app.serviceEventsWG, "skills", app.Skills.SubscribeEvents, app.events)

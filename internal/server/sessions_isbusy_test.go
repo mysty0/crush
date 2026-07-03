@@ -60,6 +60,12 @@ func (s *stubCoordinator) SendToSubAgent(context.Context, string, string) error 
 
 func (s *stubCoordinator) CancelSubAgent(string) {}
 
+func (s *stubCoordinator) RunningWorkflows() []agent.WorkflowStatus { return nil }
+func (s *stubCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
+	return agent.WorkflowStatus{}, false
+}
+func (s *stubCoordinator) CancelWorkflow(string) {}
+
 // stubSessions is a minimal session.Service that returns a fixed list
 // (and supports Get by ID). All other methods return zero values; the
 // IsBusy tests do not exercise them.

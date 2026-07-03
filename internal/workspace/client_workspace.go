@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
@@ -276,6 +277,17 @@ func (w *ClientWorkspace) AgentCancelSubAgent(subAgentSessionID string) {
 	// Not supported in client/server mode yet; see
 	// errSubAgentChatClientUnsupported.
 }
+
+// Background workflows are an in-process (AppWorkspace) feature; the
+// client/server protocol does not yet surface the workflow registry, so
+// these are no-ops in client mode.
+func (w *ClientWorkspace) AgentRunningWorkflows() []agent.WorkflowStatus { return nil }
+
+func (w *ClientWorkspace) AgentWorkflowStatus(string) (agent.WorkflowStatus, bool) {
+	return agent.WorkflowStatus{}, false
+}
+
+func (w *ClientWorkspace) AgentCancelWorkflow(string) {}
 
 // errRewindClientUnsupported is returned by the client/server workspace
 // because rewind is not yet plumbed through the HTTP protocol. Rewind is

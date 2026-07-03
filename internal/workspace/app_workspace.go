@@ -232,6 +232,26 @@ func (w *AppWorkspace) AgentCancelSubAgent(subAgentSessionID string) {
 	}
 }
 
+func (w *AppWorkspace) AgentRunningWorkflows() []agent.WorkflowStatus {
+	if w.app.AgentCoordinator == nil {
+		return nil
+	}
+	return w.app.AgentCoordinator.RunningWorkflows()
+}
+
+func (w *AppWorkspace) AgentWorkflowStatus(workflowSessionID string) (agent.WorkflowStatus, bool) {
+	if w.app.AgentCoordinator == nil {
+		return agent.WorkflowStatus{}, false
+	}
+	return w.app.AgentCoordinator.WorkflowStatus(workflowSessionID)
+}
+
+func (w *AppWorkspace) AgentCancelWorkflow(workflowSessionID string) {
+	if w.app.AgentCoordinator != nil {
+		w.app.AgentCoordinator.CancelWorkflow(workflowSessionID)
+	}
+}
+
 func (w *AppWorkspace) RewindListPoints(ctx context.Context, sessionID string) ([]rewind.RewindPoint, error) {
 	return w.app.Rewind.ListRewindPoints(ctx, sessionID)
 }

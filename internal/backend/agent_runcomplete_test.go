@@ -53,6 +53,12 @@ func (c *errorCoordinator) SendToSubAgent(context.Context, string, string) error
 
 func (c *errorCoordinator) CancelSubAgent(string) {}
 
+func (c *errorCoordinator) RunningWorkflows() []agent.WorkflowStatus { return nil }
+func (c *errorCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
+	return agent.WorkflowStatus{}, false
+}
+func (c *errorCoordinator) CancelWorkflow(string) {}
+
 // insertRunCompleteWorkspace installs a workspace backed by a real
 // app.App (so the runCompletions broker exists) with the given
 // coordinator and a workspace run context derived from base.

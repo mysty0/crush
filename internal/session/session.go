@@ -76,6 +76,10 @@ type Service interface {
 	Get(ctx context.Context, id string) (Session, error)
 	GetLast(ctx context.Context) (Session, error)
 	List(ctx context.Context) ([]Session, error)
+	// ListChildren returns the direct child sessions of parentID, in
+	// creation order. Used to enumerate a workflow's sub-agent
+	// sessions for "session show" and the workflow view.
+	ListChildren(ctx context.Context, parentID string) ([]Session, error)
 	Save(ctx context.Context, session Session) (Session, error)
 	UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error
 	Rename(ctx context.Context, id string, title string) error
@@ -284,8 +288,21 @@ func (s *service) List(ctx context.Context) ([]Session, error) {
 	return sessions, nil
 }
 
-// publishSessionUpdate re-fetches a session and publishes an UpdatedEvent so
-// that UI subscribers reflect title or usage changes.
+func (s *service) ListChildren(ctx context.Context, parentID string) ([]Session, error) {
+	dbSessions, err := s.q.ListChildSessions(ctx, sql.NullString{String: parentID, Valid: true})
+	if err != nil {
+		return nil, err
+	}
+	sessions := make([]Session, len(dbSessions))
+	for i, dbSession := range dbSessions {
+		sessions[i] = s.fromDBItem(dbSession)
+		s.applyEstimatedUsageState(&sessions[i])
+	}
+	return sessions, nil
+}
+
+// publishSessionUpdate re-fetches a session and publishes an
+// UpdatedEvent so that UI subscribers reflect title or usage changes.
 func (s *service) publishSessionUpdate(ctx context.Context, sessionID string) {
 	session, err := s.Get(ctx, sessionID)
 	if err != nil {

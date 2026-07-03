@@ -269,6 +269,16 @@ type UI struct {
 	subAgentPrompt     string
 	subAgentChat       *Chat
 
+	// workflowViewSessionID is non-empty while the user is viewing a
+	// background workflow's two-pane view (phases left, agents right;
+	// see workflow_view.go). workflowViewSelectedPhase indexes the
+	// selected phase, and workflowViewRightFocus is true when keyboard
+	// focus is in the right (agents) pane.
+	workflowViewSessionID     string
+	workflowViewSelectedPhase int
+	workflowViewRightFocus    bool
+	workflowViewAgentScroll   int
+
 	// agentListFocused is true when the always-visible agent picker
 	// list below the chat has keyboard focus (entered by pressing
 	// Down at the bottom of a chat; see enterAgentList/subagent.go).
@@ -1105,6 +1115,28 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						cmds = append(cmds, cmd)
 					}
 				}
+			}
+		}
+	case pubsub.Event[agenttools.WorkflowProgressEvent]:
+		if item := m.chat.MessageItem(msg.Payload.ToolCallID); item != nil {
+			if streamer, ok := item.(chat.PartialOutputSetter); ok {
+				streamer.SetPartialOutput(msg.Payload.Output)
+				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+		}
+	case pubsub.Event[agenttools.WorkflowStatusEvent]:
+		// A background workflow started, advanced, or finished:
+		// recompute layout so the picker list appears/disappears and
+		// the two-pane view (if open) reflects the new state on the
+		// next frame.
+		m.updateLayoutAndSize()
+		// If the viewed workflow was cleared from the registry, drop
+		// back to the normal chat.
+		if m.workflowViewSessionID != "" {
+			if _, ok := m.com.Workspace.AgentWorkflowStatus(m.workflowViewSessionID); !ok {
+				m.exitWorkflowView()
 			}
 		}
 	case shellStreamMsg:
@@ -2280,6 +2312,11 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 		return m.handleDialogMsg(msg)
 	}
 
+	// The workflow two-pane view captures all navigation while active.
+	if m.workflowViewSessionID != "" {
+		return m.handleWorkflowViewKeyMsg(msg)
+	}
+
 	// Keyboard visual-selection mode ("v"/"V") takes full priority over
 	// normal chat navigation while active: movement, word-motion, and
 	// yank keys drive the in-message selection cursor instead of
@@ -2734,7 +2771,9 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 			m.drawSidebar(scr, layout.sidebar)
 		}
 
-		if m.subAgentSessionID != "" {
+		if m.workflowViewSessionID != "" {
+			m.drawWorkflowView(scr, layout.main)
+		} else if m.subAgentSessionID != "" {
 			rest := m.drawSubAgentBanner(scr, layout.main)
 			m.subAgentChat.Draw(scr, rest)
 		} else {

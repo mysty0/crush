@@ -122,6 +122,17 @@ type Coordinator interface {
 	// sub-agent session is not currently busy or the task agent is
 	// not configured.
 	CancelSubAgent(subAgentSessionID string)
+	// RunningWorkflows returns a snapshot of every background workflow
+	// (dispatched via the "Workflow" tool) known to the coordinator,
+	// running or recently finished but not yet cleared.
+	RunningWorkflows() []WorkflowStatus
+	// WorkflowStatus returns the current status of the workflow with
+	// the given (workflow) session ID, if known.
+	WorkflowStatus(workflowSessionID string) (WorkflowStatus, bool)
+	// CancelWorkflow cancels a running background workflow by its
+	// (workflow) session ID. It is a no-op if the workflow is unknown
+	// or already finished.
+	CancelWorkflow(workflowSessionID string)
 }
 
 type coordinator struct {
@@ -142,6 +153,11 @@ type coordinator struct {
 	// SendToSubAgent can steer a running sub-agent by session ID.
 	// It is rebuilt on every UpdateModels call.
 	taskAgent *csync.Value[SessionAgent]
+
+	// workflows tracks background workflow runs (dispatched via the
+	// "Workflow" tool) so they can be listed, viewed, and canceled
+	// while they run in the background.
+	workflows *workflowRegistry
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -189,6 +205,7 @@ func NewCoordinator(
 		runComplete:  runComplete,
 		agents:       make(map[string]SessionAgent),
 		taskAgent:    csync.NewValue[SessionAgent](nil),
+		workflows:    newWorkflowRegistry(),
 		allSkills:    allSkills,
 		activeSkills: activeSkills,
 		skillTracker: skillTracker,
@@ -653,6 +670,14 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 			return nil, err
 		}
 		allTools = append(allTools, agenticFetchTool)
+	}
+
+	if slices.Contains(agent.AllowedTools, WorkflowToolName) {
+		workflowTool, err := c.workflowTool(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		allTools = append(allTools, workflowTool)
 	}
 
 	// Get the model name for the agent

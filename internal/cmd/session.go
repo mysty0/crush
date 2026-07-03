@@ -420,6 +420,13 @@ func isSubAgentToolName(name string) bool {
 	return name == agent.AgentToolName || name == tools.AgenticFetchToolName
 }
 
+// isWorkflowToolName reports whether name is the Workflow tool, whose
+// dedicated session parents a tree of per-phase sub-agent sessions that
+// must be discovered by parent rather than by tool_call part.
+func isWorkflowToolName(name string) bool {
+	return name == agent.WorkflowToolName
+}
+
 func outputSessionJSON(ctx context.Context, svc *sessionServices, w io.Writer, sess session.Session, msgs []*message.Message) error {
 	skills := extractSkillsFromMessages(msgs)
 	output := sessionShowOutput{
@@ -465,17 +472,32 @@ func buildSessionShowMessages(ctx context.Context, svc *sessionServices, msgs []
 			continue
 		}
 		for pi, part := range out[i].Parts {
-			if part.Type != "tool_call" || !isSubAgentToolName(part.Name) {
+			if part.Type != "tool_call" {
 				continue
 			}
-			subSessionID := svc.sessions.CreateAgentToolSessionID(msg.ID, part.ToolCallID)
-			subMsgs, err := svc.messages.List(ctx, subSessionID)
-			if err != nil || len(subMsgs) == 0 {
-				continue
-			}
-			out[i].Parts[pi].SubAgent = &sessionShowSubAgent{
-				SessionID: subSessionID,
-				Messages:  buildSessionShowMessages(ctx, svc, messagePtrs(subMsgs), depth-1),
+			switch {
+			case isSubAgentToolName(part.Name):
+				subSessionID := svc.sessions.CreateAgentToolSessionID(msg.ID, part.ToolCallID)
+				subMsgs, err := svc.messages.List(ctx, subSessionID)
+				if err != nil || len(subMsgs) == 0 {
+					continue
+				}
+				out[i].Parts[pi].SubAgent = &sessionShowSubAgent{
+					SessionID: subSessionID,
+					Messages:  buildSessionShowMessages(ctx, svc, messagePtrs(subMsgs), depth-1),
+				}
+			case isWorkflowToolName(part.Name):
+				// A workflow's own dedicated session has no LLM
+				// messages of its own; its work lives in a tree of
+				// per-phase sub-agent sessions parented under it. Embed
+				// each child sub-agent's transcript so "session show"
+				// surfaces everything the workflow did.
+				workflowSessionID := svc.sessions.CreateAgentToolSessionID(msg.ID, part.ToolCallID)
+				children, err := svc.sessions.ListChildren(ctx, workflowSessionID)
+				if err != nil || len(children) == 0 {
+					continue
+				}
+				out[i].Parts[pi].WorkflowAgents = buildWorkflowAgentShows(ctx, svc, children, depth-1)
 			}
 		}
 	}
@@ -715,6 +737,12 @@ type sessionShowPart struct {
 	// ID. See buildSessionShowMessages.
 	SubAgent *sessionShowSubAgent `json:"sub_agent,omitempty"`
 
+	// WorkflowAgents is populated on "Workflow" tool_call parts with
+	// every per-phase sub-agent the workflow spawned, embedded inline
+	// so a workflow's full activity is discoverable from the parent
+	// session. See buildSessionShowMessages.
+	WorkflowAgents []sessionShowWorkflowAgent `json:"workflow_agents,omitempty"`
+
 	// Tool result
 	Content  string `json:"content,omitempty"`
 	IsError  bool   `json:"is_error,omitempty"`
@@ -737,6 +765,43 @@ type sessionShowPart struct {
 type sessionShowSubAgent struct {
 	SessionID string               `json:"session_id"`
 	Messages  []sessionShowMessage `json:"messages"`
+}
+
+// sessionShowWorkflowAgent holds one workflow-dispatched sub-agent's
+// stats and conversation, embedded inline on the Workflow tool_call
+// part. The phase is derived from the sub-session title.
+type sessionShowWorkflowAgent struct {
+	SessionID        string               `json:"session_id"`
+	Title            string               `json:"title"`
+	PromptTokens     int64                `json:"prompt_tokens"`
+	CompletionTokens int64                `json:"completion_tokens"`
+	Cost             float64              `json:"cost"`
+	Messages         []sessionShowMessage `json:"messages"`
+}
+
+// buildWorkflowAgentShows converts a workflow's child sessions into
+// their JSON representation with per-agent stats and transcripts.
+func buildWorkflowAgentShows(ctx context.Context, svc *sessionServices, children []session.Session, depth int) []sessionShowWorkflowAgent {
+	out := make([]sessionShowWorkflowAgent, 0, len(children))
+	for _, child := range children {
+		msgs, err := svc.messages.List(ctx, child.ID)
+		if err != nil {
+			continue
+		}
+		var childMessages []sessionShowMessage
+		if depth > 0 {
+			childMessages = buildSessionShowMessages(ctx, svc, messagePtrs(msgs), depth)
+		}
+		out = append(out, sessionShowWorkflowAgent{
+			SessionID:        child.ID,
+			Title:            child.Title,
+			PromptTokens:     child.PromptTokens,
+			CompletionTokens: child.CompletionTokens,
+			Cost:             child.Cost,
+			Messages:         childMessages,
+		})
+	}
+	return out
 }
 
 func extractSkillsFromMessages(msgs []*message.Message) []sessionShowSkill {

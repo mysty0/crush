@@ -228,6 +228,12 @@ func (c *scriptedCoordinator) SendToSubAgent(context.Context, string, string) er
 
 func (c *scriptedCoordinator) CancelSubAgent(string) {}
 
+func (c *scriptedCoordinator) RunningWorkflows() []agent.WorkflowStatus { return nil }
+func (c *scriptedCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
+	return agent.WorkflowStatus{}, false
+}
+func (c *scriptedCoordinator) CancelWorkflow(string) {}
+
 // agentE2EHarness extends the SSE harness with a scripted coordinator
 // wired into the workspace's embedded app.App, so POST /agent drives a
 // real backend.SendMessage dispatch whose emitted user/assistant

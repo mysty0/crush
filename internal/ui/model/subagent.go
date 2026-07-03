@@ -338,15 +338,26 @@ func (m *UI) runningSubAgents() []subAgentEntry {
 	return entries
 }
 
+// agentListEntryKind distinguishes a plain sub-agent entry from a
+// background workflow entry in the picker list.
+type agentListEntryKind int
+
+const (
+	agentListKindSubAgent agentListEntryKind = iota
+	agentListKindWorkflow
+)
+
 // agentListEntry is one row in the agent picker list.
 type agentListEntry struct {
 	Label      string
 	SessionID  string // empty for "Main"
 	ToolCallID string
+	Kind       agentListEntryKind
 }
 
 // agentListEntries returns the picker list's entries: "Main" first,
-// then one entry per running sub-agent.
+// then one entry per running sub-agent, then one per background
+// workflow.
 func (m *UI) agentListEntries() []agentListEntry {
 	entries := make([]agentListEntry, 0, 1)
 	entries = append(entries, agentListEntry{Label: "Main"})
@@ -356,9 +367,38 @@ func (m *UI) agentListEntries() []agentListEntry {
 			Label:      label,
 			SessionID:  sa.SessionID,
 			ToolCallID: sa.ToolCallID,
+			Kind:       agentListKindSubAgent,
+		})
+	}
+	for _, wf := range m.runningWorkflows() {
+		label := ansi.Truncate(workflowListLabel(wf), maxAgentListPromptLength, "…")
+		entries = append(entries, agentListEntry{
+			Label:      label,
+			SessionID:  wf.SessionID,
+			ToolCallID: wf.ToolCallID,
+			Kind:       agentListKindWorkflow,
 		})
 	}
 	return entries
+}
+
+// workflowListLabel builds the picker-row label for a background
+// workflow, e.g. "◇ deep-research · what is X" with a state marker.
+func workflowListLabel(wf agent.WorkflowStatus) string {
+	marker := "◇"
+	switch wf.State {
+	case agent.WorkflowCompleted:
+		marker = "✓"
+	case agent.WorkflowFailed:
+		marker = "✗"
+	case agent.WorkflowCanceled:
+		marker = "⊘"
+	}
+	label := marker + " " + wf.Name
+	if wf.Args != "" {
+		label += " · " + wf.Args
+	}
+	return label
 }
 
 // agentListAreaHeight returns the number of rows the agent picker list
@@ -369,10 +409,19 @@ func (m *UI) agentListAreaHeight() int {
 	if !m.hasSession() {
 		return 0
 	}
-	if len(m.runningSubAgents()) == 0 {
+	if len(m.runningSubAgents()) == 0 && len(m.runningWorkflows()) == 0 {
 		return 0
 	}
 	return len(m.agentListEntries()) + 1
+}
+
+// runningWorkflows returns the coordinator's background workflows,
+// guarding against a nil Workspace (some tests construct a bare UI).
+func (m *UI) runningWorkflows() []agent.WorkflowStatus {
+	if m.com == nil || m.com.Workspace == nil {
+		return nil
+	}
+	return m.com.Workspace.AgentRunningWorkflows()
 }
 
 // currentAgentListIndex returns the index into agentListEntries() of
@@ -457,6 +506,9 @@ func (m *UI) confirmAgentListSelection() tea.Cmd {
 			m.exitSubAgentView()
 		}
 		return nil
+	}
+	if entry.Kind == agentListKindWorkflow {
+		return m.enterWorkflowView(entry.SessionID)
 	}
 	if entry.SessionID == m.subAgentSessionID {
 		// Already viewing this sub-agent.

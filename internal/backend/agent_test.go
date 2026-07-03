@@ -63,6 +63,12 @@ func (c *blockingCoordinator) SendToSubAgent(context.Context, string, string) er
 
 func (c *blockingCoordinator) CancelSubAgent(string) {}
 
+func (c *blockingCoordinator) RunningWorkflows() []agent.WorkflowStatus { return nil }
+func (c *blockingCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
+	return agent.WorkflowStatus{}, false
+}
+func (c *blockingCoordinator) CancelWorkflow(string) {}
+
 // insertAgentWorkspace installs a synthetic workspace with the given
 // coordinator (or none) and a workspace run context, mirroring the
 // fields CreateWorkspace initializes.
