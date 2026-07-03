@@ -47,6 +47,7 @@ type ActionSelectModel struct {
 // Messages for commands
 type (
 	ActionNewSession        struct{}
+	ActionResumeLastSession struct{}
 	ActionToggleHelp        struct{}
 	ActionToggleCompactMode struct{}
 	ActionToggleThinking    struct{}

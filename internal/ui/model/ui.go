@@ -1690,6 +1690,26 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionResumeLastSession:
+		m.dialog.CloseDialog(dialog.CommandsID)
+		if m.isAgentBusy() {
+			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before resuming a session..."))
+			break
+		}
+		cmds = append(cmds, func() tea.Msg {
+			sessions, err := m.com.Workspace.ListSessions(context.Background())
+			if err != nil {
+				return util.ReportError(err)()
+			}
+			if len(sessions) == 0 {
+				return util.ReportWarn("No previous session to resume")()
+			}
+			last := sessions[0]
+			if m.session != nil && last.ID == m.session.ID {
+				return util.NewInfoMsg("Already in the most recent session")
+			}
+			return m.loadSession(last.ID)()
+		})
 	case dialog.ActionSummarize:
 		if m.isAgentBusy() {
 			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before summarizing session..."))
