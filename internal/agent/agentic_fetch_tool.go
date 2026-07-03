@@ -162,8 +162,8 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				return fantasy.ToolResponse{}, errors.New("small model provider not configured")
 			}
 
-			webFetchTool := tools.NewWebFetchTool(tmpDir, client)
-			webSearchTool := tools.NewWebSearchTool(client)
+			webFetchTool := tools.NewWebFetchTool(tmpDir, client, c.webFetchOptions())
+			webSearchTool := tools.NewWebSearchTool(client, c.webSearchOptions())
 			fetchTools := []fantasy.AgentTool{
 				webFetchTool,
 				webSearchTool,

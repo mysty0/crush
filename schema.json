@@ -842,6 +842,44 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "ToolWebFetch": {
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "markdown",
+            "summarize"
+          ],
+          "description": "How WebFetch processes fetched content",
+          "default": "markdown"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ToolWebSearch": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "duckduckgo",
+            "native"
+          ],
+          "description": "Web search backend to use",
+          "default": "duckduckgo"
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of results to return",
+          "default": 10,
+          "examples": [
+            20
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "Tools": {
       "properties": {
         "ls": {
@@ -852,6 +890,12 @@
         },
         "glob": {
           "$ref": "#/$defs/ToolGlob"
+        },
+        "web_search": {
+          "$ref": "#/$defs/ToolWebSearch"
+        },
+        "web_fetch": {
+          "$ref": "#/$defs/ToolWebFetch"
         }
       },
       "additionalProperties": false,

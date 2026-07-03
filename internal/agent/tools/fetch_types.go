@@ -27,6 +27,8 @@ type AgenticFetchPermissionsParams struct {
 // WebFetchParams defines the parameters for the web_fetch tool.
 type WebFetchParams struct {
 	URL string `json:"url" description:"The URL to fetch content from"`
+	// Prompt is only used when the WebFetch tool runs in summarize mode.
+	Prompt string `json:"prompt,omitempty" description:"What to extract from the page (only used in summarize mode)"`
 }
 
 // WebSearchParams defines the parameters for the web_search tool.

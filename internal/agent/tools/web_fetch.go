@@ -21,8 +21,20 @@ var webFetchDescriptionTpl = template.Must(
 		Parse(string(webFetchDescriptionTmpl)),
 )
 
+// SummarizeFunc runs a prompt over fetched page content using a small model
+// and returns the model's answer. It is supplied by the coordinator (which
+// owns the model) when the WebFetch tool runs in summarize mode.
+type SummarizeFunc func(ctx context.Context, url, content, prompt string) (string, error)
+
+// WebFetchOptions configures the WebFetch tool.
+type WebFetchOptions struct {
+	// Summarize, when set, makes WebFetch run the given prompt over the
+	// fetched content with a small model instead of returning raw markdown.
+	Summarize SummarizeFunc
+}
+
 // NewWebFetchTool creates a simple web fetch tool for sub-agents (no permissions needed).
-func NewWebFetchTool(workingDir string, client *http.Client) fantasy.AgentTool {
+func NewWebFetchTool(workingDir string, client *http.Client, opts WebFetchOptions) fantasy.AgentTool {
 	if client == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		transport.MaxIdleConns = 100
@@ -46,6 +58,20 @@ func NewWebFetchTool(workingDir string, client *http.Client) fantasy.AgentTool {
 			content, err := FetchURLAndConvert(ctx, client, params.URL)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to fetch URL: %s", err)), nil
+			}
+
+			// Summarize mode: run the prompt over the fetched content with a
+			// small model and return that answer instead of the raw page.
+			if opts.Summarize != nil {
+				prompt := params.Prompt
+				if prompt == "" {
+					prompt = "Summarize the key information on this page."
+				}
+				answer, err := opts.Summarize(ctx, params.URL, content, prompt)
+				if err != nil {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to summarize content: %s", err)), nil
+				}
+				return fantasy.NewTextResponse(fmt.Sprintf("Answer from %s:\n\n%s", params.URL, answer)), nil
 			}
 
 			hasLargeContent := len(content) > LargeContentThreshold

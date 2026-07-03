@@ -534,9 +534,11 @@ type Agent struct {
 }
 
 type Tools struct {
-	Ls   ToolLs   `json:"ls,omitzero"`
-	Grep ToolGrep `json:"grep,omitzero"`
-	Glob ToolGlob `json:"glob,omitzero"`
+	Ls        ToolLs        `json:"ls,omitzero"`
+	Grep      ToolGrep      `json:"grep,omitzero"`
+	Glob      ToolGlob      `json:"glob,omitzero"`
+	WebSearch ToolWebSearch `json:"web_search,omitzero"`
+	WebFetch  ToolWebFetch  `json:"web_fetch,omitzero"`
 }
 
 type ToolLs struct {
@@ -565,6 +567,55 @@ type ToolGlob struct {
 // GetTimeout returns the user-defined timeout or the default.
 func (t ToolGlob) GetTimeout() time.Duration {
 	return ptrValOr(t.Timeout, 30*time.Second)
+}
+
+// Web search backend identifiers for the WebSearch tool.
+const (
+	// WebSearchProviderDuckDuckGo scrapes DuckDuckGo's public HTML. It is
+	// free, needs no API key, and is the default.
+	WebSearchProviderDuckDuckGo = "duckduckgo"
+	// WebSearchProviderNative uses the active model provider's built-in
+	// web search (e.g. Anthropic's server-side web_search tool). It rides
+	// the same authenticated request as normal model calls, so on a Claude
+	// subscription it is covered by the subscription. Falls back to
+	// DuckDuckGo when the active provider has no native web search.
+	WebSearchProviderNative = "native"
+)
+
+type ToolWebSearch struct {
+	Provider   string `json:"provider,omitempty" jsonschema:"description=Web search backend to use,enum=duckduckgo,enum=native,default=duckduckgo"`
+	MaxResults *int   `json:"max_results,omitempty" jsonschema:"description=Maximum number of results to return,default=10,example=20"`
+}
+
+// GetProvider returns the configured provider or the default (duckduckgo).
+func (t ToolWebSearch) GetProvider() string {
+	if t.Provider == "" {
+		return WebSearchProviderDuckDuckGo
+	}
+	return t.Provider
+}
+
+// Web fetch modes for the WebFetch tool.
+const (
+	// WebFetchModeMarkdown fetches the URL and returns HTML converted to
+	// markdown. It is the default.
+	WebFetchModeMarkdown = "markdown"
+	// WebFetchModeSummarize fetches the URL, converts it to markdown, then
+	// runs the tool's prompt over the content with the small model and
+	// returns that answer instead of the raw page.
+	WebFetchModeSummarize = "summarize"
+)
+
+type ToolWebFetch struct {
+	Mode string `json:"mode,omitempty" jsonschema:"description=How WebFetch processes fetched content,enum=markdown,enum=summarize,default=markdown"`
+}
+
+// GetMode returns the configured mode or the default (markdown).
+func (t ToolWebFetch) GetMode() string {
+	if t.Mode == "" {
+		return WebFetchModeMarkdown
+	}
+	return t.Mode
 }
 
 // HookConfig defines a user-configured shell command that fires on a hook
@@ -746,6 +797,7 @@ func allToolNames() []string {
 		"lsp_restart",
 		"fetch",
 		"agentic_fetch",
+		"Workflow",
 		"Glob",
 		"Grep",
 		"ls",
