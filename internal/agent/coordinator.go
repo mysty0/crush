@@ -24,6 +24,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/claudecode"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/discover"
 	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/filetracker"
@@ -61,6 +62,8 @@ var (
 	errSmallModelProviderNotConfigured = errors.New("small model provider not configured")
 	errLargeModelNotFound              = errors.New("large model not found in provider config")
 	errSmallModelNotFound              = errors.New("small model not found in provider config")
+	errTaskAgentNotConfigured          = errors.New("task agent not configured")
+	errSubAgentNotRunning              = errors.New("sub-agent is not currently running")
 )
 
 // Copilot models that use the Responses API instead of Chat Completions.
@@ -107,6 +110,18 @@ type Coordinator interface {
 	// first user message. It returns an error if the session has no user
 	// message to title from.
 	RegenerateTitle(ctx context.Context, sessionID string) error
+	// SendToSubAgent steers a currently-running sub-agent turn
+	// (dispatched via the "agent" tool) by injecting a follow-up
+	// user prompt into its session. It returns an error if the task
+	// agent is not configured or the sub-agent session is not
+	// currently busy (e.g. it already finished): follow-ups are only
+	// supported while the sub-agent turn is in progress.
+	SendToSubAgent(ctx context.Context, subAgentSessionID, prompt string) error
+	// CancelSubAgent cancels a currently-running sub-agent turn
+	// (dispatched via the "agent" tool). It is a no-op if the
+	// sub-agent session is not currently busy or the task agent is
+	// not configured.
+	CancelSubAgent(subAgentSessionID string)
 }
 
 type coordinator struct {
@@ -122,6 +137,11 @@ type coordinator struct {
 
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
+	// taskAgent holds the latest task-agent SessionAgent instance (the
+	// one the "agent" tool dispatches sub-agent turns to), so
+	// SendToSubAgent can steer a running sub-agent by session ID.
+	// It is rebuilt on every UpdateModels call.
+	taskAgent *csync.Value[SessionAgent]
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -168,6 +188,7 @@ func NewCoordinator(
 		notify:       notify,
 		runComplete:  runComplete,
 		agents:       make(map[string]SessionAgent),
+		taskAgent:    csync.NewValue[SessionAgent](nil),
 		allSkills:    allSkills,
 		activeSkills: activeSkills,
 		skillTracker: skillTracker,
@@ -1227,6 +1248,38 @@ func (c *coordinator) RegenerateTitle(ctx context.Context, sessionID string) err
 	}
 	c.currentAgent.GenerateTitle(ctx, sessionID, prompt)
 	return nil
+}
+
+// SendToSubAgent implements Coordinator. It steers a running sub-agent
+// turn by injecting a follow-up user prompt into its session. The
+// prompt is queued and folded into the sub-agent's next step (the same
+// mechanism used to steer the main session while it's busy), so the
+// sub-agent picks it up mid-turn without interrupting the current
+// step. If the sub-agent session is not currently busy (never started,
+// or already finished), it returns errSubAgentNotRunning rather than
+// starting a new independent run.
+func (c *coordinator) SendToSubAgent(ctx context.Context, subAgentSessionID, prompt string) error {
+	taskAgent := c.taskAgent.Get()
+	if taskAgent == nil {
+		return errTaskAgentNotConfigured
+	}
+	if !taskAgent.IsSessionBusy(subAgentSessionID) {
+		return errSubAgentNotRunning
+	}
+	_, err := taskAgent.Run(ctx, SessionAgentCall{
+		SessionID: subAgentSessionID,
+		Prompt:    prompt,
+	})
+	return err
+}
+
+// CancelSubAgent implements Coordinator.
+func (c *coordinator) CancelSubAgent(subAgentSessionID string) {
+	taskAgent := c.taskAgent.Get()
+	if taskAgent == nil {
+		return
+	}
+	taskAgent.Cancel(subAgentSessionID)
 }
 
 // titleContextMaxChars caps how much conversation text is fed to title

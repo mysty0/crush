@@ -258,6 +258,28 @@ type UI struct {
 	// Chat components
 	chat *Chat
 
+	// Sub-agent fullscreen view. subAgentSessionID is non-empty while
+	// the user is viewing/chatting with a running sub-agent (see
+	// enterSubAgentView / exitSubAgentView in subagent.go).
+	// subAgentChat renders that sub-agent's own conversation, kept
+	// live via the same pubsub message stream used to update the
+	// collapsed nested-tool view in the main chat.
+	subAgentSessionID  string
+	subAgentToolCallID string
+	subAgentPrompt     string
+	subAgentChat       *Chat
+
+	// agentListFocused is true when the always-visible agent picker
+	// list below the chat has keyboard focus (entered by pressing
+	// Down at the bottom of a chat; see enterAgentList/subagent.go).
+	// While true, Up/Down move agentListSelected instead of
+	// scrolling the chat, and Enter switches to the selected entry's
+	// view.
+	agentListFocused bool
+	// agentListSelected indexes into agentListEntries(): 0 is "Main"
+	// (the top-level session), 1..N are running sub-agents.
+	agentListSelected int
+
 	// onboarding state
 	onboarding struct {
 		yesInitializeSelected bool
@@ -335,6 +357,11 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 		scrollbarMode = cfg.Options.TUI.Scrollbar
 	}
 	ch := NewChat(com, scrollbarMode)
+	// subAgentChat is a second, independent Chat used for the
+	// fullscreen sub-agent view (see enterSubAgentView). It is built
+	// eagerly here since NewChat needs the scrollbar mode resolved
+	// from config, which is only computed once above.
+	subCh := NewChat(com, scrollbarMode)
 
 	keyMap := DefaultKeyMap()
 
@@ -374,6 +401,7 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 		keyMap:              keyMap,
 		textarea:            ta,
 		chat:                ch,
+		subAgentChat:        subCh,
 		header:              header,
 		completions:         comp,
 		attachments:         attachments,
@@ -665,6 +693,11 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.loadPromptHistory())
 		m.updateLayoutAndSize()
 
+	case subAgentMessagesLoadedMsg:
+		if cmd := m.handleSubAgentMessagesLoaded(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+
 	case sessionFilesUpdatesMsg:
 		m.sessionFiles = msg.sessionFiles
 		var paths []string
@@ -771,6 +804,18 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if msg.Payload.SessionID != m.session.ID {
+			// Live-update the fullscreen sub-agent view if it's
+			// currently showing this session.
+			if m.subAgentSessionID != "" && msg.Payload.SessionID == m.subAgentSessionID {
+				switch msg.Type {
+				case pubsub.CreatedEvent:
+					cmds = append(cmds, m.appendSubAgentMessage(msg.Payload))
+				case pubsub.UpdatedEvent:
+					cmds = append(cmds, m.updateSubAgentMessage(msg.Payload))
+				case pubsub.DeletedEvent:
+					m.subAgentChat.RemoveMessage(msg.Payload.ID)
+				}
+			}
 			// This might be a child session message from an agent tool.
 			if cmd := m.handleChildSessionMessage(msg); cmd != nil {
 				cmds = append(cmds, cmd)
@@ -993,8 +1038,13 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd := m.chat.Animate(msg); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
-			if m.chat.Follow() {
-				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+			if m.subAgentChat != nil {
+				if cmd := m.subAgentChat.Animate(msg); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+			if m.activeChat().Follow() {
+				if cmd := m.activeChat().ScrollToBottomAndAnimate(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			}
@@ -1343,6 +1393,13 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 		}
 	case message.Tool:
 		for _, tr := range msg.ToolResults() {
+			// If this result finishes the "agent" tool call the user
+			// is currently viewing in fullscreen, snap back to the
+			// main chat: follow-ups are only supported while the
+			// sub-agent is running.
+			if m.subAgentSessionID != "" && tr.ToolCallID == m.subAgentToolCallID {
+				m.exitSubAgentView()
+			}
 			toolItem := m.chat.MessageItem(tr.ToolCallID)
 			if toolItem == nil {
 				// we should have an item!
@@ -1370,7 +1427,7 @@ func (m *UI) handleClickFocus(msg tea.MouseClickMsg) (cmd tea.Cmd) {
 	case m.focus != uiFocusEditor && image.Pt(msg.X, msg.Y).In(m.layout.editor):
 		m.focus = uiFocusEditor
 		cmd = m.textarea.Focus()
-		m.chat.Blur()
+		m.activeChat().Blur()
 	case m.focus != uiFocusMain && image.Pt(msg.X, msg.Y).In(m.layout.main):
 		m.focus = uiFocusMain
 		m.textarea.Blur()
@@ -2210,8 +2267,8 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	// normal chat navigation while active: movement, word-motion, and
 	// yank keys drive the in-message selection cursor instead of
 	// switching messages or scrolling.
-	if m.chat.InVisualMode() {
-		handled, cmd := m.chat.HandleVisualKeyMsg(msg)
+	if m.activeChat().InVisualMode() {
+		handled, cmd := m.activeChat().HandleVisualKeyMsg(msg)
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -2222,6 +2279,14 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 	// Handle cancel key when agent is busy.
 	if key.Matches(msg, m.keyMap.Chat.Cancel) {
+		if m.agentListFocused {
+			m.exitAgentListToEditor()
+			return tea.Batch(cmds...)
+		}
+		if m.subAgentSessionID != "" {
+			m.com.Workspace.AgentCancelSubAgent(m.subAgentSessionID)
+			return tea.Batch(cmds...)
+		}
 		if m.isAgentBusy() {
 			if cmd := m.cancelAgent(); cmd != nil {
 				cmds = append(cmds, cmd)
@@ -2320,6 +2385,10 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				m.randomizePlaceholders()
 				m.historyReset()
 
+				if m.subAgentSessionID != "" {
+					return tea.Batch(m.sendToSubAgent(value), m.loadPromptHistory())
+				}
+
 				return tea.Batch(m.sendMessage(value, attachments...), m.loadPromptHistory())
 			case key.Matches(msg, m.keyMap.Chat.NewSession):
 				if !m.hasSession() {
@@ -2336,8 +2405,9 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				if m.state != uiLanding {
 					m.setState(m.state, uiFocusMain)
 					m.textarea.Blur()
-					m.chat.Focus()
-					m.chat.SetSelected(m.chat.Len() - 1)
+					activeChat := m.activeChat()
+					activeChat.Focus()
+					activeChat.SetSelected(activeChat.Len() - 1)
 				}
 			case key.Matches(msg, m.keyMap.Editor.OpenEditor):
 				if m.isAgentBusy() {
@@ -2360,6 +2430,16 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 					cmds = append(cmds, cmd)
 				}
 			case key.Matches(msg, m.keyMap.Editor.HistoryNext):
+				// If the cursor is already at the very end of the
+				// prompt and no history entry is being browsed,
+				// pressing Down would otherwise be a no-op: repurpose
+				// it to jump into the sub-agent picker list instead
+				// (mirrors Claude Code's "press Down in the input
+				// box" flow).
+				if m.agentListAreaHeight() > 0 && m.promptHistory.index < 0 && m.isAtEditorEnd() {
+					m.enterAgentList()
+					break
+				}
 				cmd := m.handleHistoryDown(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
@@ -2470,11 +2550,18 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				}
 			}
 		case uiFocusMain:
+			if m.agentListFocused {
+				if cmd := m.handleAgentListKeyMsg(msg); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				return tea.Sequence(cmds...)
+			}
+			activeChat := m.activeChat()
 			switch {
 			case key.Matches(msg, m.keyMap.Tab):
 				m.focus = uiFocusEditor
 				cmds = append(cmds, m.textarea.Focus())
-				m.chat.Blur()
+				activeChat.Blur()
 			case key.Matches(msg, m.keyMap.Chat.NewSession):
 				if !m.hasSession() {
 					break
@@ -2488,69 +2575,73 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 					cmds = append(cmds, cmd)
 				}
 			case key.Matches(msg, m.keyMap.Chat.Expand):
-				m.chat.ToggleExpandedSelectedItem()
+				activeChat.ToggleExpandedSelectedItem()
 			case key.Matches(msg, m.keyMap.Chat.Up):
-				if cmd := m.chat.ScrollByAndAnimate(-1); cmd != nil {
+				if cmd := activeChat.ScrollByAndAnimate(-1); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
-				if !m.chat.SelectedItemInView() {
-					m.chat.SelectPrev()
-					if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
+				if !activeChat.SelectedItemInView() {
+					activeChat.SelectPrev()
+					if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 				}
 			case key.Matches(msg, m.keyMap.Chat.Down):
-				if cmd := m.chat.ScrollByAndAnimate(1); cmd != nil {
+				if activeChat.AtBottom() && m.agentListAreaHeight() > 0 {
+					m.enterAgentList()
+					break
+				}
+				if cmd := activeChat.ScrollByAndAnimate(1); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
-				if !m.chat.SelectedItemInView() {
-					m.chat.SelectNext()
-					if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
+				if !activeChat.SelectedItemInView() {
+					activeChat.SelectNext()
+					if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 				}
 			case key.Matches(msg, m.keyMap.Chat.UpOneItem):
-				m.chat.SelectPrev()
-				if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
+				activeChat.SelectPrev()
+				if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			case key.Matches(msg, m.keyMap.Chat.DownOneItem):
-				m.chat.SelectNext()
-				if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
+				activeChat.SelectNext()
+				if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			case key.Matches(msg, m.keyMap.Chat.HalfPageUp):
-				if cmd := m.chat.ScrollByAndAnimate(-m.chat.Height() / 2); cmd != nil {
+				if cmd := activeChat.ScrollByAndAnimate(-activeChat.Height() / 2); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
-				m.chat.SelectFirstInView()
+				activeChat.SelectFirstInView()
 			case key.Matches(msg, m.keyMap.Chat.HalfPageDown):
-				if cmd := m.chat.ScrollByAndAnimate(m.chat.Height() / 2); cmd != nil {
+				if cmd := activeChat.ScrollByAndAnimate(activeChat.Height() / 2); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
-				m.chat.SelectLastInView()
+				activeChat.SelectLastInView()
 			case key.Matches(msg, m.keyMap.Chat.PageUp):
-				if cmd := m.chat.ScrollByAndAnimate(-m.chat.Height()); cmd != nil {
+				if cmd := activeChat.ScrollByAndAnimate(-activeChat.Height()); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
-				m.chat.SelectFirstInView()
+				activeChat.SelectFirstInView()
 			case key.Matches(msg, m.keyMap.Chat.PageDown):
-				if cmd := m.chat.ScrollByAndAnimate(m.chat.Height()); cmd != nil {
+				if cmd := activeChat.ScrollByAndAnimate(activeChat.Height()); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
-				m.chat.SelectLastInView()
+				activeChat.SelectLastInView()
 			case key.Matches(msg, m.keyMap.Chat.Home):
-				if cmd := m.chat.ScrollToTopAndAnimate(); cmd != nil {
+				if cmd := activeChat.ScrollToTopAndAnimate(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
-				m.chat.SelectFirst()
+				activeChat.SelectFirst()
 			case key.Matches(msg, m.keyMap.Chat.End):
-				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+				if cmd := activeChat.ScrollToBottomAndAnimate(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
-				m.chat.SelectLast()
+				activeChat.SelectLast()
 			default:
-				if ok, cmd := m.chat.HandleKeyMsg(msg); ok {
+				if ok, cmd := activeChat.HandleKeyMsg(msg); ok {
 					cmds = append(cmds, cmd)
 				} else {
 					handleGlobalKeys(msg)
@@ -2626,7 +2717,12 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 			m.drawSidebar(scr, layout.sidebar)
 		}
 
-		m.chat.Draw(scr, layout.main)
+		if m.subAgentSessionID != "" {
+			rest := m.drawSubAgentBanner(scr, layout.main)
+			m.subAgentChat.Draw(scr, rest)
+		} else {
+			m.chat.Draw(scr, layout.main)
+		}
 		if layout.pills.Dy() > 0 && m.pillsView != "" {
 			uv.NewStyledString(m.pillsView).Draw(scr, layout.pills)
 		}
@@ -2637,6 +2733,10 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		}
 		editor := uv.NewStyledString(m.renderEditorView(editorWidth))
 		editor.Draw(scr, layout.editor)
+
+		if layout.agentList.Dy() > 0 {
+			uv.NewStyledString(m.renderAgentList(layout.agentList.Dx())).Draw(scr, layout.agentList)
+		}
 
 		// Draw details overlay in compact mode when open
 		if m.isCompact && m.detailsOpen {
@@ -3056,6 +3156,9 @@ func (m *UI) updateSize() {
 	m.status.SetWidth(m.layout.status.Dx())
 
 	m.chat.SetSize(m.layout.main.Dx(), m.layout.main.Dy())
+	if m.subAgentChat != nil {
+		m.subAgentChat.SetSize(m.layout.main.Dx(), max(m.layout.main.Dy()-subAgentBannerHeight, 0))
+	}
 	m.textarea.MaxHeight = TextareaMaxHeight
 	m.textarea.SetWidth(m.layout.editor.Dx())
 	m.renderPills()
@@ -3187,29 +3290,16 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 			uiLayout.sessionDetails.Min.Y += compactHeaderHeight // adjust for header
 			// Add one line gap between header and main content
 			mainRect.Min.Y += 1
-			var editorRect image.Rectangle
-			layout.Vertical(
-				layout.Len(mainRect.Dy()-editorHeight),
-				layout.Fill(1),
-			).Split(mainRect).Assign(&mainRect, &editorRect)
-			mainRect.Max.X -= 1 // Add padding right
+			chatAreaRect, editorRect, agentListRect := m.splitEditorAgentList(mainRect, editorHeight)
+			chatAreaRect.Max.X -= 1 // Add padding right
 			uiLayout.header = headerRect
-			pillsHeight := m.pillsAreaHeight()
-			if pillsHeight > 0 {
-				pillsHeight = min(pillsHeight, mainRect.Dy())
-				var chatRect, pillsRect image.Rectangle
-				layout.Vertical(
-					layout.Len(mainRect.Dy()-pillsHeight),
-					layout.Fill(1),
-				).Split(mainRect).Assign(&chatRect, &pillsRect)
-				uiLayout.main = chatRect
-				uiLayout.pills = pillsRect
-			} else {
-				uiLayout.main = mainRect
-			}
+			chatRect, pillsRect := m.splitMainPills(chatAreaRect)
+			uiLayout.main = chatRect
+			uiLayout.pills = pillsRect
 			// Add bottom margin to main
 			uiLayout.main.Max.Y -= 1
 			uiLayout.editor = editorRect
+			uiLayout.agentList = agentListRect
 		} else {
 			// Layout
 			//
@@ -3217,6 +3307,8 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 			// main  |
 			// ------| side
 			// editor|
+			// ----------
+			// agents
 			// ----------
 			// help
 
@@ -3227,29 +3319,16 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 			).Split(appRect).Assign(&mainRect, &sideRect)
 			// Add padding left
 			sideRect.Min.X += 1
-			var editorRect image.Rectangle
-			layout.Vertical(
-				layout.Len(mainRect.Dy()-editorHeight),
-				layout.Fill(1),
-			).Split(mainRect).Assign(&mainRect, &editorRect)
-			mainRect.Max.X -= 1 // Add padding right
+			chatAreaRect, editorRect, agentListRect := m.splitEditorAgentList(mainRect, editorHeight)
+			chatAreaRect.Max.X -= 1 // Add padding right
 			uiLayout.sidebar = sideRect
-			pillsHeight := m.pillsAreaHeight()
-			if pillsHeight > 0 {
-				pillsHeight = min(pillsHeight, mainRect.Dy())
-				var chatRect, pillsRect image.Rectangle
-				layout.Vertical(
-					layout.Len(mainRect.Dy()-pillsHeight),
-					layout.Fill(1),
-				).Split(mainRect).Assign(&chatRect, &pillsRect)
-				uiLayout.main = chatRect
-				uiLayout.pills = pillsRect
-			} else {
-				uiLayout.main = mainRect
-			}
+			chatRect, pillsRect := m.splitMainPills(chatAreaRect)
+			uiLayout.main = chatRect
+			uiLayout.pills = pillsRect
 			// Add bottom margin to main
 			uiLayout.main.Max.Y -= 1
 			uiLayout.editor = editorRect
+			uiLayout.agentList = agentListRect
 		}
 	}
 
@@ -3272,6 +3351,12 @@ type uiLayout struct {
 
 	// pills is the area for the pills panel.
 	pills uv.Rectangle
+
+	// agentList is the area for the always-visible sub-agent picker
+	// list (see subagent.go), shown directly below the editor (input
+	// box) and above the status bar when at least one sub-agent is
+	// running.
+	agentList uv.Rectangle
 
 	// editor is the area for the editor pane.
 	editor uv.Rectangle

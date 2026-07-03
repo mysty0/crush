@@ -346,6 +346,18 @@ func (m *Chat) InvalidateRenderCaches() {
 	chat.ClearItemCaches(items)
 }
 
+// Items returns all top-level message items currently in the chat, in
+// list order.
+func (m *Chat) Items() []chat.MessageItem {
+	items := make([]chat.MessageItem, 0, m.list.Len())
+	for i := range m.list.Len() {
+		if item, ok := m.list.ItemAt(i).(chat.MessageItem); ok {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
 // SetMessages sets the chat messages to the provided list of message items.
 func (m *Chat) SetMessages(msgs ...chat.MessageItem) tea.Cmd {
 	m.idInxMap = make(map[string]int)
@@ -987,6 +999,23 @@ func (m *Chat) HighlightContent() string {
 		if hi, ok := item.(list.Highlightable); ok {
 			startLine, startCol, endLine, endCol := hi.Highlight()
 			listWidth := m.list.Width()
+
+			// Prefer resolving back to original (unwrapped) source lines
+			// when the highlight falls entirely within one fenced code
+			// block: glamour hard-wraps long code lines for display, so
+			// extracting straight from the rendered buffer would copy a
+			// broken multi-line command instead of the real single line.
+			// Sentinel ranges (-1) only occur for multi-item spans, which
+			// this path does not attempt to handle; it falls through to
+			// the normal rendered-buffer extraction below.
+			if fc, ok := item.(chat.FenceCopyable); ok && startLine >= 0 && endLine >= 0 {
+				if rawLines, ok := fc.RawLinesForRange(listWidth, startLine, endLine); ok {
+					sb.WriteString(strings.Join(rawLines, "\n"))
+					sb.WriteString(strings.Repeat("\n", m.list.Gap()))
+					continue
+				}
+			}
+
 			var rendered string
 			if rr, ok := item.(list.RawRenderable); ok {
 				rendered = rr.RawRender(listWidth)

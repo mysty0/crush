@@ -262,6 +262,21 @@ func (w *ClientWorkspace) AgentSummarize(ctx context.Context, sessionID string) 
 	return w.client.AgentSummarizeSession(ctx, w.workspaceID(), sessionID)
 }
 
+// errSubAgentChatClientUnsupported is returned by the client/server
+// workspace because steering a sub-agent turn is not yet plumbed
+// through the HTTP protocol. It is available in the default in-process
+// (AppWorkspace) mode.
+var errSubAgentChatClientUnsupported = errors.New("chatting with a sub-agent is not supported in client/server mode yet")
+
+func (w *ClientWorkspace) AgentSendToSubAgent(ctx context.Context, subAgentSessionID, prompt string) error {
+	return errSubAgentChatClientUnsupported
+}
+
+func (w *ClientWorkspace) AgentCancelSubAgent(subAgentSessionID string) {
+	// Not supported in client/server mode yet; see
+	// errSubAgentChatClientUnsupported.
+}
+
 // errRewindClientUnsupported is returned by the client/server workspace
 // because rewind is not yet plumbed through the HTTP protocol. Rewind is
 // available in the default in-process (AppWorkspace) mode.

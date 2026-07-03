@@ -94,6 +94,14 @@ type Workspace interface {
 	AgentQueuedPromptsList(sessionID string) []string
 	AgentClearQueue(sessionID string)
 	AgentSummarize(ctx context.Context, sessionID string) error
+	// AgentSendToSubAgent steers a currently-running sub-agent turn by
+	// injecting a follow-up user prompt into its session. It errors if
+	// the sub-agent session is not currently busy (e.g. it already
+	// finished): follow-ups are only supported mid-turn.
+	AgentSendToSubAgent(ctx context.Context, subAgentSessionID, prompt string) error
+	// AgentCancelSubAgent cancels a currently-running sub-agent turn.
+	// It is a no-op if the sub-agent session is not currently busy.
+	AgentCancelSubAgent(subAgentSessionID string)
 
 	// RewindListPoints returns the user messages a session can be rewound
 	// to, newest first.

@@ -49,6 +49,9 @@ type KeyMap struct {
 		Expand         key.Binding
 		ScrollLeft     key.Binding
 		ScrollRight    key.Binding
+		// Confirm selects the currently highlighted entry in the
+		// agent picker list (see subagent.go).
+		Confirm key.Binding
 	}
 
 	Initialize struct {
@@ -259,6 +262,10 @@ func DefaultKeyMap() KeyMap {
 	km.Chat.ScrollRight = key.NewBinding(
 		key.WithKeys("shift+right", "L"),
 		key.WithHelp("shift+→/L", "scroll right"),
+	)
+	km.Chat.Confirm = key.NewBinding(
+		key.WithKeys("enter"),
+		key.WithHelp("enter", "select"),
 	)
 	km.Initialize.Yes = key.NewBinding(
 		key.WithKeys("y", "Y"),

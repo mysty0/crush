@@ -219,6 +219,19 @@ func (w *AppWorkspace) AgentSummarize(ctx context.Context, sessionID string) err
 	return w.app.AgentCoordinator.Summarize(ctx, sessionID)
 }
 
+func (w *AppWorkspace) AgentSendToSubAgent(ctx context.Context, subAgentSessionID, prompt string) error {
+	if w.app.AgentCoordinator == nil {
+		return errors.New("agent coordinator not initialized")
+	}
+	return w.app.AgentCoordinator.SendToSubAgent(ctx, subAgentSessionID, prompt)
+}
+
+func (w *AppWorkspace) AgentCancelSubAgent(subAgentSessionID string) {
+	if w.app.AgentCoordinator != nil {
+		w.app.AgentCoordinator.CancelSubAgent(subAgentSessionID)
+	}
+}
+
 func (w *AppWorkspace) RewindListPoints(ctx context.Context, sessionID string) ([]rewind.RewindPoint, error) {
 	return w.app.Rewind.ListRewindPoints(ctx, sessionID)
 }
