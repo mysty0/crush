@@ -151,6 +151,18 @@ type AssistantMessageItem struct {
 	// thinking text, which burns CPU and starves the terminal emulator
 	// during long reasoning traces.
 	streamingThinking streamingMarkdown
+
+	// fenceMap resolves a copy/highlight over a hard-wrapped code-block
+	// line back to its original, unwrapped source line (see
+	// fence_map.go / FenceCopyable). Built lazily on first copy attempt
+	// and cached per (width, content) since it requires several extra
+	// glamour renders; fenceMapBuilt distinguishes "not computed yet"
+	// from "computed, and there were no fences" (fenceMap == nil is
+	// valid in both cases).
+	fenceMap      *fenceMap
+	fenceMapBuilt bool
+	fenceMapWidth int
+	fenceMapHash  uint64
 }
 
 var _ Expandable = (*AssistantMessageItem)(nil)
@@ -266,6 +278,32 @@ func (a *AssistantMessageItem) RawRender(width int) string {
 	}
 
 	return highlightedContent
+}
+
+// RawLinesForRange implements [FenceCopyable]. It lazily builds (and
+// caches) a fence map for the message's raw content text and delegates
+// the lookup to it.
+func (a *AssistantMessageItem) RawLinesForRange(width, startLine, endLine int) ([]string, bool) {
+	return a.getFenceMap(width).RawLinesFor(startLine, endLine)
+}
+
+// getFenceMap returns the cached fence map for width, (re)building it if
+// the width or the message's content text has changed since the last
+// build. Building requires several extra glamour renders (one per fence
+// plus one per fence line), so this is only ever called on demand from a
+// copy attempt, never from the render/draw path.
+func (a *AssistantMessageItem) getFenceMap(width int) *fenceMap {
+	content := a.message.Content().Text
+	hash := fnv64(content)
+	if a.fenceMapBuilt && a.fenceMapWidth == width && a.fenceMapHash == hash {
+		return a.fenceMap
+	}
+	fullLines := strings.Split(ansi.Strip(a.RawRender(width)), "\n")
+	a.fenceMap = buildFenceMap(a.sty, content, fullLines, cappedMessageWidth(width))
+	a.fenceMapBuilt = true
+	a.fenceMapWidth = width
+	a.fenceMapHash = hash
+	return a.fenceMap
 }
 
 // Render implements MessageItem.
