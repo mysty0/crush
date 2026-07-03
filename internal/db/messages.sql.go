@@ -63,6 +63,66 @@ func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (M
 	return i, err
 }
 
+const createMessageWithTimestamp = `-- name: CreateMessageWithTimestamp :one
+INSERT INTO messages (
+    id,
+    session_id,
+    role,
+    parts,
+    model,
+    provider,
+    is_summary_message,
+    created_at,
+    updated_at
+) VALUES (
+    ?, ?, ?, ?, ?, ?, ?, ?, ?
+)
+RETURNING id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message
+`
+
+type CreateMessageWithTimestampParams struct {
+	ID               string         `json:"id"`
+	SessionID        string         `json:"session_id"`
+	Role             string         `json:"role"`
+	Parts            string         `json:"parts"`
+	Model            sql.NullString `json:"model"`
+	Provider         sql.NullString `json:"provider"`
+	IsSummaryMessage int64          `json:"is_summary_message"`
+	CreatedAt        int64          `json:"created_at"`
+	UpdatedAt        int64          `json:"updated_at"`
+}
+
+// Like CreateMessage but preserves explicit created_at/updated_at values.
+// Used when copying messages (e.g. rewind forks) so the original ordering
+// is retained; ListMessagesBySession orders by created_at.
+func (q *Queries) CreateMessageWithTimestamp(ctx context.Context, arg CreateMessageWithTimestampParams) (Message, error) {
+	row := q.queryRow(ctx, q.createMessageWithTimestampStmt, createMessageWithTimestamp,
+		arg.ID,
+		arg.SessionID,
+		arg.Role,
+		arg.Parts,
+		arg.Model,
+		arg.Provider,
+		arg.IsSummaryMessage,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	var i Message
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.Role,
+		&i.Parts,
+		&i.Model,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+		&i.Provider,
+		&i.IsSummaryMessage,
+	)
+	return i, err
+}
+
 const deleteMessage = `-- name: DeleteMessage :exec
 DELETE FROM messages
 WHERE id = ?

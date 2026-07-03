@@ -25,6 +25,25 @@ INSERT INTO messages (
 )
 RETURNING *;
 
+-- name: CreateMessageWithTimestamp :one
+-- Like CreateMessage but preserves explicit created_at/updated_at values.
+-- Used when copying messages (e.g. rewind forks) so the original ordering
+-- is retained; ListMessagesBySession orders by created_at.
+INSERT INTO messages (
+    id,
+    session_id,
+    role,
+    parts,
+    model,
+    provider,
+    is_summary_message,
+    created_at,
+    updated_at
+) VALUES (
+    ?, ?, ?, ?, ?, ?, ?, ?, ?
+)
+RETURNING *;
+
 -- name: UpdateMessage :exec
 UPDATE messages
 SET

@@ -46,6 +46,12 @@ type CreateMessageParams struct {
 type Service interface {
 	pubsub.Subscriber[Message]
 	Create(ctx context.Context, sessionID string, params CreateMessageParams) (Message, error)
+	// Copy inserts a message into the destination session preserving the
+	// source message's parts and created_at/updated_at timestamps. It is
+	// used when duplicating a conversation (e.g. rewind forks) so that the
+	// copy keeps the original ordering; unlike Create it does not append a
+	// synthetic Finish part.
+	Copy(ctx context.Context, sessionID string, src Message) (Message, error)
 	Update(ctx context.Context, message Message) error
 	Get(ctx context.Context, id string) (Message, error)
 	List(ctx context.Context, sessionID string) ([]Message, error)
@@ -191,6 +197,39 @@ func (s *service) Create(ctx context.Context, sessionID string, params CreateMes
 	}
 	// Clone the message before publishing to avoid race conditions with
 	// concurrent modifications to the Parts slice.
+	s.Publish(pubsub.CreatedEvent, message.Clone())
+	return message, nil
+}
+
+// Copy inserts src into sessionID preserving its parts and timestamps.
+// See the Service.Copy documentation for why this exists.
+func (s *service) Copy(ctx context.Context, sessionID string, src Message) (Message, error) {
+	partsJSON, err := marshalParts(src.Parts)
+	if err != nil {
+		return Message{}, err
+	}
+	isSummary := int64(0)
+	if src.IsSummaryMessage {
+		isSummary = 1
+	}
+	dbMessage, err := s.q.CreateMessageWithTimestamp(ctx, db.CreateMessageWithTimestampParams{
+		ID:               uuid.New().String(),
+		SessionID:        sessionID,
+		Role:             string(src.Role),
+		Parts:            string(partsJSON),
+		Model:            sql.NullString{String: src.Model, Valid: src.Model != ""},
+		Provider:         sql.NullString{String: src.Provider, Valid: src.Provider != ""},
+		IsSummaryMessage: isSummary,
+		CreatedAt:        src.CreatedAt,
+		UpdatedAt:        src.UpdatedAt,
+	})
+	if err != nil {
+		return Message{}, err
+	}
+	message, err := s.fromDBItem(dbMessage)
+	if err != nil {
+		return Message{}, err
+	}
 	s.Publish(pubsub.CreatedEvent, message.Clone())
 	return message, nil
 }

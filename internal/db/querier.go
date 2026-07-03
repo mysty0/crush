@@ -11,6 +11,10 @@ import (
 type Querier interface {
 	CreateFile(ctx context.Context, arg CreateFileParams) (File, error)
 	CreateMessage(ctx context.Context, arg CreateMessageParams) (Message, error)
+	// Like CreateMessage but preserves explicit created_at/updated_at values.
+	// Used when copying messages (e.g. rewind forks) so the original ordering
+	// is retained; ListMessagesBySession orders by created_at.
+	CreateMessageWithTimestamp(ctx context.Context, arg CreateMessageWithTimestampParams) (Message, error)
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
 	DeleteFile(ctx context.Context, id string) error
 	DeleteMessage(ctx context.Context, id string) error

@@ -681,6 +681,16 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.result.ForkedSessionID != "" {
 			// Switch to the forked session.
 			cmds = append(cmds, m.loadSession(msg.result.ForkedSessionID))
+			// Drop the rewound message back into the prompt so it can be
+			// edited and resent (the target message and everything after
+			// it were removed from the fork).
+			if msg.result.PrefillText != "" {
+				m.textarea.SetValue(msg.result.PrefillText)
+				m.textarea.MoveToEnd()
+				m.syncBangModeFromTextarea()
+				m.focus = uiFocusEditor
+				cmds = append(cmds, m.textarea.Focus())
+			}
 			if note == "" {
 				note = "Rewound to a new forked session."
 			} else {
@@ -1037,8 +1047,13 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if item := m.chat.MessageItem(msg.Payload.ToolCallID); item != nil {
 			if streamer, ok := item.(chat.PartialOutputSetter); ok {
 				streamer.SetPartialOutput(msg.Payload.Output)
-				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
-					cmds = append(cmds, cmd)
+				// Only follow the output if the user is already at the
+				// bottom; otherwise keep their scroll position so they can
+				// read earlier output while the command runs.
+				if m.chat.Follow() {
+					if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			}
 		}
@@ -1046,8 +1061,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if item := m.chat.MessageItem(msg.PendingID); item != nil {
 			if shellItem, ok := item.(*chat.ShellItem); ok {
 				shellItem.AppendOutput(msg.Chunk)
-				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
-					cmds = append(cmds, cmd)
+				if m.chat.Follow() {
+					if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			}
 		}

@@ -45,6 +45,10 @@ type Result struct {
 	ForkedSessionID string
 	// FilesRestored is the number of files written back to disk.
 	FilesRestored int
+	// PrefillText is the text of the target user message. The UI places
+	// it back into the prompt so the user can edit and resend it — the
+	// target message and everything after it are dropped from the fork.
+	PrefillText string
 }
 
 // Service performs rewind operations over the message, session, and file
@@ -134,6 +138,9 @@ func (s *service) Rewind(ctx context.Context, sessionID, messageID string, mode 
 	}
 
 	var result Result
+	// Surface the target message text so the UI can drop it back into the
+	// prompt for editing/resending.
+	result.PrefillText = target.Content().Text
 
 	if mode == ModeConversation || mode == ModeBoth {
 		forkID, err := s.forkConversation(ctx, sessionID, target)
@@ -155,9 +162,10 @@ func (s *service) Rewind(ctx context.Context, sessionID, messageID string, mode 
 }
 
 // forkConversation creates a new session and copies every message in the
-// origin session up to and including the target into it, preserving order.
-// The cut is by position in the ordered message list (not by timestamp),
-// so messages sharing a one-second created_at are handled correctly.
+// origin session up to (but excluding) the target into it, preserving
+// order. The target user message and everything after it are dropped; the
+// cut is by position in the ordered message list (not by timestamp), so
+// messages sharing a one-second created_at are handled correctly.
 // Returns the new session's ID.
 func (s *service) forkConversation(ctx context.Context, sessionID string, target message.Message) (string, error) {
 	origin, err := s.sessions.Get(ctx, sessionID)
@@ -176,19 +184,14 @@ func (s *service) forkConversation(ctx context.Context, sessionID string, target
 	}
 
 	for _, m := range all {
-		clone := m.Clone()
-		if _, err := s.messages.Create(ctx, fork.ID, message.CreateMessageParams{
-			Role:             clone.Role,
-			Parts:            clone.Parts,
-			Model:            clone.Model,
-			Provider:         clone.Provider,
-			IsSummaryMessage: clone.IsSummaryMessage,
-		}); err != nil {
-			return "", fmt.Errorf("rewind: copy message into fork: %w", err)
-		}
-		// Stop after copying the target message (inclusive).
+		// Stop before the target message: the target (the user message
+		// being rewound to) and everything after it are dropped. Its text
+		// is placed back into the prompt so the user can edit and resend.
 		if m.ID == target.ID {
 			break
+		}
+		if _, err := s.messages.Copy(ctx, fork.ID, m); err != nil {
+			return "", fmt.Errorf("rewind: copy message into fork: %w", err)
 		}
 	}
 

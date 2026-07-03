@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/db"
@@ -111,14 +112,16 @@ func TestRewindConversationForksWithoutTouchingOrigin(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, originMsgs, 5)
 
-	// Fork keeps everything up to and including the target user message
-	// (so the user can continue from there); later messages are dropped.
+	// Fork keeps everything BEFORE the target user message; the target
+	// and everything after it are dropped. The target's text is returned
+	// so the UI can put it back in the prompt for editing/resending.
 	forkMsgs, err := e.messages.List(e.ctx, res.ForkedSessionID)
 	require.NoError(t, err)
-	require.Len(t, forkMsgs, 3)
+	require.Len(t, forkMsgs, 2)
 	require.Equal(t, "first turn", forkMsgs[0].Content().Text)
 	require.Equal(t, "first reply", forkMsgs[1].Content().Text)
-	require.Equal(t, "keep me", forkMsgs[2].Content().Text)
+	require.Equal(t, "keep me", res.PrefillText,
+		"the rewound message text must be returned for the prompt")
 
 	// Fork records its provenance.
 	fork, err := e.sessions.Get(e.ctx, res.ForkedSessionID)
@@ -126,6 +129,60 @@ func TestRewindConversationForksWithoutTouchingOrigin(t *testing.T) {
 	require.Equal(t, sess.ID, fork.ForkedFromSessionID)
 	require.Equal(t, target.ID, fork.ForkedAtMessageID)
 	require.Equal(t, "Origin (rewind)", fork.Title)
+}
+
+// TestRewindForkPreservesOrderAndTimestamps guards against a regression
+// where the fork copied messages with fresh created_at timestamps. Since
+// messages are ordered by created_at (second resolution), copying many
+// messages within the same second collapsed them to one or two timestamp
+// values and scrambled the fork's order — the UI then showed a random
+// message as the latest output. The fork must preserve each source
+// message's created_at so ordering is identical to the origin.
+func TestRewindForkPreservesOrderAndTimestamps(t *testing.T) {
+	e := newTestEnv(t)
+
+	sess, err := e.sessions.Create(e.ctx, "Origin")
+	require.NoError(t, err)
+
+	// Seed the origin with messages carrying distinct, fixed timestamps
+	// in the past. This mirrors a real conversation whose messages span
+	// specific seconds, and makes the assertion below catch a fork that
+	// stamps fresh "now" timestamps (which would collapse ordering).
+	const n = 30
+	const base = int64(1_700_000_000)
+	const targetIdx = 20
+	var target message.Message
+	for i := 0; i < n; i++ {
+		src := message.Message{
+			Role:      message.User,
+			Parts:     []message.ContentPart{message.TextContent{Text: "msg " + strconv.Itoa(i)}},
+			CreatedAt: base + int64(i),
+			UpdatedAt: base + int64(i),
+		}
+		m, err := e.messages.Copy(e.ctx, sess.ID, src)
+		require.NoError(t, err)
+		if i == targetIdx {
+			target = m
+		}
+	}
+
+	res, err := e.rewind.Rewind(e.ctx, sess.ID, target.ID, ModeConversation)
+	require.NoError(t, err)
+
+	forkMsgs, err := e.messages.List(e.ctx, res.ForkedSessionID)
+	require.NoError(t, err)
+	// The fork contains everything before the target (indices 0..19);
+	// the target and everything after it are dropped.
+	require.Len(t, forkMsgs, targetIdx)
+	require.Equal(t, "msg "+strconv.Itoa(targetIdx), res.PrefillText,
+		"the rewound message text must be returned for the prompt")
+
+	for i := range forkMsgs {
+		require.Equal(t, "msg "+strconv.Itoa(i), forkMsgs[i].Content().Text,
+			"fork message %d out of order", i)
+		require.Equal(t, base+int64(i), forkMsgs[i].CreatedAt,
+			"fork message %d must preserve created_at", i)
+	}
 }
 
 func TestRewindCodeRestoresFilesOnDisk(t *testing.T) {
