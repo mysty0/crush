@@ -57,8 +57,9 @@ const (
 )
 
 const (
-	AgentCoder string = "coder"
-	AgentTask  string = "task"
+	AgentCoder     string = "coder"
+	AgentTask      string = "task"
+	AgentTaskWrite string = "task-write"
 )
 
 type SelectedModel struct {
@@ -819,9 +820,19 @@ func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 }
 
 func resolveReadOnlyTools(tools []string) []string {
-	readOnlyTools := []string{"Glob", "Grep", "ls", "sourcegraph", "Read"}
+	readOnlyTools := []string{"Glob", "Grep", "ls", "sourcegraph", "Read", "agentic_fetch"}
 	// filter to only include tools that are in allowedtools (include mode)
 	return filterSlice(tools, readOnlyTools, true)
+}
+
+// resolveWritableSubagentTools returns the tool set for a write/execute
+// sub-agent: the full allowed tool set minus the tools that would let it
+// spawn further sub-agents (agent, Workflow). agentic_fetch is kept — its
+// internal agent has a fixed, non-recursive tool set — so a write sub-agent
+// can still research the web while remaining unable to nest task agents.
+func resolveWritableSubagentTools(tools []string) []string {
+	recursiveTools := []string{"agent", "Workflow"}
+	return filterSlice(tools, recursiveTools, false)
 }
 
 func filterSlice(data []string, mask []string, include bool) []string {
@@ -856,6 +867,17 @@ func (c *Config) SetupAgents() {
 			Model:        SelectedModelTypeLarge,
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: resolveReadOnlyTools(allowedTools),
+			// NO MCPs or LSPs by default
+			AllowedMCP: map[string][]string{},
+		},
+
+		AgentTaskWrite: {
+			ID:           AgentTaskWrite,
+			Name:         "Task (write)",
+			Description:  "An agent that can edit files and run commands to carry out a delegated task.",
+			Model:        SelectedModelTypeLarge,
+			ContextPaths: c.Options.ContextPaths,
+			AllowedTools: resolveWritableSubagentTools(allowedTools),
 			// NO MCPs or LSPs by default
 			AllowedMCP: map[string][]string{},
 		},

@@ -157,10 +157,10 @@ type coordinator struct {
 	// the one that owns a given sub-agent session (a session runs on
 	// exactly one instance).
 	taskAgents *csync.Map[string, SessionAgent]
-	// defaultTaskModelID is the primary model ID of the current default
-	// (configured large) task agent, used to resolve the agent to
-	// dispatch to when the tool call omits a "model".
-	defaultTaskModelID *csync.Value[string]
+	// defaultTaskAgentKey is the registry key of the eagerly-built default
+	// (read-only, configured large model) task agent, used so it is never
+	// pruned and so the tool can dispatch to it without a rebuild.
+	defaultTaskAgentKey *csync.Value[string]
 
 	// workflows tracks background workflow runs (dispatched via the
 	// "Workflow" tool) so they can be listed, viewed, and canceled
@@ -202,22 +202,22 @@ func NewCoordinator(
 	skillTracker := skills.NewTracker(activeSkills)
 
 	c := &coordinator{
-		cfg:                cfg,
-		sessions:           sessions,
-		messages:           messages,
-		permissions:        permissions,
-		history:            history,
-		filetracker:        filetracker,
-		lspManager:         lspManager,
-		notify:             notify,
-		runComplete:        runComplete,
-		agents:             make(map[string]SessionAgent),
-		taskAgents:         csync.NewMap[string, SessionAgent](),
-		defaultTaskModelID: csync.NewValue[string](""),
-		workflows:          newWorkflowRegistry(),
-		allSkills:          allSkills,
-		activeSkills:       activeSkills,
-		skillTracker:       skillTracker,
+		cfg:                 cfg,
+		sessions:            sessions,
+		messages:            messages,
+		permissions:         permissions,
+		history:             history,
+		filetracker:         filetracker,
+		lspManager:          lspManager,
+		notify:              notify,
+		runComplete:         runComplete,
+		agents:              make(map[string]SessionAgent),
+		taskAgents:          csync.NewMap[string, SessionAgent](),
+		defaultTaskAgentKey: csync.NewValue[string](""),
+		workflows:           newWorkflowRegistry(),
+		allSkills:           allSkills,
+		activeSkills:        activeSkills,
+		skillTracker:        skillTracker,
 	}
 
 	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
@@ -795,19 +795,28 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		return strings.Compare(a.Info().Name, b.Info().Name)
 	})
 
-	// Wrap tools with hook interception for the top-level agent only.
-	// Sub-agents (the `agent` task tool, `agentic_fetch`, etc.) run
-	// without hook interception to avoid firing the user's hook N times
-	// per delegated turn. The top-level invocation of the sub-agent tool
-	// itself is still wrapped from the coder's side.
-	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
-
-	// Gate mutating tools on plan mode for the top-level agent. Sub-agents
-	// inherit the restriction transitively: while plan mode is active the
-	// coder cannot reach a point where it would delegate write work.
-	if !isSubAgent {
-		filteredTools = wrapToolsWithPlanMode(filteredTools, c.permissions)
+	// A writable agent is one whose tool set contains mutating tools
+	// (bash, edit, write, download). Read-only sub-agents have none.
+	writable := false
+	for _, tool := range filteredTools {
+		if permission.PlanModeBlocksTool(tool.Info().Name) {
+			writable = true
+			break
+		}
 	}
+
+	// Wrap tools with hook interception. The top-level agent always fires
+	// PreToolUse hooks; read-only sub-agents skip them to avoid firing the
+	// user's hooks N times per delegated turn. Writable sub-agents DO fire
+	// them, so the user's safety guardrails (e.g. block dangerous shell
+	// commands) still apply to the delegated mutating calls.
+	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent && !writable)
+
+	// Gate mutating tools on plan mode. This applies to every agent,
+	// including writable sub-agents, so a sub-agent dispatched while plan
+	// mode is active cannot bypass it. wrapToolsWithPlanMode only wraps
+	// mutating tools, so it is a no-op for read-only sub-agents.
+	filteredTools = wrapToolsWithPlanMode(filteredTools, c.permissions)
 
 	return filteredTools, nil
 }

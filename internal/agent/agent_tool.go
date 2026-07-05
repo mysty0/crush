@@ -21,42 +21,82 @@ var agentToolDescription string
 type AgentParams struct {
 	Prompt string `json:"prompt" description:"The task for the agent to perform"`
 	Model  string `json:"model,omitempty" description:"Optional. The ID of the model to run this task on, chosen from the list of available models in this tool's description. Omit to use the default model. Prefer a more capable model for hard, reasoning-heavy tasks and a smaller, faster model for routine or well-scoped tasks."`
+	Mode   string `json:"mode,omitempty" description:"Optional. \"read\" (default) launches a read-only agent that can only search and read files. \"write\" launches an agent that can also edit files and run shell commands to carry out the task. Use \"write\" only when the task requires making changes."`
 }
 
 const (
 	AgentToolName = "agent"
+
+	taskModeRead  = "read"
+	taskModeWrite = "write"
 )
 
 // taskAgentKey is the registry key for a task agent, uniquely identifying
-// the provider + model it runs on so two providers exposing the same model
-// ID do not collide.
-func taskAgentKey(providerID, modelID string) string {
-	return providerID + "/" + modelID
+// the mode + provider + model it runs on so read/write variants and two
+// providers exposing the same model ID do not collide.
+func taskAgentKey(mode, providerID, modelID string) string {
+	return mode + "/" + providerID + "/" + modelID
+}
+
+// normalizeTaskMode validates and defaults the tool's "mode" parameter.
+func normalizeTaskMode(mode string) (string, error) {
+	switch mode {
+	case "", taskModeRead:
+		return taskModeRead, nil
+	case taskModeWrite:
+		return taskModeWrite, nil
+	default:
+		return "", fmt.Errorf("unknown mode %q; use %q or %q", mode, taskModeRead, taskModeWrite)
+	}
+}
+
+// taskAgentConfig returns the agent configuration backing a task mode: the
+// read-only Task agent or the writable Task agent.
+func (c *coordinator) taskAgentConfig(mode string) (config.Agent, bool) {
+	id := config.AgentTask
+	if mode == taskModeWrite {
+		id = config.AgentTaskWrite
+	}
+	cfg, ok := c.cfg.Config().Agents[id]
+	return cfg, ok
+}
+
+// taskAgentPrompt returns the system prompt for a task mode. Write agents
+// carry out real work, so they use the full coder prompt; read agents use
+// the terse investigate-and-report task prompt.
+func (c *coordinator) taskAgentPrompt(mode string) (*prompt.Prompt, error) {
+	opt := prompt.WithWorkingDir(c.cfg.WorkingDir())
+	if mode == taskModeWrite {
+		return coderPrompt(opt)
+	}
+	return taskPrompt(opt)
 }
 
 func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) {
-	agentCfg, ok := c.cfg.Config().Agents[config.AgentTask]
+	readCfg, ok := c.taskAgentConfig(taskModeRead)
 	if !ok {
 		return nil, errors.New("task agent not configured")
 	}
-	taskPromptTmpl, err := taskPrompt(prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	taskPromptTmpl, err := c.taskAgentPrompt(taskModeRead)
 	if err != nil {
 		return nil, err
 	}
 
-	defaultAgent, err := c.buildAgent(ctx, taskPromptTmpl, agentCfg, true)
+	// Eagerly build the default read-only task agent (configured large
+	// model) so the common path is pre-warmed. Writable agents and
+	// non-default models are built lazily on first request.
+	defaultAgent, err := c.buildAgent(ctx, taskPromptTmpl, readCfg, true)
 	if err != nil {
 		return nil, err
 	}
 
-	// Register the default (configured large) task agent under its model
-	// key and prune idle, non-default per-model instances left over from a
-	// previous model configuration. Busy instances are always kept so an
-	// in-flight sub-agent turn stays steerable/cancelable even after the
-	// user switches models.
+	// Register the default agent under its key and prune idle, non-default
+	// instances left over from a previous model configuration. Busy
+	// instances are always kept so an in-flight sub-agent turn stays
+	// steerable/cancelable even after the user switches models.
 	largeCfg := c.cfg.Config().Models[config.SelectedModelTypeLarge]
-	defaultKey := taskAgentKey(largeCfg.Provider, largeCfg.Model)
-	c.defaultTaskModelID.Set(defaultKey)
+	defaultKey := taskAgentKey(taskModeRead, largeCfg.Provider, largeCfg.Model)
+	c.defaultTaskAgentKey.Set(defaultKey)
 	c.taskAgents.Set(defaultKey, defaultAgent)
 	for key, existing := range c.taskAgents.Seq2() {
 		if key != defaultKey && (existing == nil || !existing.IsBusy()) {
@@ -84,13 +124,14 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 				return fantasy.ToolResponse{}, errors.New("agent message id missing from context")
 			}
 
-			selected := defaultAgent
-			if params.Model != "" {
-				a, err := c.taskAgentForModel(ctx, agentCfg, params.Model)
-				if err != nil {
-					return fantasy.NewTextErrorResponse(err.Error()), nil
-				}
-				selected = a
+			mode, err := normalizeTaskMode(params.Mode)
+			if err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+
+			selected, err := c.taskAgentFor(ctx, mode, params.Model)
+			if err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
 			}
 
 			return c.runSubAgent(ctx, subAgentParams{
@@ -105,25 +146,37 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 	), nil
 }
 
-// taskAgentForModel returns the task agent that runs on the given model ID,
-// building and caching it on first use. The model must belong to an enabled
-// provider; otherwise an error naming the valid model IDs is returned so the
-// LLM can retry with a supported one.
-func (c *coordinator) taskAgentForModel(ctx context.Context, agentCfg config.Agent, modelID string) (SessionAgent, error) {
-	selected, ok := c.resolveTaskModel(modelID)
+// taskAgentFor returns the task agent for the given mode and model ID,
+// building and caching it on first use. An empty model ID uses the
+// configured large model. A non-empty model must belong to an enabled
+// provider; otherwise an error naming the valid model IDs is returned so
+// the LLM can retry with a supported one.
+func (c *coordinator) taskAgentFor(ctx context.Context, mode, modelID string) (SessionAgent, error) {
+	agentCfg, ok := c.taskAgentConfig(mode)
 	if !ok {
-		return nil, fmt.Errorf(
-			"unknown model %q; choose one of the available model IDs: %s",
-			modelID, strings.Join(c.availableModelIDs(), ", "),
-		)
+		return nil, fmt.Errorf("%s task agent not configured", mode)
 	}
 
-	key := taskAgentKey(selected.Provider, selected.Model)
+	var selected config.SelectedModel
+	if modelID == "" {
+		selected = c.cfg.Config().Models[config.SelectedModelTypeLarge]
+	} else {
+		var ok bool
+		selected, ok = c.resolveTaskModel(modelID)
+		if !ok {
+			return nil, fmt.Errorf(
+				"unknown model %q; choose one of the available model IDs: %s",
+				modelID, strings.Join(c.availableModelIDs(), ", "),
+			)
+		}
+	}
+
+	key := taskAgentKey(mode, selected.Provider, selected.Model)
 	if existing, ok := c.taskAgents.Get(key); ok && existing != nil {
 		return existing, nil
 	}
 
-	taskPromptTmpl, err := taskPrompt(prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	taskPromptTmpl, err := c.taskAgentPrompt(mode)
 	if err != nil {
 		return nil, err
 	}
