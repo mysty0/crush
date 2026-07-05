@@ -922,7 +922,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.copyChatHighlight())
 	case DelayedClickMsg:
 		// Handle delayed single-click action (e.g., expansion).
-		m.chat.HandleDelayedClick(msg)
+		m.activeChat().HandleDelayedClick(msg)
 	case tea.MouseClickMsg:
 		// Pass mouse events to dialogs first if any are open.
 		if m.dialog.HasDialogs() {
@@ -941,7 +941,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			x -= m.layout.main.Min.X
 			y -= m.layout.main.Min.Y
 			if !image.Pt(msg.X, msg.Y).In(m.layout.sidebar) {
-				if handled, cmd := m.chat.HandleMouseDown(x, y); handled {
+				if handled, cmd := m.activeChat().HandleMouseDown(x, y); handled {
 					m.lastClickTime = time.Now()
 					if cmd != nil {
 						cmds = append(cmds, cmd)
@@ -964,24 +964,25 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// any mouse movement near the top/bottom row (even a plain
 			// hover with no button held, which some terminals report
 			// despite cell-motion mode) would keep scrolling the chat.
-			if m.chat.Dragging() {
+			activeChat := m.activeChat()
+			if activeChat.Dragging() {
 				if msg.Y <= 0 {
-					if cmd := m.chat.ScrollByAndAnimate(-1); cmd != nil {
+					if cmd := activeChat.ScrollByAndAnimate(-1); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
-					if !m.chat.SelectedItemInView() {
-						m.chat.SelectPrev()
-						if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
+					if !activeChat.SelectedItemInView() {
+						activeChat.SelectPrev()
+						if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
 							cmds = append(cmds, cmd)
 						}
 					}
-				} else if msg.Y >= m.chat.Height()-1 {
-					if cmd := m.chat.ScrollByAndAnimate(1); cmd != nil {
+				} else if msg.Y >= activeChat.Height()-1 {
+					if cmd := activeChat.ScrollByAndAnimate(1); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
-					if !m.chat.SelectedItemInView() {
-						m.chat.SelectNext()
-						if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
+					if !activeChat.SelectedItemInView() {
+						activeChat.SelectNext()
+						if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
 							cmds = append(cmds, cmd)
 						}
 					}
@@ -992,7 +993,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Adjust for chat area position
 			x -= m.layout.main.Min.X
 			y -= m.layout.main.Min.Y
-			m.chat.HandleMouseDrag(x, y)
+			activeChat.HandleMouseDrag(x, y)
 		}
 
 	case tea.MouseReleaseMsg:
@@ -1008,7 +1009,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Adjust for chat area position
 			x -= m.layout.main.Min.X
 			y -= m.layout.main.Min.Y
-			if m.chat.HandleMouseUp(x, y) && m.chat.HasHighlight() {
+			if m.activeChat().HandleMouseUp(x, y) && m.activeChat().HasHighlight() {
 				cmds = append(cmds, tea.Tick(doubleClickThreshold, func(t time.Time) tea.Msg {
 					if time.Since(m.lastClickTime) >= doubleClickThreshold {
 						return copyChatHighlightMsg{}
@@ -1030,25 +1031,26 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// others send DeltaY=1.
 		switch m.state {
 		case uiChat:
+			activeChat := m.activeChat()
 			if msg.DeltaX != 0 {
-				m.chat.ScrollSelectedShellHorizontal(int(msg.DeltaX))
+				activeChat.ScrollSelectedShellHorizontal(int(msg.DeltaX))
 			}
 			lines := int(msg.DeltaY)
 			if lines == 0 {
 				break
 			}
-			if cmd := m.chat.ScrollByAndAnimate(lines); cmd != nil {
+			if cmd := activeChat.ScrollByAndAnimate(lines); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
-			if !m.chat.SelectedItemInView() {
+			if !activeChat.SelectedItemInView() {
 				if lines < 0 {
-					m.chat.SelectPrev()
-				} else if m.chat.AtBottom() {
-					m.chat.SelectLast()
+					activeChat.SelectPrev()
+				} else if activeChat.AtBottom() {
+					activeChat.SelectLast()
 				} else {
-					m.chat.SelectNext()
+					activeChat.SelectNext()
 				}
-				if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
+				if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			}
@@ -1496,7 +1498,7 @@ func (m *UI) handleClickFocus(msg tea.MouseClickMsg) (cmd tea.Cmd) {
 	case m.focus != uiFocusMain && image.Pt(msg.X, msg.Y).In(m.layout.main):
 		m.focus = uiFocusMain
 		m.textarea.Blur()
-		m.chat.Focus()
+		m.activeChat().Focus()
 	}
 	return cmd
 }
@@ -4683,12 +4685,12 @@ func handleMCPResourcesEvent(ws workspace.Workspace, name string) tea.Cmd {
 }
 
 func (m *UI) copyChatHighlight() tea.Cmd {
-	text := m.chat.HighlightContent()
+	text := m.activeChat().HighlightContent()
 	return common.CopyToClipboardWithCallback(
 		text,
 		"Selected text copied to clipboard",
 		func() tea.Msg {
-			m.chat.ClearMouse()
+			m.activeChat().ClearMouse()
 			return nil
 		},
 	)
