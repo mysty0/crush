@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -24,16 +25,24 @@ type NestedToolContainer interface {
 	AddNestedTool(tool ToolMessageItem)
 }
 
+// SubagentModelSetter is implemented by tool items that delegate work to a
+// sub-agent and can display which model that sub-agent used.
+type SubagentModelSetter interface {
+	SetSubagentModel(name string)
+}
+
 // AgentToolMessageItem is a message item that represents an agent tool call.
 type AgentToolMessageItem struct {
 	*baseToolMessageItem
 
-	nestedTools []ToolMessageItem
+	nestedTools   []ToolMessageItem
+	subagentModel string
 }
 
 var (
 	_ ToolMessageItem     = (*AgentToolMessageItem)(nil)
 	_ NestedToolContainer = (*AgentToolMessageItem)(nil)
+	_ SubagentModelSetter = (*AgentToolMessageItem)(nil)
 )
 
 // NewAgentToolMessageItem creates a new [AgentToolMessageItem].
@@ -118,6 +127,17 @@ func (a *AgentToolMessageItem) AddNestedTool(tool ToolMessageItem) {
 	a.Bump()
 }
 
+// SetSubagentModel records the model the delegated sub-agent used so it
+// can be shown in the tool header.
+func (a *AgentToolMessageItem) SetSubagentModel(name string) {
+	if a.subagentModel == name {
+		return
+	}
+	a.subagentModel = name
+	a.clearCache()
+	a.Bump()
+}
+
 // AgentToolRenderContext renders agent tool messages.
 type AgentToolRenderContext struct {
 	agent *AgentToolMessageItem
@@ -137,6 +157,7 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	prompt = strings.ReplaceAll(prompt, "\n", " ")
 
 	header := toolHeader(sty, opts.Status, "Agent", cappedWidth, opts)
+	header = appendSubagentModel(sty, header, r.agent.subagentModel)
 	if opts.Compact {
 		return header
 	}
@@ -198,12 +219,14 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 type AgenticFetchToolMessageItem struct {
 	*baseToolMessageItem
 
-	nestedTools []ToolMessageItem
+	nestedTools   []ToolMessageItem
+	subagentModel string
 }
 
 var (
 	_ ToolMessageItem     = (*AgenticFetchToolMessageItem)(nil)
 	_ NestedToolContainer = (*AgenticFetchToolMessageItem)(nil)
+	_ SubagentModelSetter = (*AgenticFetchToolMessageItem)(nil)
 )
 
 // NewAgenticFetchToolMessageItem creates a new [AgenticFetchToolMessageItem].
@@ -273,6 +296,17 @@ func (a *AgenticFetchToolMessageItem) AddNestedTool(tool ToolMessageItem) {
 	a.Bump()
 }
 
+// SetSubagentModel records the model the delegated sub-agent used so it
+// can be shown in the tool header.
+func (a *AgenticFetchToolMessageItem) SetSubagentModel(name string) {
+	if a.subagentModel == name {
+		return
+	}
+	a.subagentModel = name
+	a.clearCache()
+	a.Bump()
+}
+
 // AgenticFetchToolRenderContext renders agentic fetch tool messages.
 type AgenticFetchToolRenderContext struct {
 	fetch *AgenticFetchToolMessageItem
@@ -304,6 +338,7 @@ func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int
 	}
 
 	header := toolHeader(sty, opts.Status, "Agentic Fetch", cappedWidth, opts, toolParams...)
+	header = appendSubagentModel(sty, header, r.fetch.subagentModel)
 	if opts.Compact {
 		return header
 	}
@@ -355,4 +390,19 @@ func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int
 	}
 
 	return result
+}
+
+// appendSubagentModel appends a muted model label to the first line of a
+// tool header (e.g. "● Agent  claude sonnet 4.5"). It is a no-op when the
+// model name is empty (e.g. the sub-agent has not produced any messages
+// yet). Only the first line is touched so multi-line headers keep their
+// layout.
+func appendSubagentModel(sty *styles.Styles, header, model string) string {
+	if model == "" {
+		return header
+	}
+	label := sty.Tool.ParamKey.Render(model)
+	lines := strings.SplitN(header, "\n", 2)
+	lines[0] = fmt.Sprintf("%s %s", lines[0], label)
+	return strings.Join(lines, "\n")
 }

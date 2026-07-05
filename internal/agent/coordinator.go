@@ -54,16 +54,13 @@ import (
 
 // Coordinator errors.
 var (
-	errCoderAgentNotConfigured         = errors.New("coder agent not configured")
-	errModelProviderNotConfigured      = errors.New("model provider not configured")
-	errLargeModelNotSelected           = errors.New("large model not selected")
-	errSmallModelNotSelected           = errors.New("small model not selected")
-	errLargeModelProviderNotConfigured = errors.New("large model provider not configured")
-	errSmallModelProviderNotConfigured = errors.New("small model provider not configured")
-	errLargeModelNotFound              = errors.New("large model not found in provider config")
-	errSmallModelNotFound              = errors.New("small model not found in provider config")
-	errTaskAgentNotConfigured          = errors.New("task agent not configured")
-	errSubAgentNotRunning              = errors.New("sub-agent is not currently running")
+	errCoderAgentNotConfigured    = errors.New("coder agent not configured")
+	errModelProviderNotConfigured = errors.New("model provider not configured")
+	errLargeModelNotSelected      = errors.New("large model not selected")
+	errSmallModelNotSelected      = errors.New("small model not selected")
+	errTaskAgentNotConfigured     = errors.New("task agent not configured")
+	errSubAgentNotRunning         = errors.New("sub-agent is not currently running")
+	errModelNotFound              = errors.New("model not found in provider config")
 )
 
 // Copilot models that use the Responses API instead of Chat Completions.
@@ -148,11 +145,22 @@ type coordinator struct {
 
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
-	// taskAgent holds the latest task-agent SessionAgent instance (the
-	// one the "agent" tool dispatches sub-agent turns to), so
-	// SendToSubAgent can steer a running sub-agent by session ID.
-	// It is rebuilt on every UpdateModels call.
-	taskAgent *csync.Value[SessionAgent]
+	// taskAgents holds every task-agent SessionAgent instance the
+	// "agent" tool can dispatch sub-agent turns to, keyed by the primary
+	// model ID it runs on. The default (configured large) agent is added
+	// on every UpdateModels call; additional per-model instances are
+	// built lazily the first time the LLM requests that model via the
+	// tool's "model" parameter. Instances are pruned once idle, but a
+	// busy instance is always kept so an in-flight sub-agent turn stays
+	// steerable/cancelable even after the user switches models.
+	// SendToSubAgent and CancelSubAgent iterate every instance to find
+	// the one that owns a given sub-agent session (a session runs on
+	// exactly one instance).
+	taskAgents *csync.Map[string, SessionAgent]
+	// defaultTaskModelID is the primary model ID of the current default
+	// (configured large) task agent, used to resolve the agent to
+	// dispatch to when the tool call omits a "model".
+	defaultTaskModelID *csync.Value[string]
 
 	// workflows tracks background workflow runs (dispatched via the
 	// "Workflow" tool) so they can be listed, viewed, and canceled
@@ -194,21 +202,22 @@ func NewCoordinator(
 	skillTracker := skills.NewTracker(activeSkills)
 
 	c := &coordinator{
-		cfg:          cfg,
-		sessions:     sessions,
-		messages:     messages,
-		permissions:  permissions,
-		history:      history,
-		filetracker:  filetracker,
-		lspManager:   lspManager,
-		notify:       notify,
-		runComplete:  runComplete,
-		agents:       make(map[string]SessionAgent),
-		taskAgent:    csync.NewValue[SessionAgent](nil),
-		workflows:    newWorkflowRegistry(),
-		allSkills:    allSkills,
-		activeSkills: activeSkills,
-		skillTracker: skillTracker,
+		cfg:                cfg,
+		sessions:           sessions,
+		messages:           messages,
+		permissions:        permissions,
+		history:            history,
+		filetracker:        filetracker,
+		lspManager:         lspManager,
+		notify:             notify,
+		runComplete:        runComplete,
+		agents:             make(map[string]SessionAgent),
+		taskAgents:         csync.NewMap[string, SessionAgent](),
+		defaultTaskModelID: csync.NewValue[string](""),
+		workflows:          newWorkflowRegistry(),
+		allSkills:          allSkills,
+		activeSkills:       activeSkills,
+		skillTracker:       skillTracker,
 	}
 
 	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
@@ -616,12 +625,35 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	if err != nil {
 		return nil, err
 	}
+	return c.newTaskAgent(ctx, prompt, agent, isSubAgent, large, small), nil
+}
 
-	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
+// buildAgentWithModel builds a task agent whose primary (run) model is the
+// given selected model instead of the configured large model. Sub-agents
+// run on their primary model (see runSubAgent, which reads Agent.Model()),
+// so this is how the "agent" tool dispatches a task on a caller-chosen
+// model. The small model stays the configured one (used for summaries).
+func (c *coordinator) buildAgentWithModel(ctx context.Context, prompt *prompt.Prompt, agent config.Agent, primaryCfg config.SelectedModel) (SessionAgent, error) {
+	primary, err := c.buildModelFromSelected(ctx, primaryCfg, true)
+	if err != nil {
+		return nil, err
+	}
+	_, small, err := c.buildAgentModels(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	return c.newTaskAgent(ctx, prompt, agent, true, primary, small), nil
+}
+
+// newTaskAgent assembles a SessionAgent with the given primary and small
+// models, wiring up its system prompt and tools asynchronously. It is the
+// shared constructor behind buildAgent and buildAgentWithModel.
+func (c *coordinator) newTaskAgent(ctx context.Context, prompt *prompt.Prompt, agent config.Agent, isSubAgent bool, primary, small Model) SessionAgent {
+	primaryProviderCfg, _ := c.cfg.Config().Providers.Get(primary.ModelCfg.Provider)
 	result := NewSessionAgent(SessionAgentOptions{
-		LargeModel:           large,
+		LargeModel:           primary,
 		SmallModel:           small,
-		SystemPromptPrefix:   largeProviderCfg.SystemPromptPrefix,
+		SystemPromptPrefix:   primaryProviderCfg.SystemPromptPrefix,
 		SystemPrompt:         "",
 		IsSubAgent:           isSubAgent,
 		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
@@ -634,7 +666,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	})
 
 	c.readyWg.Go(func() error {
-		systemPrompt, err := prompt.Build(ctx, large.Model.Provider(), large.Model.Model(), c.cfg)
+		systemPrompt, err := prompt.Build(ctx, primary.Model.Provider(), primary.Model.Model(), c.cfg)
 		if err != nil {
 			return err
 		}
@@ -651,7 +683,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		return nil
 	})
 
-	return result, nil
+	return result
 }
 
 func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubAgent bool) ([]fantasy.AgentTool, error) {
@@ -791,79 +823,61 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		return Model{}, Model{}, errSmallModelNotSelected
 	}
 
-	largeProviderCfg, ok := c.cfg.Config().Providers.Get(largeModelCfg.Provider)
-	if !ok {
-		return Model{}, Model{}, errLargeModelProviderNotConfigured
-	}
-
-	largeProvider, err := c.buildProvider(largeProviderCfg, largeModelCfg, isSubAgent)
+	large, err := c.buildModelFromSelected(ctx, largeModelCfg, isSubAgent)
 	if err != nil {
 		return Model{}, Model{}, err
 	}
-
-	smallProviderCfg, ok := c.cfg.Config().Providers.Get(smallModelCfg.Provider)
-	if !ok {
-		return Model{}, Model{}, errSmallModelProviderNotConfigured
-	}
-
-	smallProvider, err := c.buildProvider(smallProviderCfg, smallModelCfg, true)
+	// The small model always runs as a sub-agent (summaries, titles).
+	small, err := c.buildModelFromSelected(ctx, smallModelCfg, true)
 	if err != nil {
 		return Model{}, Model{}, err
 	}
+	return large, small, nil
+}
 
-	var largeCatwalkModel *catwalk.Model
-	var smallCatwalkModel *catwalk.Model
+// buildModelFromSelected constructs a runnable Model from a selected model
+// configuration: it resolves the provider, builds the provider client,
+// looks up the catwalk metadata, and creates the language model. It is the
+// shared path used for the configured large/small models and for ad-hoc
+// models the "agent" tool selects per task.
+func (c *coordinator) buildModelFromSelected(ctx context.Context, modelCfg config.SelectedModel, isSubAgent bool) (Model, error) {
+	providerCfg, ok := c.cfg.Config().Providers.Get(modelCfg.Provider)
+	if !ok {
+		return Model{}, errModelProviderNotConfigured
+	}
 
-	for _, m := range largeProviderCfg.Models {
-		if m.ID == largeModelCfg.Model {
-			largeCatwalkModel = &m
+	provider, err := c.buildProvider(providerCfg, modelCfg, isSubAgent)
+	if err != nil {
+		return Model{}, err
+	}
+
+	var catwalkModel *catwalk.Model
+	for _, m := range providerCfg.Models {
+		if m.ID == modelCfg.Model {
+			catwalkModel = &m
+			break
 		}
 	}
-	for _, m := range smallProviderCfg.Models {
-		if m.ID == smallModelCfg.Model {
-			smallCatwalkModel = &m
-		}
+	if catwalkModel == nil {
+		return Model{}, errModelNotFound
 	}
 
-	if largeCatwalkModel == nil {
-		return Model{}, Model{}, errLargeModelNotFound
+	modelID := modelCfg.Model
+	if modelCfg.Provider == openrouter.Name && isExactoSupported(modelID) {
+		modelID += ":exacto"
 	}
 
-	if smallCatwalkModel == nil {
-		return Model{}, Model{}, errSmallModelNotFound
-	}
-
-	largeModelID := largeModelCfg.Model
-	smallModelID := smallModelCfg.Model
-
-	if largeModelCfg.Provider == openrouter.Name && isExactoSupported(largeModelID) {
-		largeModelID += ":exacto"
-	}
-
-	if smallModelCfg.Provider == openrouter.Name && isExactoSupported(smallModelID) {
-		smallModelID += ":exacto"
-	}
-
-	largeModel, err := largeProvider.LanguageModel(ctx, largeModelID)
+	languageModel, err := provider.LanguageModel(ctx, modelID)
 	if err != nil {
-		return Model{}, Model{}, err
-	}
-	smallModel, err := smallProvider.LanguageModel(ctx, smallModelID)
-	if err != nil {
-		return Model{}, Model{}, err
+		return Model{}, err
 	}
 
 	return Model{
-			Model:      largeModel,
-			CatwalkCfg: *largeCatwalkModel,
-			ModelCfg:   largeModelCfg,
-			FlatRate:   largeProviderCfg.FlatRate,
-		}, Model{
-			Model:      smallModel,
-			CatwalkCfg: *smallCatwalkModel,
-			ModelCfg:   smallModelCfg,
-			FlatRate:   smallProviderCfg.FlatRate,
-		}, nil
+		Model:      languageModel,
+		CatwalkCfg: *catwalkModel,
+		ModelCfg:   modelCfg,
+		FlatRate:   providerCfg.FlatRate,
+	}, nil
 }
 
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
@@ -1284,27 +1298,31 @@ func (c *coordinator) RegenerateTitle(ctx context.Context, sessionID string) err
 // or already finished), it returns errSubAgentNotRunning rather than
 // starting a new independent run.
 func (c *coordinator) SendToSubAgent(ctx context.Context, subAgentSessionID, prompt string) error {
-	taskAgent := c.taskAgent.Get()
-	if taskAgent == nil {
+	if c.taskAgents.Len() == 0 {
 		return errTaskAgentNotConfigured
 	}
-	if !taskAgent.IsSessionBusy(subAgentSessionID) {
-		return errSubAgentNotRunning
+	for taskAgent := range c.taskAgents.Seq() {
+		if taskAgent == nil || !taskAgent.IsSessionBusy(subAgentSessionID) {
+			continue
+		}
+		_, err := taskAgent.Run(ctx, SessionAgentCall{
+			SessionID: subAgentSessionID,
+			Prompt:    prompt,
+		})
+		return err
 	}
-	_, err := taskAgent.Run(ctx, SessionAgentCall{
-		SessionID: subAgentSessionID,
-		Prompt:    prompt,
-	})
-	return err
+	return errSubAgentNotRunning
 }
 
 // CancelSubAgent implements Coordinator.
 func (c *coordinator) CancelSubAgent(subAgentSessionID string) {
-	taskAgent := c.taskAgent.Get()
-	if taskAgent == nil {
+	for taskAgent := range c.taskAgents.Seq() {
+		if taskAgent == nil || !taskAgent.IsSessionBusy(subAgentSessionID) {
+			continue
+		}
+		taskAgent.Cancel(subAgentSessionID)
 		return
 	}
-	taskAgent.Cancel(subAgentSessionID)
 }
 
 // titleContextMaxChars caps how much conversation text is fed to title

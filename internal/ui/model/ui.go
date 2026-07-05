@@ -1345,6 +1345,22 @@ func (m *UI) loadNestedToolCalls(items []chat.MessageItem) {
 		}
 		nestedToolResultMap := chat.BuildToolResultMap(nestedMsgPtrs)
 
+		// Surface which model the sub-agent actually used by reading it
+		// from the first nested message that recorded one.
+		if setter, ok := item.(chat.SubagentModelSetter); ok {
+			for _, nestedMsg := range nestedMsgPtrs {
+				if nestedMsg.Model == "" {
+					continue
+				}
+				name := nestedMsg.Model
+				if model := m.com.Config().GetModel(nestedMsg.Provider, nestedMsg.Model); model != nil {
+					name = model.Name
+				}
+				setter.SetSubagentModel(name)
+				break
+			}
+		}
+
 		// Extract nested tool items.
 		var nestedTools []chat.ToolMessageItem
 		for _, nestedMsg := range nestedMsgPtrs {
@@ -1573,39 +1589,40 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.Cmd {
 	var cmds []tea.Cmd
 
-	// Only process messages with tool calls or results.
-	if len(event.Payload.ToolCalls()) == 0 && len(event.Payload.ToolResults()) == 0 {
-		return nil
-	}
-
-	// Check if this is an agent tool session and parse it.
+	// Resolve the parent agent tool item from the child session ID so we
+	// can surface which model the sub-agent used. This runs even for
+	// text-only sub-agent turns (no nested tool calls), so the model
+	// label appears as soon as the sub-agent produces its first message.
 	childSessionID := event.Payload.SessionID
 	_, toolCallID, ok := m.com.Workspace.ParseAgentToolSessionID(childSessionID)
 	if !ok {
 		return nil
 	}
 
-	// Find the parent agent tool item.
-	var agentItem chat.NestedToolContainer
-	for i := 0; i < m.chat.Len(); i++ {
-		item := m.chat.MessageItem(toolCallID)
-		if item == nil {
-			continue
-		}
-		if agent, ok := item.(chat.NestedToolContainer); ok {
-			if toolMessageItem, ok := item.(chat.ToolMessageItem); ok {
-				if toolMessageItem.ToolCall().ID == toolCallID {
-					// Verify this agent belongs to the correct parent message.
-					// We can't directly check parentMessageID on the item, so we trust the session parsing.
-					agentItem = agent
-					break
-				}
-			}
-		}
+	parentItem := m.chat.MessageItem(toolCallID)
+	if parentItem == nil {
+		return nil
+	}
+	toolMessageItem, ok := parentItem.(chat.ToolMessageItem)
+	if !ok || toolMessageItem.ToolCall().ID != toolCallID {
+		return nil
+	}
+	agentItem, ok := parentItem.(chat.NestedToolContainer)
+	if !ok {
+		return nil
 	}
 
-	if agentItem == nil {
-		return nil
+	if setter, ok := parentItem.(chat.SubagentModelSetter); ok && event.Payload.Model != "" {
+		name := event.Payload.Model
+		if model := m.com.Config().GetModel(event.Payload.Provider, event.Payload.Model); model != nil {
+			name = model.Name
+		}
+		setter.SetSubagentModel(name)
+	}
+
+	// Only process nested tool calls/results below.
+	if len(event.Payload.ToolCalls()) == 0 && len(event.Payload.ToolResults()) == 0 {
+		return tea.Sequence(cmds...)
 	}
 
 	// Get existing nested tools.
