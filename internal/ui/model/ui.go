@@ -239,6 +239,11 @@ type UI struct {
 	// caps hold different terminal capabilities that we query for.
 	caps common.Capabilities
 
+	// watchdog dumps all goroutine stacks if a single Update or View call
+	// runs longer than its threshold, so a UI freeze can be diagnosed
+	// after the fact. May be nil (disabled via CRUSH_STALL_WATCHDOG=off).
+	watchdog *stallWatchdog
+
 	// Editor components
 	textarea textarea.Model
 
@@ -462,6 +467,11 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 	// enable transparent mode
 	ui.isTransparent = opts.TUI.Transparent != nil && *opts.TUI.Transparent
 
+	// Start the stall watchdog so a frozen event loop dumps goroutine
+	// stacks into the logs directory for post-mortem diagnosis.
+	ui.watchdog = newStallWatchdog(filepath.Join(opts.DataDirectory, "logs"))
+	ui.watchdog.start()
+
 	return ui
 }
 
@@ -633,6 +643,7 @@ func (m *UI) loadMCPrompts() tea.Msg {
 
 // Update handles updates to the UI model.
 func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	defer m.watchdog.enter(fmt.Sprintf("Update %T", msg))()
 	var cmds []tea.Cmd
 	if m.hasSession() && m.isAgentBusy() {
 		queueSize := m.com.Workspace.AgentQueuedPrompts(m.session.ID)
@@ -2885,6 +2896,7 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 
 // View renders the UI model's view.
 func (m *UI) View() tea.View {
+	defer m.watchdog.enter("View")()
 	var v tea.View
 	v.AltScreen = true
 	if !m.isTransparent {
