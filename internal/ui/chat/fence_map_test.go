@@ -106,6 +106,56 @@ func TestBuildFenceMap_MultipleRawLinesInOneFence(t *testing.T) {
 	require.Equal(t, []string{"second line"}, lines)
 }
 
+func TestBuildFenceMap_ContentRowsMapToOwnLineNoTrailingMarginShift(t *testing.T) {
+	t.Parallel()
+
+	sty := styles.CharmtonePantera()
+	const width = 78
+
+	rawLines := []string{"line one", "line two", "line three", "line four"}
+	source := "Here is code:\n\n```go\n" + strings.Join(rawLines, "\n") + "\n```\n\nDone.\n"
+
+	fullLines := renderFullForTest(t, &sty, width, source)
+	fm := buildFenceMap(&sty, source, fullLines, width)
+	require.NotNil(t, fm)
+	require.Len(t, fm.ranges, 1)
+
+	// Regression: glamour's trailing code-block margin used to shift the
+	// row→line mapping, so each source line resolved to the line above it
+	// and a whole-block selection came out one line short. Find the
+	// rendered row of each source line by its text and assert it resolves
+	// to that same line.
+	for _, raw := range rawLines {
+		row := -1
+		for i, full := range fullLines {
+			if strings.TrimSpace(full) == raw {
+				row = i
+				break
+			}
+		}
+		require.GreaterOrEqualf(t, row, 0, "row for %q not found", raw)
+		lines, ok := fm.RawLinesFor(row, row)
+		require.Truef(t, ok, "row %d (%q) did not resolve", row, raw)
+		require.Equalf(t, []string{raw}, lines,
+			"rendered row %d (%q) resolved to the wrong source line", row, raw)
+	}
+
+	// Selecting the whole visible block (first to last content row) must
+	// return every source line, not one short.
+	firstRow, lastRow := -1, -1
+	for i, full := range fullLines {
+		if strings.TrimSpace(full) == rawLines[0] {
+			firstRow = i
+		}
+		if strings.TrimSpace(full) == rawLines[len(rawLines)-1] {
+			lastRow = i
+		}
+	}
+	lines, ok := fm.RawLinesFor(firstRow, lastRow)
+	require.True(t, ok)
+	require.Equal(t, rawLines, lines)
+}
+
 func TestBuildFenceMap_MixedSelectionOutsideFenceReturnsFalse(t *testing.T) {
 	t.Parallel()
 
