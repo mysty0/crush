@@ -1208,6 +1208,10 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 	case tools.EditToolName:
 		var params tools.EditParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
+			if params.FilePath == "" {
+				// Hashline mode: the file path lives in the patch, not params.
+				return "**Edit:** hashline patch"
+			}
 			return fmt.Sprintf("**File:** %s", fsext.PrettyPath(params.FilePath))
 		}
 	case tools.MultiEditToolName:
@@ -1472,6 +1476,11 @@ func (t *baseToolMessageItem) formatEditResultForCopy() string {
 		return ""
 	}
 
+	// Hashline edits carry a per-file metadata shape; format those diffs.
+	if hl := t.formatHashlineResultForCopy(); hl != "" {
+		return hl
+	}
+
 	var meta tools.EditResponseMetadata
 	if json.Unmarshal([]byte(t.result.Metadata), &meta) != nil {
 		return t.result.Content
@@ -1495,6 +1504,31 @@ func (t *baseToolMessageItem) formatEditResultForCopy() string {
 		result.WriteString("\n```")
 	}
 
+	return result.String()
+}
+
+// formatHashlineResultForCopy formats a hashline edit result (one or more file
+// diffs) for the clipboard. Returns "" when the result is not hashline-shaped.
+func (t *baseToolMessageItem) formatHashlineResultForCopy() string {
+	if t.result == nil || t.result.Metadata == "" {
+		return ""
+	}
+	var meta tools.HashlineEditResponseMetadata
+	if json.Unmarshal([]byte(t.result.Metadata), &meta) != nil || len(meta.Files) == 0 {
+		return ""
+	}
+	var result strings.Builder
+	for i, f := range meta.Files {
+		if i > 0 {
+			result.WriteString("\n\n")
+		}
+		fileName := fsext.PrettyPath(f.FilePath)
+		diffContent, additions, removals := diff.GenerateDiff(f.OldContent, f.NewContent, fileName)
+		fmt.Fprintf(&result, "%s: +%d -%d\n", fileName, additions, removals)
+		result.WriteString("```diff\n")
+		result.WriteString(diffContent)
+		result.WriteString("\n```")
+	}
 	return result.String()
 }
 

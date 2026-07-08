@@ -298,8 +298,27 @@ type Options struct {
 	DisableNotifications      bool         `json:"disable_notifications,omitempty" jsonschema:"description=Deprecated: Use notification_style instead. Disable desktop notifications,default=false"`
 	NotificationStyle         string       `json:"notification_style,omitempty" jsonschema:"description=Notification style to use. Options: auto (default), native, osc, bell, disabled. Auto selects based on environment: native for local sessions, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
 	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
-	TmuxIntegration           bool         `json:"tmux_integration,omitempty" jsonschema:"description=Sync the active session ID and title into tmux pane user options (@crush_session_id\\, @crush_session_title) for external tooling such as session-restore scripts. Only takes effect when running inside tmux.,default=false"`
+	// AlwaysReinjectSkills controls how an activated skill's instructions
+	// are kept in context. When false (default), the instructions are
+	// injected on activation and re-injected only after a summarization
+	// compacts them away (cache-friendly). When true, they are re-injected
+	// on every turn.
+	AlwaysReinjectSkills bool `json:"always_reinject_skills,omitempty" jsonschema:"description=Re-inject active skill instructions on every turn instead of only after summarization,default=false"`
+	TmuxIntegration      bool `json:"tmux_integration,omitempty" jsonschema:"description=Sync the active session ID and title into tmux pane user options (@crush_session_id\\, @crush_session_title) for external tooling such as session-restore scripts. Only takes effect when running inside tmux.,default=false"`
+	// EditMode selects the file-editing tool family. "string" (default) keeps
+	// the exact-match Edit/MultiEdit tools. "hashline" swaps in the
+	// line-anchored hashline edit tool and changes the Read tool's output to
+	// emit [path#TAG] anchors.
+	EditMode string `json:"edit_mode,omitempty" jsonschema:"description=File editing mode: 'string' (exact find/replace) or 'hashline' (line-anchored patches),enum=string,enum=hashline,default=string"`
 }
+
+// Edit mode values for Options.EditMode.
+const (
+	// EditModeString is the default exact-string find/replace edit family.
+	EditModeString = "string"
+	// EditModeHashline is the line-anchored, content-hash-guarded edit family.
+	EditModeHashline = "hashline"
+)
 
 type MCPs map[string]MCPConfig
 
@@ -619,28 +638,66 @@ func (t ToolWebFetch) GetMode() string {
 	return t.Mode
 }
 
-// HookConfig defines a user-configured shell command that fires on a hook
-// event (e.g. PreToolUse). This is a pure-data struct: matcher compilation
-// is owned by hooks.Runner so a JSON round-trip, merge, or reload can't
-// silently drop compiled state.
+// HookConfig defines a user-configured hook that fires on a hook event
+// (e.g. PreToolUse). A hook is either a shell command (Command) or an
+// inline Lua script (Lua) — exactly one must be set. This is a pure-data
+// struct: matcher compilation is owned by hooks.Runner so a JSON
+// round-trip, merge, or reload can't silently drop compiled state.
 type HookConfig struct {
-	// Friendly display name shown in the TUI. Falls back to Command when empty.
+	// Friendly display name shown in the TUI. Falls back to Command/Lua when empty.
 	Name string `json:"name,omitempty" jsonschema:"description=Friendly display name shown in the TUI for this hook"`
 	// Regex pattern tested against the tool name. Empty means match all.
 	Matcher string `json:"matcher,omitempty" jsonschema:"description=Regex pattern tested against the tool name. Empty means match all tools."`
-	// Shell command to execute.
-	Command string `json:"command" jsonschema:"required,description=Shell command to execute when the hook fires"`
+	// Shell command to execute. Mutually exclusive with Lua.
+	Command string `json:"command,omitempty" jsonschema:"description=Shell command to execute when the hook fires. Mutually exclusive with lua."`
+	// Inline Lua script to execute. Mutually exclusive with Command. Runs
+	// in a sandboxed, cross-platform interpreter with no filesystem,
+	// network, or process access. Reads the global 'hook' table and
+	// returns a decision table; see docs/hooks.
+	Lua string `json:"lua,omitempty" jsonschema:"description=Inline Lua script to execute when the hook fires. Mutually exclusive with command. Runs in a sandboxed cross-platform interpreter."`
 	// Timeout in seconds. Default 30.
-	Timeout int `json:"timeout,omitempty" jsonschema:"description=Timeout in seconds for the hook command,default=30"`
+	Timeout int `json:"timeout,omitempty" jsonschema:"description=Timeout in seconds for the hook,default=30"`
 }
 
 // DisplayName returns the hook name for display purposes. It returns Name
-// when set, otherwise falls back to Command.
+// when set, otherwise falls back to Command, then to a "lua:" label.
 func (h *HookConfig) DisplayName() string {
 	if h.Name != "" {
 		return h.Name
 	}
-	return h.Command
+	if h.Command != "" {
+		return h.Command
+	}
+	if h.Lua != "" {
+		return "lua:" + firstLine(h.Lua)
+	}
+	return ""
+}
+
+// IsLua reports whether this hook runs an inline Lua script rather than a
+// shell command.
+func (h *HookConfig) IsLua() bool {
+	return h.Command == "" && h.Lua != ""
+}
+
+// DedupKey returns the value used to deduplicate identical hooks within an
+// event. Shell hooks dedupe on Command; Lua hooks on their source.
+func (h *HookConfig) DedupKey() string {
+	if h.Command != "" {
+		return "cmd:" + h.Command
+	}
+	return "lua:" + h.Lua
+}
+
+// firstLine returns the first non-empty line of s, trimmed, for compact
+// display of an inline Lua hook.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			return t
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 // TimeoutDuration returns the hook timeout as a time.Duration, defaulting

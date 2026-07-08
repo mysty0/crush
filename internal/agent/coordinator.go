@@ -28,6 +28,8 @@ import (
 	"github.com/charmbracelet/crush/internal/discover"
 	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/filetracker"
+	"github.com/charmbracelet/crush/internal/hashline"
+	"github.com/charmbracelet/crush/internal/hashline/tsblock"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/log"
@@ -171,6 +173,15 @@ type coordinator struct {
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
 	activeSkills []*skills.Skill // Post-filter: active skills only.
 	skillTracker *skills.Tracker
+	// loadedSkills holds skills activated per session so their
+	// instructions are re-injected each turn (persists across turns and
+	// summarization).
+	loadedSkills *skills.LoadedStore
+
+	// snapshots binds hashline section tags to the exact file content that
+	// minted them, per session. Shared between the read tool (producer) and
+	// the hashline edit tool (consumer). Only used when EditMode is hashline.
+	snapshots *hashline.Store
 
 	readyWg errgroup.Group
 }
@@ -218,6 +229,8 @@ func NewCoordinator(
 		allSkills:           allSkills,
 		activeSkills:        activeSkills,
 		skillTracker:        skillTracker,
+		loadedSkills:        skills.NewLoadedStore(),
+		snapshots:           hashline.NewStore(),
 	}
 
 	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
@@ -281,6 +294,15 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 		}
 		attachments = filteredAttachments
 	}
+
+	// Activate skills invoked from the command palette so their
+	// instructions persist across turns, not just the turn they were
+	// attached on. The palette attaches a skill's SKILL.md as a markdown
+	// attachment named after the skill.
+	c.activateSkillAttachments(sessionID, attachments)
+	// Honor "stop <skill>" / "normal mode" requests before the turn runs
+	// so the deactivated skill is not re-injected this turn.
+	c.deactivateSkillsFromPrompt(sessionID, prompt)
 
 	providerCfg, ok := c.cfg.Config().Providers.Get(model.ModelCfg.Provider)
 	if !ok {
@@ -663,6 +685,8 @@ func (c *coordinator) newTaskAgent(ctx context.Context, prompt *prompt.Prompt, a
 		Tools:                nil,
 		Notify:               c.notify,
 		RunComplete:          c.runComplete,
+		ActiveSkillsFor:      c.activeSkillsInjection,
+		OnSummarized:         c.loadedSkills.Bump,
 	})
 
 	c.readyWg.Go(func() error {
@@ -728,6 +752,8 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		hookRunner = hooks.NewRunner(preToolHooks, c.cfg.WorkingDir(), c.cfg.WorkingDir())
 	}
 
+	editMode := c.cfg.Config().Options.EditMode
+
 	allTools = append(
 		allTools,
 		tools.NewBashTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.Attribution, modelID),
@@ -736,15 +762,33 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewJobOutputTool(),
 		tools.NewJobKillTool(),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
-		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
-		tools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
+	)
+
+	// The editing tool family depends on the configured edit mode. Hashline
+	// mode registers a single line-anchored Edit tool (natively multi-file);
+	// string mode keeps the exact-match Edit + MultiEdit pair. Both register
+	// under the "Edit" name so the model always calls the same tool. Kept in
+	// the original list position so string-mode requests are unchanged.
+	if editMode == config.EditModeHashline {
+		allTools = append(allTools,
+			tools.NewHashlineEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.snapshots, tsblock.New(), c.cfg.WorkingDir()),
+		)
+	} else {
+		allTools = append(allTools,
+			tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
+			tools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
+		)
+	}
+
+	allTools = append(
+		allTools,
 		tools.NewFetchTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewGlobTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Glob),
 		tools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
 		tools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
 		tools.NewSourcegraphTool(nil),
 		tools.NewTodosTool(c.sessions),
-		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.skillTracker, c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
+		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.skillTracker, c.loadedSkills, editMode, c.snapshots, c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	)
 
@@ -1555,6 +1599,87 @@ func (c *coordinator) updateParentSessionCost(ctx context.Context, childSessionI
 	}
 
 	return nil
+}
+
+// activateSkillAttachments marks any command-palette skill attachments as
+// active for the session so their instructions are re-injected on every
+// subsequent turn. Attachments are matched by name against the active
+// skill set; the skill's parsed instructions are used (not the raw
+// attachment) so only genuine skills are activated.
+func (c *coordinator) activateSkillAttachments(sessionID string, attachments []message.Attachment) {
+	if c.loadedSkills == nil || len(attachments) == 0 || len(c.activeSkills) == 0 {
+		return
+	}
+	for _, att := range attachments {
+		if !att.IsMarkdown() {
+			continue
+		}
+		for _, s := range c.activeSkills {
+			if s.Name == att.FileName {
+				c.loadedSkills.Add(sessionID, s.Name, s.Instructions)
+				break
+			}
+		}
+	}
+}
+
+// deactivateSkillsFromPrompt turns off active skills when the user asks
+// (e.g. "stop caveman", "normal mode"). This is the counterpart to
+// activation and runs before the turn so a deactivated skill is not
+// re-injected on the same turn.
+func (c *coordinator) deactivateSkillsFromPrompt(sessionID, prompt string) {
+	if c.loadedSkills == nil {
+		return
+	}
+	active := c.loadedSkills.Names(sessionID)
+	if len(active) == 0 {
+		return
+	}
+	for _, name := range skillsToDeactivate(prompt, active) {
+		c.loadedSkills.Remove(sessionID, name)
+	}
+}
+
+// skillsToDeactivate returns which of the currently active skills a user
+// prompt asks to turn off. A global phrase ("normal mode", "stop all
+// skills") deactivates every active skill; otherwise a per-skill phrase
+// like "stop <name>", "disable <name>", "turn off <name>" or "unload
+// <name>" deactivates that one.
+func skillsToDeactivate(prompt string, active []string) []string {
+	p := strings.ToLower(prompt)
+	if strings.Contains(p, "normal mode") || strings.Contains(p, "stop all skills") {
+		return active
+	}
+	var off []string
+	for _, name := range active {
+		n := strings.ToLower(name)
+		if strings.Contains(p, "stop "+n) ||
+			strings.Contains(p, "disable "+n) ||
+			strings.Contains(p, "turn off "+n) ||
+			strings.Contains(p, "unload "+n) {
+			off = append(off, name)
+		}
+	}
+	return off
+}
+
+// activeSkillsInjection returns the active-skill instruction block to
+// append to a turn, or "" to skip injection. In the default (hybrid)
+// mode the block is delivered on activation and after each summarization
+// (via TakeInjection's generation gate); when AlwaysReinjectSkills is
+// set it is returned on every turn.
+func (c *coordinator) activeSkillsInjection(sessionID string) string {
+	block := c.loadedSkills.PromptXML(sessionID)
+	if block == "" {
+		return ""
+	}
+	if c.cfg.Config().Options.AlwaysReinjectSkills {
+		return block
+	}
+	if c.loadedSkills.TakeInjection(sessionID) {
+		return block
+	}
+	return ""
 }
 
 // discoverSkills is a thin fallback wrapper used only when no

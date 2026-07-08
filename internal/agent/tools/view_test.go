@@ -256,7 +256,7 @@ func (m mockFileTracker) ListReadFiles(ctx context.Context, sessionID string) ([
 
 func newViewToolForTest(workingDir string) fantasy.AgentTool {
 	permissions := &mockViewPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
-	return NewViewTool(nil, permissions, mockFileTracker{}, nil, workingDir)
+	return NewViewTool(nil, permissions, mockFileTracker{}, nil, nil, "", nil, workingDir)
 }
 
 func runViewTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, params ViewParams) fantasy.ToolResponse {
@@ -284,9 +284,9 @@ func TestReadBuiltinFile(t *testing.T) {
 	t.Run("reads crush-config skill", func(t *testing.T) {
 		t.Parallel()
 
-		resp, err := readBuiltinFile(ViewParams{
+		resp, err := readBuiltinFile(context.Background(), ViewParams{
 			FilePath: "crush://skills/crush-config/SKILL.md",
-		}, nil)
+		}, nil, nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, resp.Content)
 		require.Contains(t, resp.Content, "Crush Configuration")
@@ -295,9 +295,9 @@ func TestReadBuiltinFile(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		t.Parallel()
 
-		resp, err := readBuiltinFile(ViewParams{
+		resp, err := readBuiltinFile(context.Background(), ViewParams{
 			FilePath: "crush://skills/nonexistent/SKILL.md",
-		}, nil)
+		}, nil, nil)
 		require.NoError(t, err)
 		require.True(t, resp.IsError)
 	})
@@ -305,9 +305,9 @@ func TestReadBuiltinFile(t *testing.T) {
 	t.Run("metadata has skill info", func(t *testing.T) {
 		t.Parallel()
 
-		resp, err := readBuiltinFile(ViewParams{
+		resp, err := readBuiltinFile(context.Background(), ViewParams{
 			FilePath: "crush://skills/crush-config/SKILL.md",
-		}, nil)
+		}, nil, nil)
 		require.NoError(t, err)
 
 		var meta ViewResponseMetadata
@@ -320,10 +320,10 @@ func TestReadBuiltinFile(t *testing.T) {
 	t.Run("respects offset", func(t *testing.T) {
 		t.Parallel()
 
-		resp, err := readBuiltinFile(ViewParams{
+		resp, err := readBuiltinFile(context.Background(), ViewParams{
 			FilePath: "crush://skills/crush-config/SKILL.md",
 			Offset:   5,
-		}, nil)
+		}, nil, nil)
 		require.NoError(t, err)
 		require.NotContains(t, resp.Content, "     1|")
 	})
