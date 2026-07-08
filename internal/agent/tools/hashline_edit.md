@@ -18,7 +18,9 @@ Body rows: every body row is `+TEXT` (verbatim; `+` alone adds a blank line). Ne
 Rules:
 - Line numbers and the `[PATH#TAG]` header come from your latest `Read` (`LINE:TEXT` rows). They refer to the ORIGINAL file and never shift as hunks apply.
 - Every applied edit mints a fresh `#TAG` and renumbers — anchor the next edit on the edit response or a fresh `Read`.
-- Ranges cover ONLY lines whose content changes. Never widen over unchanged lines.
+- Touch only lines your latest `Read` literally displayed as `LINE:TEXT`; the tag certifies the snapshot, not your memory.
+- **Duplicate/similar lines:** Seeing a line of text is not the same as it holding the code you mean. When the same (or near-identical) text appears multiple times in a file, confirm the line number maps to the exact construct you intend BEFORE issuing any `SWAP` or `DEL`. Narrow your `Read` (or `grep`) to the surrounding lines and verify the correct occurrence first.
+- Ranges cover ONLY lines whose content changes. Never widen over unchanged lines — a wide range shreds everything it spans.
 - Pure additions use `INS.*`, never a widened `SWAP`.
 - One hunk per range; the body is the final content, never an old/new pair.
 - On a stale-tag rejection or any surprising result: STOP and re-`Read` before further edits.
@@ -51,3 +53,9 @@ DEL 3
 ```
 
 Multiple files are edited in one call by stacking sections; the whole batch is validated before anything is written.
+
+If you remember nothing else:
+1. **RE-GROUND AFTER EVERY EDIT.** Every apply mints a fresh `#TAG` and renumbers — take the next edit's numbers from the edit response or a fresh `Read`. Stale tag or surprise? STOP, re-`Read`.
+2. **RANGES ARE TIGHT.** Cover only lines that change; a wide range shreds everything it spans. Whole construct → `SWAP.BLK N`.
+3. **CONFIRM LINE IDENTITY BEFORE EDITING.** When a target line is one of several identical or similar lines, use `Read` with a narrow offset/limit or `grep` to confirm you have the right occurrence before you commit the patch.
+4. **THE BODY IS THE FINAL CONTENT.** Every body row starts with `+`; no `-` rows, no context lines.

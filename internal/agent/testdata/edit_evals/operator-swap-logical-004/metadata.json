@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-logical",
+  "mutation_category": "operator",
+  "difficulty": "nightmare",
+  "difficulty_score": 12,
+  "line_number": 376,
+  "original_snippet": "  if (uris.length === 0 || !connection.capabilities.resources?.subscribe) return;",
+  "mutated_snippet": "  if (uris.length === 0 && !connection.capabilities.resources?.subscribe) return;",
+  "file_path": "packages/coding-agent/src/mcp/client.ts",
+  "context": {
+    "file_lines": 498,
+    "is_repeated_line": true,
+    "repeat_count": 2,
+    "similar_block_count": 18,
+    "density": 0.797,
+    "line_indent": 2,
+    "containing_function": "subscribeToResources"
+  }
+}

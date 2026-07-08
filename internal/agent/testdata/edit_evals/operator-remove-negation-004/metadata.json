@@ -1,0 +1,19 @@
+{
+  "mutation_type": "remove-negation",
+  "mutation_category": "operator",
+  "difficulty": "nightmare",
+  "difficulty_score": 15,
+  "line_number": 277,
+  "original_snippet": "      if (!runtime.autoresearchMode) {",
+  "mutated_snippet": "      if (runtime.autoresearchMode) {",
+  "file_path": "packages/coding-agent/src/autoresearch/dashboard.ts",
+  "context": {
+    "file_lines": 505,
+    "is_repeated_line": true,
+    "repeat_count": 3,
+    "similar_block_count": 14,
+    "density": 0.771,
+    "line_indent": 6,
+    "containing_function": "renderDashboardLines"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-regex-quantifier",
+  "mutation_category": "regex",
+  "difficulty": "hard",
+  "difficulty_score": 10,
+  "line_number": 137,
+  "original_snippet": "  const baseUrl = params.baseUrl?.replace(/\\/+$/, '') || DEFAULT_ENDPOINT;",
+  "mutated_snippet": "  const baseUrl = params.baseUrl?.replace(/\\/*$/, '') || DEFAULT_ENDPOINT;",
+  "file_path": "packages/ai/src/usage/google-antigravity.ts",
+  "context": {
+    "file_lines": 210,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 9,
+    "density": 0.811,
+    "line_indent": 2,
+    "containing_function": "fetchAntigravityUsage"
+  }
+}

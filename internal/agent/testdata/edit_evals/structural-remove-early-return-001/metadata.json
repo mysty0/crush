@@ -1,0 +1,19 @@
+{
+  "mutation_type": "remove-early-return",
+  "mutation_category": "structural",
+  "difficulty": "easy",
+  "difficulty_score": 6,
+  "line_number": 28,
+  "original_snippet": "    if (pirateMode) {\n      return {\n        systemPromptAppend: `",
+  "mutated_snippet": "    return undefined;",
+  "file_path": "packages/coding-agent/examples/extensions/pirate.ts",
+  "context": {
+    "file_lines": 44,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 1,
+    "density": 0.802,
+    "line_indent": 4,
+    "containing_function": "pirateExtension"
+  }
+}

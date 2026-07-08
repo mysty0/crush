@@ -1,0 +1,19 @@
+{
+  "mutation_type": "remove-negation",
+  "mutation_category": "operator",
+  "difficulty": "easy",
+  "difficulty_score": 7,
+  "line_number": 45,
+  "original_snippet": "  if (!pythonCmd) {",
+  "mutated_snippet": "  if (pythonCmd) {",
+  "file_path": "packages/coding-agent/src/stt/downloader.ts",
+  "context": {
+    "file_lines": 73,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 3,
+    "density": 0.835,
+    "line_indent": 2,
+    "containing_function": "ensurePythonWhisper"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-named-imports",
+  "mutation_category": "import",
+  "difficulty": "hard",
+  "difficulty_score": 8,
+  "line_number": 19,
+  "original_snippet": "  AgentTool,\n  AgentToolContext,",
+  "mutated_snippet": "  AgentToolResult,",
+  "file_path": "packages/coding-agent/src/tools/ask.ts",
+  "context": {
+    "file_lines": 843,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 10,
+    "density": 0.763,
+    "line_indent": 2,
+    "containing_function": null
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "mutation_type": "off-by-one",
+  "mutation_category": "literal",
+  "difficulty": "easy",
+  "difficulty_score": 7,
+  "line_number": 38,
+  "original_snippet": "if (Bun.stringWidth('\\x1b[0m\\x1b]8;;\\x07') !== 0) {",
+  "mutated_snippet": "if (Bun.stringWidth('\\x1b[0m\\x1b]8;;\\x07') !== 1) {",
+  "file_path": "packages/coding-agent/src/cli.ts",
+  "context": {
+    "file_lines": 106,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 6,
+    "density": 0.83,
+    "line_indent": 0,
+    "containing_function": null
+  }
+}

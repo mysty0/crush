@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-call-args",
+  "mutation_category": "call",
+  "difficulty": "medium",
+  "difficulty_score": 3,
+  "line_number": 83,
+  "original_snippet": "      return await handleModuleUrl(url, namespace, name, provider, timeout, signal, fetchedAt);",
+  "mutated_snippet": "      return await handleModuleUrl(namespace, url, name, provider, timeout, signal, fetchedAt);",
+  "file_path": "packages/coding-agent/src/web/scrapers/terraform.ts",
+  "context": {
+    "file_lines": 288,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 2,
+    "density": 0.786,
+    "line_indent": 6,
+    "containing_function": null
+  }
+}

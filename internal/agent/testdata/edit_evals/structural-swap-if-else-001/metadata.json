@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-if-else",
+  "mutation_category": "structural",
+  "difficulty": "easy",
+  "difficulty_score": 7,
+  "line_number": 30,
+  "original_snippet": "      hasStyle = true;\n    } else {",
+  "mutated_snippet": "      hasSource = true;",
+  "file_path": "packages/coding-agent/src/commit/agentic/fallback.ts",
+  "context": {
+    "file_lines": 97,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 5,
+    "density": 0.813,
+    "line_indent": 6,
+    "containing_function": "inferTypeFromFiles"
+  }
+}

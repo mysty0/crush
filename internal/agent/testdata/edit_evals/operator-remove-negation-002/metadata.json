@@ -1,0 +1,19 @@
+{
+  "mutation_type": "remove-negation",
+  "mutation_category": "operator",
+  "difficulty": "medium",
+  "difficulty_score": 6,
+  "line_number": 48,
+  "original_snippet": "  if (!stats) {",
+  "mutated_snippet": "  if (stats) {",
+  "file_path": "packages/stats/src/client/App.tsx",
+  "context": {
+    "file_lines": 122,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 2,
+    "density": 0.724,
+    "line_indent": 2,
+    "containing_function": "App"
+  }
+}

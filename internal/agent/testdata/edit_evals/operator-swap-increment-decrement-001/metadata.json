@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-increment-decrement",
+  "mutation_category": "operator",
+  "difficulty": "easy",
+  "difficulty_score": 4,
+  "line_number": 22,
+  "original_snippet": "    for (let i = entries.length - 1; i >= 0; i--) {",
+  "mutated_snippet": "    for (let i = entries.length - 1; i >= 0; i++) {",
+  "file_path": "packages/coding-agent/examples/hooks/auto-commit-on-exit.ts",
+  "context": {
+    "file_lines": 49,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 0,
+    "density": 0.751,
+    "line_indent": 4,
+    "containing_function": null
+  }
+}

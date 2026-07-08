@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-call-args",
+  "mutation_category": "call",
+  "difficulty": "hard",
+  "difficulty_score": 12,
+  "line_number": 119,
+  "original_snippet": "          output.push(formatNumberedDiffLine(' ', oldLineNum, lineNumWidth, '...'));",
+  "mutated_snippet": "          output.push(formatNumberedDiffLine(oldLineNum, ' ', lineNumWidth, '...'));",
+  "file_path": "packages/coding-agent/src/patch/diff.ts",
+  "context": {
+    "file_lines": 460,
+    "is_repeated_line": true,
+    "repeat_count": 2,
+    "similar_block_count": 8,
+    "density": 0.773,
+    "line_indent": 10,
+    "containing_function": "generateDiffString"
+  }
+}

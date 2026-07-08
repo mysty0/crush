@@ -41,8 +41,8 @@ type hlPlan struct {
 	removals  int
 
 	// File-level directives.
-	remove         bool   // REM: delete path
-	moveTo         string // MV: absolute destination path ("" when not moving)
+	remove          bool   // REM: delete path
+	moveTo          string // MV: absolute destination path ("" when not moving)
 	moveToDisplayed string // MV destination as written by the model
 }
 
@@ -241,7 +241,7 @@ func preflightHashlineSection(
 		if recognized && !sec.Remove {
 			resolvedForBase, _, rerr := hashline.ResolveBlockEdits(sec.Edits, snap.Text, sec.Path, resolver)
 			if rerr == nil {
-				if recovered, ok := hashline.Recover(snap.Text, oldLF, resolvedForBase); ok {
+				buildRecoveredPlan := func(recovered, warn string) (hlPlan, []string) {
 					relForDiff := strings.TrimPrefix(filePath, workingDir)
 					_, additions, removals := diff.GenerateDiff(oldLF, recovered, relForDiff)
 					plan := hlPlan{
@@ -261,8 +261,21 @@ func preflightHashlineSection(
 						plan.moveTo = dest
 						plan.moveToDisplayed = sec.MoveTo
 					}
-					warn := fmt.Sprintf("file %s changed since it was read; your edit was merged onto the current version. Verify the result.", sec.Path)
-					return plan, []string{warn}, fantasy.ToolResponse{}, true
+					return plan, []string{warn}
+				}
+				if recovered, ok := hashline.Recover(snap.Text, oldLF, resolvedForBase); ok {
+					plan, warns := buildRecoveredPlan(recovered, fmt.Sprintf(
+						"file %s changed since it was read; your edit was merged onto the current version. Verify the result.", sec.Path))
+					return plan, warns, fantasy.ToolResponse{}, true
+				}
+				// Last-chance fuzzy fallback: relocate the anchored edits onto
+				// the drifted live file, but only when every anchor's content
+				// matches a single, unambiguous line. Missing or duplicated
+				// anchors fall through to the mismatch rejection below.
+				if recovered, ok := hashline.RecoverFuzzy(snap.Text, oldLF, resolvedForBase, hashline.DefaultFuzzyThreshold); ok {
+					plan, warns := buildRecoveredPlan(recovered, fmt.Sprintf(
+						"file %s changed since it was read; your edit was fuzzily relocated onto the current version by matching anchor content. Carefully verify the result.", sec.Path))
+					return plan, warns, fantasy.ToolResponse{}, true
 				}
 			}
 		}

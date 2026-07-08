@@ -9,8 +9,8 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/hashline"
-	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/stretchr/testify/require"
 )
 

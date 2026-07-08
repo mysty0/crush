@@ -1,0 +1,19 @@
+{
+  "mutation_type": "remove-early-return",
+  "mutation_category": "structural",
+  "difficulty": "hard",
+  "difficulty_score": 10,
+  "line_number": 673,
+  "original_snippet": "    if (result.stdinRequested) {\n      return {\n        exitCode: 1,",
+  "mutated_snippet": "    const exitCode = result.status === 'ok' ? 0 : 1;",
+  "file_path": "packages/coding-agent/src/ipy/executor.ts",
+  "context": {
+    "file_lines": 774,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 34,
+    "density": 0.8,
+    "line_indent": 4,
+    "containing_function": "executeWithKernel"
+  }
+}

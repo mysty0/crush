@@ -1,0 +1,19 @@
+{
+  "mutation_type": "remove-early-return",
+  "mutation_category": "structural",
+  "difficulty": "medium",
+  "difficulty_score": 8,
+  "line_number": 120,
+  "original_snippet": "  if (month && day) {\n    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;\n  }",
+  "mutated_snippet": "",
+  "file_path": "packages/coding-agent/src/web/scrapers/orcid.ts",
+  "context": {
+    "file_lines": 294,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 7,
+    "density": 0.809,
+    "line_indent": 2,
+    "containing_function": "formatDate"
+  }
+}

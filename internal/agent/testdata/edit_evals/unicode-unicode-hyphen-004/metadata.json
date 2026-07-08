@@ -1,0 +1,19 @@
+{
+  "mutation_type": "unicode-hyphen",
+  "mutation_category": "unicode",
+  "difficulty": "nightmare",
+  "difficulty_score": 10,
+  "line_number": 165,
+  "original_snippet": "    'openai/gpt-5.4',",
+  "mutated_snippet": "    'openai/gpt\\u20135.4',",
+  "file_path": "packages/ai/src/provider-models/descriptors.ts",
+  "context": {
+    "file_lines": 306,
+    "is_repeated_line": true,
+    "repeat_count": 2,
+    "similar_block_count": 5,
+    "density": 0.856,
+    "line_indent": 4,
+    "containing_function": null
+  }
+}

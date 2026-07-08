@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-equality",
+  "mutation_category": "operator",
+  "difficulty": "nightmare",
+  "difficulty_score": 15,
+  "line_number": 157,
+  "original_snippet": "  if (config.type === 'http' || config.type === 'sse') {",
+  "mutated_snippet": "  if (config.type !== 'http' || config.type === 'sse') {",
+  "file_path": "packages/coding-agent/src/mcp/config.ts",
+  "context": {
+    "file_lines": 369,
+    "is_repeated_line": true,
+    "repeat_count": 3,
+    "similar_block_count": 8,
+    "density": 0.803,
+    "line_indent": 2,
+    "containing_function": "isExaMCPServer"
+  }
+}

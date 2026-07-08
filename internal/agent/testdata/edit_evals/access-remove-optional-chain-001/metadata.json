@@ -1,0 +1,19 @@
+{
+  "mutation_type": "remove-optional-chain",
+  "mutation_category": "access",
+  "difficulty": "easy",
+  "difficulty_score": 2,
+  "line_number": 89,
+  "original_snippet": "    const runtimeDeps = gem.dependencies?.runtime;",
+  "mutated_snippet": "    const runtimeDeps = gem.dependencies.runtime;",
+  "file_path": "packages/coding-agent/src/web/scrapers/rubygems.ts",
+  "context": {
+    "file_lines": 116,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 0,
+    "density": 0.788,
+    "line_indent": 4,
+    "containing_function": null
+  }
+}

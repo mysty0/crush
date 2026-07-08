@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-increment-decrement",
+  "mutation_category": "operator",
+  "difficulty": "medium",
+  "difficulty_score": 3,
+  "line_number": 237,
+  "original_snippet": "      count++;",
+  "mutated_snippet": "      count--;",
+  "file_path": "packages/coding-agent/src/web/scrapers/repology.ts",
+  "context": {
+    "file_lines": 257,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 2,
+    "density": 0.758,
+    "line_indent": 6,
+    "containing_function": null
+  }
+}
