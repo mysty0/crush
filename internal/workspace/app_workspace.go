@@ -430,6 +430,32 @@ func (w *AppWorkspace) ReadSkill(_ context.Context, skillID string) ([]byte, ski
 	return skills.ReadContent(mgr.ActiveSkills(), mgr.ResolvedPaths(), mgr.WorkingDir(), skillID)
 }
 
+// RefreshSkills re-discovers skills from disk and republishes discovery
+// state so the command palette and diagnostics reflect newly added or
+// removed skill files without a restart.
+func (w *AppWorkspace) RefreshSkills(_ context.Context) {
+	mgr := w.app.Skills
+	if mgr == nil {
+		return
+	}
+	opts := w.store.Config().Options
+	var paths, disabled []string
+	if opts != nil {
+		paths = opts.SkillsPaths
+		disabled = opts.DisabledSkills
+	}
+	var resolver func(string) (string, error)
+	if r := w.store.Resolver(); r != nil {
+		resolver = r.ResolveValue
+	}
+	mgr.Reload(skills.DiscoveryConfig{
+		SkillsPaths:    paths,
+		DisabledSkills: disabled,
+		WorkingDir:     w.store.WorkingDir(),
+		Resolver:       resolver,
+	})
+}
+
 // -- MCP operations --
 
 func (w *AppWorkspace) MCPGetStates() map[string]mcptools.ClientInfo {

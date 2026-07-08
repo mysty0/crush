@@ -184,6 +184,10 @@ type Workspace interface {
 	InitializePrompt() (string, error)
 	ListSkills(ctx context.Context) ([]skills.CatalogEntry, error)
 	ReadSkill(ctx context.Context, skillID string) ([]byte, skills.SkillReadResult, error)
+	// RefreshSkills re-runs skill discovery so newly added or removed
+	// skill files are reflected without restarting. In client/server mode
+	// discovery is owned by the server and this is a no-op.
+	RefreshSkills(ctx context.Context)
 
 	// MCP operations (server-side in client mode)
 	MCPGetStates() map[string]mcptools.ClientInfo

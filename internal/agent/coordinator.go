@@ -1617,6 +1617,8 @@ func (c *coordinator) activateSkillAttachments(sessionID string, attachments []m
 		for _, s := range c.activeSkills {
 			if s.Name == att.FileName {
 				c.loadedSkills.Add(sessionID, s.Name, s.Instructions)
+				slog.Debug("Skill activated from attachment", "component", "skills",
+					"skill", s.Name, "session_id", sessionID)
 				break
 			}
 		}

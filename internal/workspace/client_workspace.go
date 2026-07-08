@@ -586,6 +586,11 @@ func (w *ClientWorkspace) ListSkills(ctx context.Context) ([]skills.CatalogEntry
 	return result, nil
 }
 
+// RefreshSkills is a no-op in client/server mode: skill discovery is
+// owned by the server process and is not re-run on demand, so newly added
+// skills require a restart.
+func (w *ClientWorkspace) RefreshSkills(_ context.Context) {}
+
 func (w *ClientWorkspace) ReadSkill(ctx context.Context, skillID string) ([]byte, skills.SkillReadResult, error) {
 	resp, err := w.client.ReadSkill(ctx, w.workspaceID(), skillID)
 	if err != nil {

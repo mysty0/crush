@@ -98,6 +98,65 @@ func TestManager_SubscribeReceivesPublishedStates(t *testing.T) {
 	}
 }
 
+func TestManager_ReloadPicksUpNewSkill(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	cfg := DiscoveryConfig{SkillsPaths: []string{tmp}}
+
+	// Start with no user skills on disk.
+	all, active, states := DiscoverFromConfig(cfg)
+	mgr := NewManager(all, active, states)
+	t.Cleanup(mgr.Shutdown)
+	require.False(t, hasSkill(mgr.ActiveSkills(), "late-skill"))
+
+	// Subscribe so we can assert Reload republishes discovery state.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ch := mgr.SubscribeEvents(ctx)
+
+	// Add a skill file after construction.
+	skillDir := filepath.Join(tmp, "late-skill")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(skillDir, SkillFileName),
+		[]byte("---\nname: late-skill\ndescription: Added after startup.\nuser-invocable: true\n---\nDo late thing.\n"),
+		0o644,
+	))
+
+	mgr.Reload(cfg)
+
+	require.True(t, hasSkill(mgr.ActiveSkills(), "late-skill"),
+		"Reload must surface skills added after construction")
+	require.True(t, hasSkill(mgr.AllSkills(), "late-skill"))
+
+	select {
+	case ev := <-ch:
+		require.True(t, stateHasName(ev.Payload.States, "late-skill"),
+			"Reload must publish states including the new skill")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for reload event")
+	}
+}
+
+func hasSkill(list []*Skill, name string) bool {
+	for _, s := range list {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func stateHasName(states []*SkillState, name string) bool {
+	for _, s := range states {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func TestManager_ConcurrentWorkspacesAreIsolated(t *testing.T) {
 	t.Parallel()
 

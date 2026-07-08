@@ -552,3 +552,29 @@ func TestGetProviderOptionsReasoningEffortFallback(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "enabled", thinking["type"])
 }
+
+func TestSkillsToDeactivate(t *testing.T) {
+	t.Parallel()
+
+	active := []string{"caveman", "jq"}
+	tests := []struct {
+		name   string
+		prompt string
+		want   []string
+	}{
+		{"no match", "how do I query Loki?", nil},
+		{"stop one", "stop caveman please", []string{"caveman"}},
+		{"disable one", "disable jq", []string{"jq"}},
+		{"turn off one", "turn off caveman now", []string{"caveman"}},
+		{"unload one", "unload jq", []string{"jq"}},
+		{"normal mode clears all", "back to normal mode", []string{"caveman", "jq"}},
+		{"stop all skills", "stop all skills", []string{"caveman", "jq"}},
+		{"case insensitive", "STOP Caveman", []string{"caveman"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, skillsToDeactivate(tt.prompt, active))
+		})
+	}
+}

@@ -155,6 +155,20 @@ func (m *Manager) SubscribeEvents(ctx context.Context) <-chan pubsub.Event[Event
 	return m.broker.Subscribe(ctx)
 }
 
+// Reload re-runs skill discovery with the given config and atomically
+// swaps the manager's cached skill set, then publishes the new states so
+// subscribers (diagnostics view and command palette) observe the change.
+// The resolved paths and working directory are assumed unchanged across a
+// reload and are left untouched. Safe for concurrent use.
+func (m *Manager) Reload(cfg DiscoveryConfig) {
+	allSkills, activeSkills, states := DiscoverFromConfig(cfg)
+	m.mu.Lock()
+	m.allSkills = allSkills
+	m.activeSkills = activeSkills
+	m.mu.Unlock()
+	m.PublishStates(states)
+}
+
 // Shutdown releases broker resources.
 func (m *Manager) Shutdown() {
 	if m.broker != nil {
