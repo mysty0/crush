@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-arithmetic",
+  "mutation_category": "operator",
+  "difficulty": "hard",
+  "difficulty_score": 8,
+  "line_number": 277,
+  "original_snippet": "      `${borderVertical}${line}${padding(Math.max(0, innerWidth - visibleWidth(line)))}${borderVertical}`;",
+  "mutated_snippet": "      `${borderVertical}${line}${padding(Math.max(0, innerWidth + visibleWidth(line)))}${borderVertical}`;",
+  "file_path": "packages/coding-agent/src/tools/bash-interactive.ts",
+  "context": {
+    "file_lines": 399,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 5,
+    "density": 0.766,
+    "line_indent": 6,
+    "containing_function": null
+  }
+}

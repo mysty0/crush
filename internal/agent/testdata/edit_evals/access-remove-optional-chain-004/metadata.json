@@ -1,0 +1,19 @@
+{
+  "mutation_type": "remove-optional-chain",
+  "mutation_category": "access",
+  "difficulty": "nightmare",
+  "difficulty_score": 10,
+  "line_number": 178,
+  "original_snippet": "          typeof capSkill.frontmatter?.description === 'string'",
+  "mutated_snippet": "          typeof capSkill.frontmatter.description === 'string'",
+  "file_path": "packages/coding-agent/src/extensibility/skills.ts",
+  "context": {
+    "file_lines": 271,
+    "is_repeated_line": true,
+    "repeat_count": 3,
+    "similar_block_count": 5,
+    "density": 0.779,
+    "line_indent": 10,
+    "containing_function": "loadSkills"
+  }
+}

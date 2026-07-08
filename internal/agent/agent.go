@@ -169,6 +169,16 @@ type sessionAgent struct {
 	notify               pubsub.Publisher[notify.Notification]
 	runComplete          pubsub.Publisher[notify.RunComplete]
 
+	// activeSkillsFor returns the injection block of instructions for
+	// skills currently active in a session, or "" when none are active.
+	// It is called each turn so activated skills persist across turns and
+	// survive summarization. May be nil.
+	activeSkillsFor func(sessionID string) string
+	// onSummarized is invoked after a successful summarization so callers
+	// can re-establish per-session context (e.g. re-inject active skills
+	// that the summary compacted away). May be nil.
+	onSummarized func(sessionID string)
+
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, context.CancelFunc]
 
@@ -223,6 +233,11 @@ type SessionAgentOptions struct {
 	Tools                []fantasy.AgentTool
 	Notify               pubsub.Publisher[notify.Notification]
 	RunComplete          pubsub.Publisher[notify.RunComplete]
+	// ActiveSkillsFor returns the injection block for a session's active
+	// skills so they persist across turns. May be nil.
+	ActiveSkillsFor func(sessionID string) string
+	// OnSummarized is invoked after a successful summarization. May be nil.
+	OnSummarized func(sessionID string)
 }
 
 func NewSessionAgent(
@@ -241,6 +256,8 @@ func NewSessionAgent(
 		isYolo:               opts.IsYolo,
 		notify:               opts.Notify,
 		runComplete:          opts.RunComplete,
+		activeSkillsFor:      opts.ActiveSkillsFor,
+		onSummarized:         opts.OnSummarized,
 		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
 		activeRequests:       csync.NewMap[string, context.CancelFunc](),
 		dispatchMu:           csync.NewMap[string, *sync.Mutex](),
@@ -833,6 +850,18 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			}
 
 			prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, largeModel)
+
+			// Inject instructions for skills activated in this session so
+			// they persist and survive summarization. The provider decides
+			// when to inject: on activation and after a summarize (default,
+			// cache-friendly), or every turn when configured. Appended as a
+			// trailing system message (after the cached prompt prefix) so it
+			// stays in effect without rewriting the base prompt.
+			if a.activeSkillsFor != nil {
+				if block := a.activeSkillsFor(call.SessionID); block != "" {
+					prepared.Messages = append(prepared.Messages, fantasy.NewSystemMessage(block))
+				}
+			}
 
 			lastSystemRoleInx := 0
 			systemMessageUpdated := false
@@ -1457,6 +1486,12 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	_, err = a.sessions.Save(genCtx, currentSession)
 	if err != nil {
 		return err
+	}
+
+	// The summary compacted away any active-skill instructions; signal so
+	// they are re-injected on the next turn.
+	if a.onSummarized != nil {
+		a.onSummarized(sessionID)
 	}
 
 	// Release the active request before processing queued messages so that

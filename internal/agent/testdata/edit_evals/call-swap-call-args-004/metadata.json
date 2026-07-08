@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-call-args",
+  "mutation_category": "call",
+  "difficulty": "nightmare",
+  "difficulty_score": 14,
+  "line_number": 305,
+  "original_snippet": "    const runDirectory = path.join(runsDir, directoryName);",
+  "mutated_snippet": "    const runDirectory = path.join(directoryName, runsDir);",
+  "file_path": "packages/coding-agent/src/autoresearch/helpers.ts",
+  "context": {
+    "file_lines": 521,
+    "is_repeated_line": true,
+    "repeat_count": 2,
+    "similar_block_count": 27,
+    "density": 0.807,
+    "line_indent": 4,
+    "containing_function": "parseAsiValue"
+  }
+}

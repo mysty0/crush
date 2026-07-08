@@ -197,8 +197,74 @@ interception so a single delegated turn doesn't trigger your hook N times. The
 outer sub-agent tool call itself _is_ hooked, so policy like "never let the
 agent spawn sub-agents" still works.
 
-Hooks are keyed by event name. Only `command` is required, and you can omit
-`matcher` to match all tools.
+Hooks are keyed by event name. Each hook needs either a `command` or a `lua`
+script (see [Lua hooks](#lua-hooks)), and you can omit `matcher` to match all
+tools.
+
+## Lua hooks
+
+A hook can run an inline **Lua** script instead of a shell `command`. Lua hooks
+run in an embedded, pure-Go interpreter, so they behave identically on Linux,
+macOS, and Windows **without depending on any external binary** (`jq`, `grep`,
+`date`, or even a system shell). Reach for Lua when you want cross-platform
+policy logic without shelling out.
+
+`command` and `lua` are mutually exclusive — set exactly one.
+
+```jsonc
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "query_loki_logs$",
+        "lua": "if not string.find(hook.tool_input.logql or '', '=') then return { decision = 'deny', reason = 'add a label selector' } end"
+      }
+    ]
+  }
+}
+```
+
+**Input.** The script reads a global table `hook` with the same fields as the
+[JSON stdin payload](#json):
+
+| Field                 | Type   | Description                              |
+| --------------------- | ------ | ---------------------------------------- |
+| `hook.event`          | string | Event name (e.g. `PreToolUse`)           |
+| `hook.session_id`     | string | Current session ID                       |
+| `hook.cwd`            | string | Working directory                        |
+| `hook.tool_name`      | string | Tool being called                        |
+| `hook.tool_input`     | table  | The tool's input, as a nested Lua table  |
+
+**Output.** The script signals its decision by **returning a table** whose shape
+mirrors the [JSON output envelope](#output). Returning `nil` (or nothing) means
+"no opinion".
+
+```lua
+-- block the call
+return { decision = "deny", reason = "not allowed" }
+
+-- allow (pre-approve, skipping the permission prompt)
+return { decision = "allow" }
+
+-- halt the whole turn
+return { halt = true, reason = "secret detected" }
+
+-- inject context without deciding
+return { context = "remember to run the linter" }
+
+-- rewrite tool input (shallow-merged, like the shell envelope)
+return { updated_input = { limit = 100 } }
+```
+
+`decision`, `halt`, `reason`, `context` (string or array of strings), and
+`updated_input` behave exactly as they do for shell hooks — the returned table
+is bridged through the same envelope logic.
+
+**Sandbox.** Lua hooks get `string`, `table`, and `math` plus the safe base
+functions. Filesystem, network, process, `require`, and `load`/`eval` are **not**
+available. A parse error, runtime error, or timeout is non-blocking (treated as
+"no opinion"), same as a shell hook exiting with an unrecognized code. The
+`timeout` field applies to Lua hooks too.
 
 ## Building Hooks
 
@@ -206,9 +272,10 @@ When a hook fires, Crush:
 
 1. Filters hooks whose `matcher` regex matches the tool name (no matcher = match
    all).
-2. Deduplicates by `command` (identical commands run once).
-3. Runs all matching hooks **in parallel** through Crush's embedded POSIX
-   shell (see [Execution model](#execution-model)).
+2. Deduplicates by `command` (or `lua` source) — identical hooks run once.
+3. Runs all matching hooks **in parallel**: shell hooks through Crush's embedded
+   POSIX shell (see [Execution model](#execution-model)), Lua hooks in the
+   sandboxed interpreter.
 4. Waits for all to finish (or time out), then aggregates results **in config
    order**: deny wins over allow, allow wins over none; `updated_input` patches
    shallow-merge in order.

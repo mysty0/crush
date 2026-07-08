@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-arithmetic",
+  "mutation_category": "operator",
+  "difficulty": "nightmare",
+  "difficulty_score": 14,
+  "line_number": 303,
+  "original_snippet": "        const lastPart = currentItem.summary[currentItem.summary.length - 1];",
+  "mutated_snippet": "        const lastPart = currentItem.summary[currentItem.summary.length + 1];",
+  "file_path": "packages/ai/src/providers/openai-responses-shared.ts",
+  "context": {
+    "file_lines": 470,
+    "is_repeated_line": true,
+    "repeat_count": 2,
+    "similar_block_count": 10,
+    "density": 0.759,
+    "line_indent": 8,
+    "containing_function": "parseTextSignature"
+  }
+}

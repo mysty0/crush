@@ -50,6 +50,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/ncruces/go-sqlite3 v0.35.1
 	github.com/nxadm/tail v1.4.11
+	github.com/odvcencio/gotreesitter v0.22.1
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/posthog/posthog-go v1.17.2
 	github.com/pressly/goose/v3 v3.27.1
@@ -63,6 +64,7 @@ require (
 	github.com/swaggo/swag v1.16.6
 	github.com/tidwall/gjson v1.19.0
 	github.com/tidwall/sjson v1.2.5
+	github.com/yuin/gopher-lua v1.1.2
 	github.com/zeebo/xxh3 v1.1.0
 	go.uber.org/goleak v1.3.0
 	golang.design/x/clipboard v0.8.0
@@ -187,7 +189,6 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
-	github.com/yuin/gopher-lua v1.1.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.69.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0 // indirect

@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-adjacent-lines",
+  "mutation_category": "structural",
+  "difficulty": "hard",
+  "difficulty_score": 12,
+  "line_number": 291,
+  "original_snippet": "    const taskIds = values.tasks.split(',').map((s) => s.trim());",
+  "mutated_snippet": "    tasksToRun = [];",
+  "file_path": "packages/typescript-edit-benchmark/src/index.ts",
+  "context": {
+    "file_lines": 618,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 8,
+    "density": 0.8,
+    "line_indent": 4,
+    "containing_function": "main"
+  }
+}

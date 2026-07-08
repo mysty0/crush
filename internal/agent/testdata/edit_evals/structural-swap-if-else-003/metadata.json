@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-if-else",
+  "mutation_category": "structural",
+  "difficulty": "hard",
+  "difficulty_score": 8,
+  "line_number": 294,
+  "original_snippet": "      const release = tryParseJson<DiscogsRelease>(result.content);\n      if (!release) return null;\n      md = buildReleaseMarkdown(release);",
+  "mutated_snippet": "      const master = tryParseJson < DiscogsMaster > result.content;",
+  "file_path": "packages/coding-agent/src/web/scrapers/discogs.ts",
+  "context": {
+    "file_lines": 313,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 7,
+    "density": 0.812,
+    "line_indent": 6,
+    "containing_function": null
+  }
+}

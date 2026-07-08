@@ -1,0 +1,19 @@
+{
+  "mutation_type": "remove-negation",
+  "mutation_category": "operator",
+  "difficulty": "hard",
+  "difficulty_score": 6,
+  "line_number": 109,
+  "original_snippet": "              if (!firstTokenTime) firstTokenTime = Date.now();",
+  "mutated_snippet": "              if (firstTokenTime) firstTokenTime = Date.now();",
+  "file_path": "packages/ai/src/providers/google.ts",
+  "context": {
+    "file_lines": 396,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 3,
+    "density": 0.676,
+    "line_indent": 14,
+    "containing_function": null
+  }
+}

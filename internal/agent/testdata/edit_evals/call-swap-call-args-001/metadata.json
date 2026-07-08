@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-call-args",
+  "mutation_category": "call",
+  "difficulty": "easy",
+  "difficulty_score": 4,
+  "line_number": 24,
+  "original_snippet": "      const choice = await ctx.ui.select(`⚠️ Dangerous command:\\n\\n  ${command}\\n\\nAllow?`, [\n        'Yes',\n        'No',",
+  "mutated_snippet": "      const choice = await ctx.ui.select(\n        ['Yes', 'No'],\n        `⚠️ Dangerous command:\\n\\n  ${command}\\n\\nAllow?`,",
+  "file_path": "packages/coding-agent/examples/hooks/permission-gate.ts",
+  "context": {
+    "file_lines": 37,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 0,
+    "density": 0.768,
+    "line_indent": 6,
+    "containing_function": null
+  }
+}

@@ -880,6 +880,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lspStates = m.com.Workspace.LSPGetStates()
 	case pubsub.Event[skills.Event]:
 		m.skillStates = msg.Payload.States
+		// Refresh the command palette so newly discovered user-invocable
+		// skills appear (and removed ones disappear) without a restart.
+		return m, m.loadCustomCommands()
 	case pubsub.Event[mcp.Event]:
 		switch msg.Payload.Type {
 		case mcp.EventStateChanged:
@@ -4148,7 +4151,14 @@ func (m *UI) openCommandsDialog() tea.Cmd {
 
 	m.dialog.OpenDialog(commands)
 
-	return commands.InitialCmd()
+	// Re-discover skills on open so newly added user-invocable skills show
+	// up without a restart. RefreshSkills publishes a skills event, which
+	// reloads the palette's custom commands via the skills.Event handler.
+	refreshSkills := func() tea.Msg {
+		m.com.Workspace.RefreshSkills(context.Background())
+		return nil
+	}
+	return tea.Batch(commands.InitialCmd(), refreshSkills)
 }
 
 // openReasoningDialog opens the reasoning effort dialog.

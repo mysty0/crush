@@ -519,6 +519,9 @@ func (c *Config) setDefaults(workingDir, dataDir string) {
 	if c.Options.TUI == nil {
 		c.Options.TUI = &TUIOptions{}
 	}
+	if c.Options.EditMode == "" {
+		c.Options.EditMode = EditModeString
+	}
 	if len(c.Options.GlobalContextPaths) == 0 {
 		crushConfigDir := filepath.Dir(GlobalConfig())
 		c.Options.GlobalContextPaths = []string{
@@ -1278,8 +1281,11 @@ func (c *Config) ValidateHooks() error {
 
 	for event, eventHooks := range c.Hooks {
 		for i, h := range eventHooks {
-			if h.Command == "" {
-				return fmt.Errorf("hook %s[%d]: command is required", event, i)
+			if h.Command == "" && h.Lua == "" {
+				return fmt.Errorf("hook %s[%d]: either command or lua is required", event, i)
+			}
+			if h.Command != "" && h.Lua != "" {
+				return fmt.Errorf("hook %s[%d]: command and lua are mutually exclusive", event, i)
 			}
 			if h.Matcher == "" {
 				continue

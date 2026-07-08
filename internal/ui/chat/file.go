@@ -202,6 +202,12 @@ func (e *EditToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, width)
 	}
 
+	// Hashline edit input carries no file_path (its input is a patch string);
+	// render one diff per edited file from the result metadata instead.
+	if params.FilePath == "" {
+		return e.renderHashlineEdit(sty, width, opts)
+	}
+
 	file := fsext.PrettyPath(params.FilePath)
 	header := toolHeader(sty, opts.Status, "Edit", width, opts, file)
 	if opts.Compact {
@@ -232,6 +238,64 @@ func (e *EditToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 	}
 
 	return joinToolParts(header, diff)
+}
+
+// renderHashlineEdit renders the result of a hashline-mode Edit call: one diff
+// per edited file, taken from HashlineEditResponseMetadata.
+func (e *EditToolRenderContext) renderHashlineEdit(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
+	var meta tools.HashlineEditResponseMetadata
+	hasMeta := opts.HasResult() &&
+		json.Unmarshal([]byte(opts.Result.Metadata), &meta) == nil &&
+		len(meta.Files) > 0
+
+	var labels []string
+	if hasMeta {
+		if len(meta.Files) == 1 {
+			labels = []string{fsext.PrettyPath(meta.Files[0].FilePath)}
+		} else {
+			labels = []string{fmt.Sprintf("%d files", len(meta.Files))}
+		}
+	}
+	header := toolHeader(sty, opts.Status, "Edit", width, opts, labels...)
+	if opts.Compact {
+		return header
+	}
+
+	if !opts.HasResult() {
+		if earlyState, ok := toolEarlyStateContent(sty, opts, width); ok {
+			return joinToolParts(header, earlyState)
+		}
+		return header
+	}
+
+	if !hasMeta {
+		// Error or no diff metadata (stale tag, block-op rejection): show the
+		// message text.
+		if opts.Result.IsError {
+			return joinToolParts(header, toolErrorContent(sty, opts.Result, width))
+		}
+		bodyWidth := width - toolBodyLeftPaddingTotal
+		body := sty.Tool.Body.Render(toolOutputPlainContent(sty, opts.Result.Content, bodyWidth, opts.ExpandedContent))
+		return joinToolParts(header, body)
+	}
+
+	multi := len(meta.Files) > 1
+	parts := make([]string, 0, len(meta.Files))
+	for _, f := range meta.Files {
+		name := fsext.PrettyPath(f.FilePath)
+		body := toolOutputDiffContent(sty, name, f.OldContent, f.NewContent, width, opts.ExpandedContent)
+		if multi {
+			// Label each file and space files apart for readability.
+			label := sty.Tool.Body.Render(sty.Tool.NameNormal.Render(name))
+			body = label + "\n" + body
+		}
+		parts = append(parts, body)
+	}
+	sep := "\n"
+	if multi {
+		sep = "\n\n"
+	}
+	return joinToolParts(header, strings.Join(parts, sep))
 }
 
 // -----------------------------------------------------------------------------

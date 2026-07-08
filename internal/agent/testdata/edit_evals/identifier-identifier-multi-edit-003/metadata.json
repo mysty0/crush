@@ -1,0 +1,19 @@
+{
+  "mutation_type": "identifier-multi-edit",
+  "mutation_category": "identifier",
+  "difficulty": "hard",
+  "difficulty_score": 8,
+  "line_number": 162,
+  "original_snippet": "          content += content ? ` ${indicatorText}` : indicatorText;",
+  "mutated_snippet": "          content += ocntent ? ` ${indicatorText}` : indicatorText;",
+  "file_path": "packages/coding-agent/src/modes/components/status-line/segments.ts",
+  "context": {
+    "file_lines": 409,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 4,
+    "density": 0.808,
+    "line_indent": 10,
+    "containing_function": null
+  }
+}

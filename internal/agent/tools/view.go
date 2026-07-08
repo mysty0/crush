@@ -17,8 +17,11 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/filetracker"
+	"github.com/charmbracelet/crush/internal/fsext"
+	"github.com/charmbracelet/crush/internal/hashline"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/skills"
@@ -37,11 +40,15 @@ type viewDescriptionData struct {
 	MaxViewSizeKB    int
 }
 
-func viewDescription() string {
-	return renderTemplate(viewDescriptionTpl, viewDescriptionData{
+func viewDescription(editMode string) string {
+	base := renderTemplate(viewDescriptionTpl, viewDescriptionData{
 		DefaultReadLimit: DefaultReadLimit,
 		MaxViewSizeKB:    MaxViewSize / 1024,
 	})
+	if editMode == config.EditModeHashline {
+		base += "\n\nIn hashline edit mode, output is a `[path#TAG]` header followed by `LINE:TEXT` rows. Copy the header and the bare line numbers into `Edit` patch sections; the 4-hex TAG certifies the file version and is rejected if the file changed."
+	}
+	return base
 }
 
 type ViewParams struct {
@@ -92,12 +99,15 @@ func NewViewTool(
 	permissions permission.Service,
 	filetracker filetracker.Service,
 	skillTracker *skills.Tracker,
+	loadedSkills *skills.LoadedStore,
+	editMode string,
+	store *hashline.Store,
 	workingDir string,
 	skillsPaths ...string,
 ) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		ViewToolName,
-		viewDescription(),
+		viewDescription(editMode),
 		func(ctx context.Context, params ViewParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.FilePath == "" {
 				return fantasy.NewTextErrorResponse("file_path is required"), nil
@@ -105,7 +115,7 @@ func NewViewTool(
 
 			// Handle builtin skill files (crush: prefix).
 			if strings.HasPrefix(params.FilePath, skills.BuiltinPrefix) {
-				resp, err := readBuiltinFile(params, skillTracker)
+				resp, err := readBuiltinFile(ctx, params, skillTracker, loadedSkills)
 				return resp, err
 			}
 
@@ -247,15 +257,29 @@ func NewViewTool(
 
 			openInLSPs(ctx, lspManager, filePath)
 			waitForLSPDiagnostics(ctx, lspManager, filePath, 300*time.Millisecond)
-			output := "<file>\n"
-			output += addLineNumbers(content, params.Offset+1)
 
-			if hasMore {
-				output += fmt.Sprintf("\n\n(File has more lines. Use 'offset' parameter to read beyond line %d)",
-					params.Offset+len(strings.Split(content, "\n")))
+			var output string
+			if editMode == config.EditModeHashline && store != nil && !isSkillFile {
+				out, herr := hashlineViewOutput(store, sessionID, absFilePath, relPath, isOutsideWorkDir, filePath, content, params.Offset, hasMore)
+				if herr != nil {
+					var tooLarge contentTooLargeError
+					if errors.As(herr, &tooLarge) {
+						return fantasy.NewTextErrorResponse(fmt.Sprintf("Content section is too large (%d bytes). Maximum size is %d bytes",
+							tooLarge.Size, tooLarge.Max)), nil
+					}
+					return fantasy.ToolResponse{}, herr
+				}
+				output = out + getDiagnostics(filePath, lspManager)
+			} else {
+				output = "<file>\n"
+				output += addLineNumbers(content, params.Offset+1)
+				if hasMore {
+					output += fmt.Sprintf("\n\n(File has more lines. Use 'offset' parameter to read beyond line %d)",
+						params.Offset+len(strings.Split(content, "\n")))
+				}
+				output += "\n</file>\n"
+				output += getDiagnostics(filePath, lspManager)
 			}
-			output += "\n</file>\n"
-			output += getDiagnostics(filePath, lspManager)
 			filetracker.RecordRead(ctx, sessionID, filePath)
 
 			meta := ViewResponseMetadata{
@@ -268,6 +292,7 @@ func NewViewTool(
 					meta.ResourceName = skill.Name
 					meta.ResourceDescription = skill.Description
 					skillTracker.MarkLoaded(skill.Name)
+					loadedSkills.Add(sessionID, skill.Name, skill.Instructions)
 				}
 			}
 
@@ -277,6 +302,51 @@ func NewViewTool(
 			), nil
 		},
 	)
+}
+
+// hashlineViewOutput renders the file window as a hashline "[path#TAG]" section
+// followed by "LINE:TEXT" rows, and records a whole-file snapshot so a later
+// hashline Edit can validate its anchors against the exact version shown.
+//
+// The snapshot key is the resolved absolute path (so Read and Edit agree
+// regardless of how the model spells the path); the displayed header path is
+// relative when the file lives inside the working directory.
+func hashlineViewOutput(
+	store *hashline.Store,
+	sessionID, absFilePath, relPath string,
+	isOutsideWorkDir bool,
+	filePath, windowContent string,
+	offset int,
+	hasMore bool,
+) (string, error) {
+	full, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("error reading file: %w", err)
+	}
+	if len(full) > MaxViewSize {
+		return "", contentTooLargeError{Size: len(full), Max: MaxViewSize}
+	}
+	lfText, _ := fsext.ToUnixLineEndings(string(full))
+
+	winLines := strings.Split(windowContent, "\n")
+	seen := make([]int, 0, len(winLines))
+	for i := range winLines {
+		seen = append(seen, offset+1+i)
+	}
+
+	displayPath := relPath
+	if isOutsideWorkDir {
+		displayPath = absFilePath
+	}
+
+	tag := store.Record(sessionID, absFilePath, lfText, seen)
+
+	output := hashline.FormatHeader(displayPath, tag) + "\n"
+	output += hashline.FormatNumberedLines(windowContent, offset+1)
+	if hasMore {
+		output += fmt.Sprintf("\n\n(File has more lines. Use 'offset' to read beyond line %d)", offset+len(winLines))
+	}
+	return output + "\n", nil
 }
 
 func addLineNumbers(content string, startLine int) string {
@@ -441,7 +511,7 @@ func isInSkillsPath(filePath string, skillsPaths []string) bool {
 }
 
 // readBuiltinFile reads a file from the embedded builtin skills filesystem.
-func readBuiltinFile(params ViewParams, skillTracker *skills.Tracker) (fantasy.ToolResponse, error) {
+func readBuiltinFile(ctx context.Context, params ViewParams, skillTracker *skills.Tracker, loadedSkills *skills.LoadedStore) (fantasy.ToolResponse, error) {
 	embeddedPath := "builtin/" + strings.TrimPrefix(params.FilePath, skills.BuiltinPrefix)
 	builtinFS := skills.BuiltinFS()
 
@@ -486,6 +556,7 @@ func readBuiltinFile(params ViewParams, skillTracker *skills.Tracker) (fantasy.T
 		meta.ResourceName = skill.Name
 		meta.ResourceDescription = skill.Description
 		skillTracker.MarkLoaded(skill.Name)
+		loadedSkills.Add(GetSessionFromContext(ctx), skill.Name, skill.Instructions)
 	}
 
 	return fantasy.WithResponseMetadata(

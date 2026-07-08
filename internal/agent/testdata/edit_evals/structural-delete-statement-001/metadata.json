@@ -1,0 +1,19 @@
+{
+  "mutation_type": "delete-statement",
+  "mutation_category": "structural",
+  "difficulty": "easy",
+  "difficulty_score": 4,
+  "line_number": 85,
+  "original_snippet": "    const userMessage = new Markdown(value, 1, 1, defaultMarkdownTheme);\n",
+  "mutated_snippet": "    const children = tui.children;",
+  "file_path": "packages/tui/test/chat-simple.ts",
+  "context": {
+    "file_lines": 132,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 0,
+    "density": 0.787,
+    "line_indent": 4,
+    "containing_function": null
+  }
+}

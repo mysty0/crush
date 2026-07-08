@@ -1,0 +1,19 @@
+{
+  "mutation_type": "flip-boolean",
+  "mutation_category": "literal",
+  "difficulty": "hard",
+  "difficulty_score": 10,
+  "line_number": 189,
+  "original_snippet": "      return { value: null, changed: true };",
+  "mutated_snippet": "      return { value: null, changed: false };",
+  "file_path": "packages/ai/src/utils/validation.ts",
+  "context": {
+    "file_lines": 591,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 16,
+    "density": 0.794,
+    "line_indent": 6,
+    "containing_function": "tryParseJsonForTypes"
+  }
+}

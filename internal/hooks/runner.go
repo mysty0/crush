@@ -93,14 +93,15 @@ func (r *Runner) Run(ctx context.Context, eventName, sessionID, toolName, toolIn
 		return AggregateResult{Decision: DecisionNone}, nil
 	}
 
-	// Deduplicate by command string.
+	// Deduplicate by command/script.
 	seen := make(map[string]bool, len(matching))
 	var deduped []config.HookConfig
 	for _, h := range matching {
-		if seen[h.Command] {
+		key := h.DedupKey()
+		if seen[key] {
 			continue
 		}
-		seen[h.Command] = true
+		seen[key] = true
 		deduped = append(deduped, h)
 	}
 
@@ -173,6 +174,13 @@ func (r *Runner) runOne(parentCtx context.Context, hook config.HookConfig, envVa
 	timeout := hook.TimeoutDuration()
 	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
+
+	// Lua hooks run in-process in a sandboxed interpreter that honors ctx
+	// cancellation, so they need neither the shell env nor the
+	// abandon-on-timeout dance the detached shell path requires below.
+	if hook.IsLua() {
+		return runLua(ctx, hook.Lua, payload)
+	}
 
 	var stdout, stderr bytes.Buffer
 	done := make(chan error, 1)

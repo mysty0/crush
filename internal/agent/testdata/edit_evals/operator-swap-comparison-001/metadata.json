@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-comparison",
+  "mutation_category": "operator",
+  "difficulty": "easy",
+  "difficulty_score": 4,
+  "line_number": 47,
+  "original_snippet": "    return this.#actions.length > 0;",
+  "mutated_snippet": "    return this.#actions.length >= 0;",
+  "file_path": "packages/coding-agent/src/tools/pending-action.ts",
+  "context": {
+    "file_lines": 50,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 0,
+    "density": 0.801,
+    "line_indent": 4,
+    "containing_function": null
+  }
+}

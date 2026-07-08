@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-equality",
+  "mutation_category": "operator",
+  "difficulty": "medium",
+  "difficulty_score": 6,
+  "line_number": 220,
+  "original_snippet": "          if (existing.source === 'bundled') {",
+  "mutated_snippet": "          if (existing.source !== 'bundled') {",
+  "file_path": "packages/coding-agent/src/extensibility/custom-commands/loader.ts",
+  "context": {
+    "file_lines": 247,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 4,
+    "density": 0.777,
+    "line_indent": 10,
+    "containing_function": null
+  }
+}

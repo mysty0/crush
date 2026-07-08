@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-nullish",
+  "mutation_category": "operator",
+  "difficulty": "medium",
+  "difficulty_score": 3,
+  "line_number": 176,
+  "original_snippet": "        const pubDate = formatIsoDate(entry.published) || 'unknown';",
+  "mutated_snippet": "        const pubDate = formatIsoDate(entry.published) ?? 'unknown';",
+  "file_path": "packages/coding-agent/src/web/scrapers/nuget.ts",
+  "context": {
+    "file_lines": 186,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 0,
+    "density": 0.776,
+    "line_indent": 8,
+    "containing_function": null
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-regex-quantifier",
+  "mutation_category": "regex",
+  "difficulty": "easy",
+  "difficulty_score": 4,
+  "line_number": 49,
+  "original_snippet": "          if (stats) md += `---\\n${stats.replace(/\\s+/g, ' ')}\\n`;",
+  "mutated_snippet": "          if (stats) md += `---\\n${stats.replace(/\\s*/g, ' ')}\\n`;",
+  "file_path": "packages/coding-agent/src/web/scrapers/twitter.ts",
+  "context": {
+    "file_lines": 98,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 0,
+    "density": 0.747,
+    "line_indent": 10,
+    "containing_function": null
+  }
+}

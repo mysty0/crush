@@ -1,0 +1,19 @@
+{
+  "mutation_type": "unicode-hyphen",
+  "mutation_category": "unicode",
+  "difficulty": "easy",
+  "difficulty_score": 2,
+  "line_number": 5,
+  "original_snippet": "import { formatMoreItems, replaceTabs } from '../tools/render-utils';",
+  "mutated_snippet": "import { formatMoreItems, replaceTabs } from '../tools/render\\u2013utils';",
+  "file_path": "packages/coding-agent/src/tui/tree-list.ts",
+  "context": {
+    "file_lines": 93,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 1,
+    "density": 0.792,
+    "line_indent": 0,
+    "containing_function": null
+  }
+}

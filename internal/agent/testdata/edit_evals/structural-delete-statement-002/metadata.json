@@ -1,0 +1,19 @@
+{
+  "mutation_type": "delete-statement",
+  "mutation_category": "structural",
+  "difficulty": "medium",
+  "difficulty_score": 2,
+  "line_number": 26,
+  "original_snippet": "export const CHANGELOG_CATEGORIES: ChangelogCategory[] = [\n  'Breaking Changes',\n  'Added',",
+  "mutated_snippet": "export interface CommitCommandArgs {",
+  "file_path": "packages/coding-agent/src/commit/types.ts",
+  "context": {
+    "file_lines": 119,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 0,
+    "density": 0.803,
+    "line_indent": 0,
+    "containing_function": null
+  }
+}

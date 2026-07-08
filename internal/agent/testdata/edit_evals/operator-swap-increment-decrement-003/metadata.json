@@ -1,0 +1,19 @@
+{
+  "mutation_type": "swap-increment-decrement",
+  "mutation_category": "operator",
+  "difficulty": "hard",
+  "difficulty_score": 10,
+  "line_number": 81,
+  "original_snippet": "  for (let i = 0; i < value.length; i++) {",
+  "mutated_snippet": "  for (let i = 0; i < value.length; i--) {",
+  "file_path": "packages/coding-agent/src/capability/rule.ts",
+  "context": {
+    "file_lines": 227,
+    "is_repeated_line": false,
+    "repeat_count": 0,
+    "similar_block_count": 5,
+    "density": 0.774,
+    "line_indent": 2,
+    "containing_function": "splitScopeTokens"
+  }
+}
