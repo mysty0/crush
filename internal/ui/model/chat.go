@@ -783,6 +783,17 @@ func (m *Chat) LastMessageHasNoOutput() bool {
 	}
 }
 
+// LastUserMessage returns the ID and text of the most recent user message
+// in the chat. ok is false when there is no user message.
+func (m *Chat) LastUserMessage() (id, text string, ok bool) {
+	for i := m.list.Len() - 1; i >= 0; i-- {
+		if it, isUser := m.list.ItemAt(i).(*chat.UserMessageItem); isUser {
+			return it.ID(), it.Content(), true
+		}
+	}
+	return "", "", false
+}
+
 // ToggleExpandedSelectedItem expands the selected message item if it is expandable.
 func (m *Chat) ToggleExpandedSelectedItem() {
 	if expandable, ok := m.list.SelectedItem().(chat.Expandable); ok {

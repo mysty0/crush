@@ -82,6 +82,10 @@ type Workspace interface {
 	ListMessages(ctx context.Context, sessionID string) ([]message.Message, error)
 	ListUserMessages(ctx context.Context, sessionID string) ([]message.Message, error)
 	ListAllUserMessages(ctx context.Context) ([]message.Message, error)
+	// DiscardMessages permanently deletes the given messages from a
+	// session. Used to drop a canceled no-output turn so its prompt can be
+	// returned to the editor.
+	DiscardMessages(ctx context.Context, sessionID string, messageIDs ...string) error
 
 	// Agent
 	AgentRun(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) error
