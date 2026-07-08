@@ -116,19 +116,20 @@
         },
         "command": {
           "type": "string",
-          "description": "Shell command to execute when the hook fires"
+          "description": "Shell command to execute when the hook fires. Mutually exclusive with lua."
+        },
+        "lua": {
+          "type": "string",
+          "description": "Inline Lua script to execute when the hook fires. Mutually exclusive with command. Runs in a sandboxed cross-platform interpreter."
         },
         "timeout": {
           "type": "integer",
-          "description": "Timeout in seconds for the hook command",
+          "description": "Timeout in seconds for the hook",
           "default": 30
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "command"
-      ]
+      "type": "object"
     },
     "LSPConfig": {
       "properties": {
@@ -532,10 +533,24 @@
           "type": "array",
           "description": "List of skill names to disable and hide from the agent"
         },
+        "always_reinject_skills": {
+          "type": "boolean",
+          "description": "Re-inject active skill instructions on every turn instead of only after summarization",
+          "default": false
+        },
         "tmux_integration": {
           "type": "boolean",
           "description": "Sync the active session ID and title into tmux pane user options (@crush_session_id, @crush_session_title) for external tooling such as session-restore scripts. Only takes effect when running inside tmux.",
           "default": false
+        },
+        "edit_mode": {
+          "type": "string",
+          "enum": [
+            "string",
+            "hashline"
+          ],
+          "description": "File editing mode: 'string' (exact find/replace) or 'hashline' (line-anchored patches)",
+          "default": "string"
         }
       },
       "additionalProperties": false,
