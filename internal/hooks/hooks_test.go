@@ -444,7 +444,33 @@ func TestValidateHooksEmptyCommand(t *testing.T) {
 	}
 	err := cfg.ValidateHooks()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "command is required")
+	require.Contains(t, err.Error(), "either command or lua is required")
+}
+
+func TestValidateHooksCommandAndLuaMutuallyExclusive(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		Hooks: map[string][]config.HookConfig{
+			EventPreToolUse: {
+				{Command: "echo hi", Lua: "return nil"},
+			},
+		},
+	}
+	err := cfg.ValidateHooks()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "mutually exclusive")
+}
+
+func TestValidateHooksLuaOnlyIsValid(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		Hooks: map[string][]config.HookConfig{
+			EventPreToolUse: {
+				{Lua: `return { decision = "deny" }`},
+			},
+		},
+	}
+	require.NoError(t, cfg.ValidateHooks())
 }
 
 func TestValidateHooksNormalizesEventNames(t *testing.T) {
