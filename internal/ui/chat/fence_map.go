@@ -123,11 +123,17 @@ func fenceMarkdown(lang string, lines []string) string {
 }
 
 // renderIsolated renders md through the shared markdown renderer at
-// width and returns its plain (ANSI-stripped) lines, with any purely
-// blank leading/trailing lines trimmed. Rendering a fragment in
-// isolation like this produces byte-identical output to that same
-// fragment rendered as part of a larger document, which is what makes
-// locating a fence within a full render reliable.
+// width and returns its plain (ANSI-stripped) lines, with blank leading
+// and trailing lines trimmed. Rendering a fragment in isolation like this
+// produces byte-identical output to that same fragment rendered as part of
+// a larger document, which is what makes locating a fence within a full
+// render reliable.
+//
+// The trailing blank rows are glamour's bottom code-block margin, which is
+// whitespace-padded rather than empty; they must be dropped so a fence's
+// rendered rows line up one-to-one with its source lines. Leaving them in
+// makes buildRowToRawLine mis-attribute every row after the first source
+// line, so a copy would come out one line short.
 func renderIsolated(sty *styles.Styles, width int, md string) []string {
 	renderer := common.MarkdownRenderer(sty, width)
 	mu := common.LockMarkdownRenderer(renderer)
@@ -142,7 +148,14 @@ func renderIsolated(sty *styles.Styles, width int, md string) []string {
 	if out == "" {
 		return nil
 	}
-	return strings.Split(out, "\n")
+	lines := strings.Split(out, "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return lines
 }
 
 // findContiguousRun returns the offset of the first occurrence of needle

@@ -55,13 +55,13 @@ func TestChatHighlightContent_ResolvesWrappedCodeLineToOriginalSource(t *testing
 
 	// Drive a real keyboard visual-mode selection: enter visual mode,
 	// move the cursor down to the fragment's first wrapped row, lock the
-	// anchor, then extend a couple more rows to span the wrap.
+	// anchor, then extend one more row so the selection spans the wrapped
+	// command's rendered rows while staying inside the fence.
 	require.True(t, u.chat.EnterVisual(false))
 	for range hitLine {
 		_, _ = u.chat.HandleVisualKeyMsg(keyMsg("j"))
 	}
 	_, _ = u.chat.HandleVisualKeyMsg(keyMsg("v")) // lock the anchor here
-	_, _ = u.chat.HandleVisualKeyMsg(keyMsg("j"))
 	_, _ = u.chat.HandleVisualKeyMsg(keyMsg("j"))
 
 	renderChat(t, u.chat)
