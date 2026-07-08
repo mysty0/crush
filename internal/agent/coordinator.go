@@ -818,6 +818,12 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// mutating tools, so it is a no-op for read-only sub-agents.
 	filteredTools = wrapToolsWithPlanMode(filteredTools, c.permissions)
 
+	// Tag tool-originated errors so a tool failure that halts the run is
+	// reported distinctly instead of as a generic provider error. This is
+	// the outermost wrapper so it also captures errors from the hook and
+	// plan-mode decorators.
+	filteredTools = wrapToolsWithErrorTagging(filteredTools)
+
 	return filteredTools, nil
 }
 
