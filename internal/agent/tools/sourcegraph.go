@@ -122,7 +122,12 @@ func NewSourcegraphTool(client *http.Client) fantasy.AgentTool {
 
 			resp, err := client.Do(req)
 			if err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("failed to fetch URL: %w", err)
+				// Return network failures (timeouts, DNS, connection
+				// resets) as a recoverable tool error rather than a Go
+				// error. A returned Go error is treated as critical by the
+				// agent loop and aborts the entire run; a tool error result
+				// is handed back to the model so it can retry or continue.
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to fetch URL: %s", err)), nil
 			}
 			defer resp.Body.Close()
 
@@ -136,12 +141,12 @@ func NewSourcegraphTool(client *http.Client) fantasy.AgentTool {
 			}
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("failed to read response body: %w", err)
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to read response body: %s", err)), nil
 			}
 
 			var result map[string]any
 			if err = json.Unmarshal(body, &result); err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("failed to unmarshal response: %w", err)
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to unmarshal response: %s", err)), nil
 			}
 
 			formattedResults, err := formatSourcegraphResults(result, params.ContextWindow)
