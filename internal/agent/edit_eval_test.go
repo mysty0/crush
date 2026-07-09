@@ -151,6 +151,9 @@ func evalTools(env fakeEnv, mode string, store *hashline.Store) []fantasy.AgentT
 		tools.NewGrepTool(env.workingDir, config.ToolGrep{}),
 		tools.NewWriteTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
 	}
+	if os.Getenv("CRUSH_EDIT_EVAL_ASTGREP") != "0" {
+		base = append(base, tools.NewAstGrepTool(env.workingDir))
+	}
 	if mode == config.EditModeHashline {
 		return append(base,
 			tools.NewViewTool(nil, env.permissions, *env.filetracker, nil, nil, config.EditModeHashline, store, os.Getenv("CRUSH_EDIT_EVAL_SUMMARIZE") != "", 0, envInt("CRUSH_EDIT_EVAL_BUDGET", 400), env.workingDir),
