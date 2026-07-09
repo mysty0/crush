@@ -103,6 +103,12 @@ type ProviderConfig struct {
 	APIKeyTemplate string `json:"-"`
 	// OAuthToken for providers that use OAuth2 authentication.
 	OAuthToken *oauth.Token `json:"oauth,omitempty" jsonschema:"description=OAuth2 token for authentication with the provider"`
+	// OAuthExtra holds provider-specific OAuth metadata that must be
+	// persisted alongside the token but does not belong in headers or the
+	// API key. Gemini CLI stores the discovered Cloud project id (key
+	// "project_id") and account email (key "email") here; both are needed
+	// on every request and on token refresh.
+	OAuthExtra map[string]string `json:"oauth_extra,omitempty" jsonschema:"description=Provider-specific OAuth metadata persisted with the token"`
 	// Marks the provider as disabled.
 	Disable bool `json:"disable,omitempty" jsonschema:"description=Whether this provider is disabled,default=false"`
 
@@ -305,11 +311,11 @@ type Options struct {
 	// on every turn.
 	AlwaysReinjectSkills bool `json:"always_reinject_skills,omitempty" jsonschema:"description=Re-inject active skill instructions on every turn instead of only after summarization,default=false"`
 	TmuxIntegration      bool `json:"tmux_integration,omitempty" jsonschema:"description=Sync the active session ID and title into tmux pane user options (@crush_session_id\\, @crush_session_title) for external tooling such as session-restore scripts. Only takes effect when running inside tmux.,default=false"`
-	// EditMode selects the file-editing tool family. "string" (default) keeps
-	// the exact-match Edit/MultiEdit tools. "hashline" swaps in the
-	// line-anchored hashline edit tool and changes the Read tool's output to
-	// emit [path#TAG] anchors.
-	EditMode string `json:"edit_mode,omitempty" jsonschema:"description=File editing mode: 'string' (exact find/replace) or 'hashline' (line-anchored patches),enum=string,enum=hashline,default=string"`
+	// EditMode selects the file-editing tool family. "hashline" (default)
+	// uses the line-anchored hashline edit tool and changes the Read tool's
+	// output to emit [path#TAG] anchors. "string" keeps the exact-match
+	// Edit/MultiEdit tools.
+	EditMode string `json:"edit_mode,omitempty" jsonschema:"description=File editing mode: 'string' (exact find/replace) or 'hashline' (line-anchored patches),enum=string,enum=hashline,default=hashline"`
 	// Read configures the Read tool. Nil means defaults (structural summaries
 	// on).
 	Read *ReadOptions `json:"read,omitempty" jsonschema:"description=Read tool options"`
@@ -317,6 +323,10 @@ type Options struct {
 	// Edit configures the file-editing tools. Nil means defaults (syntax
 	// validation on).
 	Edit *EditOptions `json:"edit,omitempty" jsonschema:"description=Edit tool options"`
+
+	// Memory configures the native long-term memory. Nil means defaults
+	// (enabled).
+	Memory *MemoryOptions `json:"memory,omitempty" jsonschema:"description=Long-term memory options"`
 }
 
 // ReadOptions configures the Read tool.
@@ -341,6 +351,31 @@ type EditOptions struct {
 	// ValidateSyntax rejects an edit when it would turn a cleanly parsing file
 	// into one with a tree-sitter syntax error. On by default.
 	ValidateSyntax *bool `json:"validate_syntax,omitempty" jsonschema:"description=Reject edits that introduce a syntax error into a previously valid file,default=true"`
+}
+
+// MemoryOptions configures native long-term memory.
+type MemoryOptions struct {
+	// Enabled turns long-term memory on. Defaults to true.
+	Enabled *bool `json:"enabled,omitempty" jsonschema:"description=Enable native long-term memory (remember/recall/forget),default=true"`
+	// MaxPerScope caps the number of live memories kept per project (or
+	// global) scope; the lowest-value ones are evicted past it. Defaults to 500.
+	MaxPerScope int `json:"max_per_scope,omitempty" jsonschema:"description=Maximum memories retained per scope,default=500"`
+}
+
+// MemoryEnabled reports whether long-term memory is on. Defaults to true.
+func (o Options) MemoryEnabled() bool {
+	if o.Memory == nil || o.Memory.Enabled == nil {
+		return true
+	}
+	return *o.Memory.Enabled
+}
+
+// MemoryMaxPerScope returns the per-scope memory cap. Defaults to 500.
+func (o Options) MemoryMaxPerScope() int {
+	if o.Memory != nil && o.Memory.MaxPerScope > 0 {
+		return o.Memory.MaxPerScope
+	}
+	return 500
 }
 
 // SummarizeReads reports whether the Read tool should return structural
@@ -380,9 +415,10 @@ func (o Options) SummarizeBudget() int {
 
 // Edit mode values for Options.EditMode.
 const (
-	// EditModeString is the default exact-string find/replace edit family.
+	// EditModeString is the exact-string find/replace edit family.
 	EditModeString = "string"
-	// EditModeHashline is the line-anchored, content-hash-guarded edit family.
+	// EditModeHashline is the line-anchored, content-hash-guarded edit
+	// family. It is the default.
 	EditModeHashline = "hashline"
 )
 

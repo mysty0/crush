@@ -320,6 +320,22 @@
       },
       "type": "object"
     },
+    "MemoryOptions": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable native long-term memory (remember/recall/forget)",
+          "default": true
+        },
+        "max_per_scope": {
+          "type": "integer",
+          "description": "Maximum memories retained per scope",
+          "default": 500
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "Model": {
       "properties": {
         "id": {
@@ -561,7 +577,7 @@
             "hashline"
           ],
           "description": "File editing mode: 'string' (exact find/replace) or 'hashline' (line-anchored patches)",
-          "default": "string"
+          "default": "hashline"
         },
         "read": {
           "$ref": "#/$defs/ReadOptions",
@@ -570,6 +586,10 @@
         "edit": {
           "$ref": "#/$defs/EditOptions",
           "description": "Edit tool options"
+        },
+        "memory": {
+          "$ref": "#/$defs/MemoryOptions",
+          "description": "Long-term memory options"
         }
       },
       "additionalProperties": false,

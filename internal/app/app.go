@@ -32,6 +32,7 @@ import (
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
+	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -68,6 +69,10 @@ type App struct {
 	LSPManager *lsp.Manager
 
 	Skills *skills.Manager
+
+	// Memory is the native long-term memory store (nil when disabled or if
+	// schema init failed).
+	Memory *memory.Store
 
 	config *config.ConfigStore
 
@@ -118,6 +123,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		Rewind:      rewind.NewService(sessions, messages, files),
 		LSPManager:  lsp.NewManager(store),
 		Skills:      skillsMgr,
+		Memory:      newMemoryStore(ctx, conn, store),
 
 		globalCtx: ctx,
 
@@ -631,6 +637,7 @@ func (app *App) InitCoderAgent(ctx context.Context) error {
 		app.agentNotifications,
 		app.runCompletions,
 		app.Skills,
+		app.Memory,
 	)
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)
@@ -745,4 +752,19 @@ func (app *App) checkForUpdates(ctx context.Context) {
 		LatestVersion:  info.Latest,
 		IsDevelopment:  info.IsDevelopment(),
 	})
+}
+
+// newMemoryStore builds and initializes the long-term memory store. It returns
+// nil when memory is disabled or the schema cannot be created, so the rest of
+// the app runs unaffected.
+func newMemoryStore(ctx context.Context, conn *sql.DB, store *config.ConfigStore) *memory.Store {
+	if !store.Config().Options.MemoryEnabled() {
+		return nil
+	}
+	s := memory.NewStore(conn)
+	if err := s.Init(ctx); err != nil {
+		slog.Error("Failed to initialize memory store; continuing without memory", "err", err)
+		return nil
+	}
+	return s
 }

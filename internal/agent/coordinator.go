@@ -34,6 +34,7 @@ import (
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
+	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/permission"
@@ -155,6 +156,7 @@ type coordinator struct {
 	lspManager  *lsp.Manager
 	notify      pubsub.Publisher[notify.Notification]
 	runComplete pubsub.Publisher[notify.RunComplete]
+	memory      *memory.Store
 
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
@@ -214,6 +216,7 @@ func NewCoordinator(
 	notify pubsub.Publisher[notify.Notification],
 	runComplete pubsub.Publisher[notify.RunComplete],
 	skillsMgr *skills.Manager,
+	mem *memory.Store,
 ) (Coordinator, error) {
 	// Skills are pre-discovered by the caller (see app.New /
 	// backend.CreateWorkspace) and passed in via the manager. If no
@@ -248,6 +251,7 @@ func NewCoordinator(
 		skillTracker:        skillTracker,
 		loadedSkills:        skills.NewLoadedStore(),
 		snapshots:           hashline.NewStore(),
+		memory:              mem,
 	}
 
 	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
@@ -803,6 +807,16 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewGlobTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Glob),
 		tools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
 		tools.NewAstGrepTool(c.cfg.WorkingDir()),
+	)
+	if c.memory != nil && c.cfg.Config().Options.MemoryEnabled() {
+		allTools = append(allTools,
+			tools.NewRememberTool(c.memory, c.cfg.WorkingDir(), c.cfg.Config().Options.MemoryMaxPerScope()),
+			tools.NewRecallTool(c.memory, c.cfg.WorkingDir()),
+			tools.NewForgetTool(c.memory, c.cfg.WorkingDir()),
+		)
+	}
+	allTools = append(
+		allTools,
 		tools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
 		tools.NewSourcegraphTool(nil),
 		c.scheduleCronTool(),
