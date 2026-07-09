@@ -105,6 +105,7 @@ func NewViewTool(
 	store *hashline.Store,
 	summarize bool,
 	summarizeMinLines int,
+	summarizeBudget int,
 	workingDir string,
 	skillsPaths ...string,
 ) fantasy.AgentTool {
@@ -267,7 +268,7 @@ func NewViewTool(
 			// pointing at the ranges to re-read. Falls through to the raw window
 			// when it does not apply.
 			if summarize && wholeFileRead && !isSkillFile {
-				if out, sok := summarizeViewOutput(filePath, editMode, store, sessionID, absFilePath, relPath, isOutsideWorkDir, summarizeMinLines); sok {
+				if out, sok := summarizeViewOutput(filePath, editMode, store, sessionID, absFilePath, relPath, isOutsideWorkDir, summarizeMinLines, summarizeBudget); sok {
 					openInLSPs(ctx, lspManager, filePath)
 					waitForLSPDiagnostics(ctx, lspManager, filePath, 300*time.Millisecond)
 					filetracker.RecordRead(ctx, sessionID, filePath)
@@ -386,7 +387,7 @@ func summarizeViewOutput(
 	store *hashline.Store,
 	sessionID, absFilePath, relPath string,
 	isOutsideWorkDir bool,
-	minLines int,
+	minLines, budget int,
 ) (string, bool) {
 	raw, err := os.ReadFile(filePath)
 	if err != nil || len(raw) > MaxViewSize {
@@ -397,7 +398,7 @@ func summarizeViewOutput(
 		return "", false
 	}
 
-	sum, ok := tsblock.Summarize(lfText, filePath, tsblock.Options{MinTotalLines: minLines})
+	sum, ok := tsblock.Summarize(lfText, filePath, tsblock.Options{MinTotalLines: minLines, UnfoldUntil: budget})
 	if !ok {
 		return "", false
 	}
@@ -430,12 +431,15 @@ func summarizeViewOutput(
 		}
 	}
 
-	footerRanges := elidedRanges
-	if len(footerRanges) > 3 {
-		footerRanges = footerRanges[:3]
+	footer := ""
+	if len(elidedRanges) > 0 {
+		footerRanges := elidedRanges
+		if len(footerRanges) > 3 {
+			footerRanges = footerRanges[:3]
+		}
+		footer = fmt.Sprintf("\n[…%d lines elided; re-read the ranges you need, e.g. %s]\n",
+			sum.ElidedLines, strings.Join(footerRanges, ", "))
 	}
-	footer := fmt.Sprintf("\n[…%d lines elided; re-read the ranges you need, e.g. %s]\n",
-		sum.ElidedLines, strings.Join(footerRanges, ", "))
 
 	if hashlineMode {
 		tag := store.Record(sessionID, absFilePath, lfText, seen)

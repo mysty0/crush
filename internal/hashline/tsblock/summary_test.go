@@ -47,7 +47,7 @@ func itoa(n int) string {
 func TestSummarizeGoFunction(t *testing.T) {
 	t.Parallel()
 	src := "package main\n\nfunc hello(name string) {\n\tx := 1\n\ty := 2\n\tprintln(x + y)\n\tprintln(name)\n}\n\nfunc small() {\n}\n"
-	s, ok := Summarize(src, "main.go", Options{MinTotalLines: 1})
+	s, ok := Summarize(src, "main.go", Options{MinTotalLines: 1, UnfoldUntil: 1})
 	require.True(t, ok)
 	// The body of hello (lines 4-7) should be elided; signature (3) and closer (8) kept.
 	require.NotZero(t, s.ElidedLines)
@@ -61,7 +61,7 @@ func TestSummarizeGoFunction(t *testing.T) {
 func TestSummarizeContainerKeepsMethodSignatures(t *testing.T) {
 	t.Parallel()
 	src := "package main\n\ntype T struct {\n\tA int\n\tB int\n\tC int\n}\n\nfunc (t T) One() int {\n\treturn t.A + t.B + t.C\n}\n\nfunc (t T) Two() int {\n\treturn t.A - t.B - t.C\n}\n"
-	s, ok := Summarize(src, "main.go", Options{MinTotalLines: 1})
+	s, ok := Summarize(src, "main.go", Options{MinTotalLines: 1, UnfoldUntil: 1})
 	require.True(t, ok)
 	view := renderForTest(src, s)
 	// Method signatures stay visible; their bodies are elided.
@@ -72,18 +72,36 @@ func TestSummarizeContainerKeepsMethodSignatures(t *testing.T) {
 func TestSummarizeTypeScript(t *testing.T) {
 	t.Parallel()
 	src := "export function add(a: number, b: number): number {\n\tconst sum = a + b;\n\tconsole.log(sum);\n\treturn sum;\n}\n"
-	s, ok := Summarize(src, "a.ts", Options{MinTotalLines: 1})
+	s, ok := Summarize(src, "a.ts", Options{MinTotalLines: 1, UnfoldUntil: 1})
 	require.True(t, ok)
 	view := renderForTest(src, s)
 	require.Contains(t, view, "export function add(a: number, b: number): number {")
 	require.NotContains(t, view, "const sum")
 }
 
-func TestSummarizeSmallFileNoElision(t *testing.T) {
+func TestSummarizeUnderBudgetShownWhole(t *testing.T) {
 	t.Parallel()
-	// Nothing spans >= MinBodyLines → nothing to elide → ok=false.
-	src := "package main\n\nvar x = 1\nvar y = 2\n"
-	_, ok := Summarize(src, "main.go", Options{MinTotalLines: 1})
+	// A parseable file at or below the visible-line budget is shown verbatim:
+	// ok=true, nothing elided, one kept segment covering every line.
+	src := "package main\n\nfunc a() {\n\tx := 1\n\ty := 2\n\tz := 3\n}\n"
+	s, ok := Summarize(src, "main.go", Options{MinTotalLines: 1, UnfoldUntil: 1000})
+	require.True(t, ok)
+	require.Zero(t, s.ElidedLines)
+	require.Len(t, s.Segments, 1)
+	require.Equal(t, Kept, s.Segments[0].Kind)
+	require.Equal(t, s.TotalLines, s.Segments[0].End)
+}
+
+func TestSummarizeLargeUnfoldableFallsBack(t *testing.T) {
+	t.Parallel()
+	// A file larger than the budget with no foldable structure cannot be
+	// collapsed, so the summarizer bails (ok=false) rather than dump it whole.
+	var b strings.Builder
+	b.WriteString("package main\n")
+	for i := 0; i < 40; i++ {
+		b.WriteString("var x = 1\n")
+	}
+	_, ok := Summarize(b.String(), "main.go", Options{MinTotalLines: 1, UnfoldUntil: 10})
 	require.False(t, ok)
 }
 
@@ -96,7 +114,7 @@ func TestSummarizeUnknownLanguage(t *testing.T) {
 func TestSummarizeSegmentsCoverAllLines(t *testing.T) {
 	t.Parallel()
 	src := "package main\n\nfunc a() {\n\tx := 1\n\ty := 2\n\tz := 3\n}\n"
-	s, ok := Summarize(src, "main.go", Options{MinTotalLines: 1})
+	s, ok := Summarize(src, "main.go", Options{MinTotalLines: 1, UnfoldUntil: 1})
 	require.True(t, ok)
 	// Segments must be gap-free and cover 1..TotalLines.
 	next := 1

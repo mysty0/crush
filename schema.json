@@ -551,6 +551,10 @@
           ],
           "description": "File editing mode: 'string' (exact find/replace) or 'hashline' (line-anchored patches)",
           "default": "string"
+        },
+        "read": {
+          "$ref": "#/$defs/ReadOptions",
+          "description": "Read tool options"
         }
       },
       "additionalProperties": false,
@@ -669,6 +673,27 @@
           },
           "type": "array",
           "description": "List of models available from this provider"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ReadOptions": {
+      "properties": {
+        "summarize": {
+          "type": "boolean",
+          "description": "Return structural summaries for large files read without a selector",
+          "default": true
+        },
+        "summarize_min_lines": {
+          "type": "integer",
+          "description": "Files with fewer lines are read verbatim",
+          "default": 100
+        },
+        "summarize_budget": {
+          "type": "integer",
+          "description": "Target visible line count for summaries; files at or below this length are read verbatim",
+          "default": 400
         }
       },
       "additionalProperties": false,

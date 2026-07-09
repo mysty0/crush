@@ -35,12 +35,22 @@ type Summary struct {
 type Options struct {
 	MinBodyLines  int // min lines a construct must span before its body is elided (default 4)
 	MinTotalLines int // files with fewer lines are read verbatim, not summarized (default 100)
+	// UnfoldUntil is the target number of visible (kept) lines. Starting from a
+	// fully folded view, elidable spans are unfolded breadth-first (outermost
+	// first) until at least this many lines are visible. A file whose total
+	// length is at or below UnfoldUntil is therefore shown verbatim. Default 400.
+	UnfoldUntil int
+	// UnfoldLimit is the hard ceiling on visible lines while unfolding: an
+	// unfold whose revealed lines would exceed it is skipped so a single
+	// oversized leaf cannot starve its siblings. Defaults to UnfoldUntil*2.
+	UnfoldLimit int
 }
 
-// Default summary tuning (matches oh-my-pi).
+// Default summary tuning.
 const (
 	defaultMinBodyLines  = 4
 	defaultMinTotalLines = 100
+	defaultUnfoldUntil   = 400
 )
 
 func (o Options) withDefaults() Options {
@@ -50,16 +60,32 @@ func (o Options) withDefaults() Options {
 	if o.MinTotalLines <= 0 {
 		o.MinTotalLines = defaultMinTotalLines
 	}
+	if o.UnfoldUntil <= 0 {
+		o.UnfoldUntil = defaultUnfoldUntil
+	}
+	if o.UnfoldLimit <= 0 {
+		o.UnfoldLimit = o.UnfoldUntil * 2
+	}
 	return o
 }
 
+// elidableNode is a foldable region: the interior line span [lo, hi] that is
+// hidden when the node is folded, plus the foldable regions nested inside it.
+type elidableNode struct {
+	lo, hi   int
+	children []*elidableNode
+}
+
+func (n *elidableNode) lines() int { return n.hi - n.lo + 1 }
+
 // Summarize parses text as the language inferred from path and returns a
-// structural summary: top-level declarations keep their opening and closing
-// lines while their bodies are elided; container declarations (e.g. classes)
-// are recursed so nested signatures stay visible. It returns ok=false — meaning
+// structural summary. Starting from a fully folded view (only outermost
+// signatures visible), it unfolds declarations breadth-first until at least
+// opts.UnfoldUntil lines are visible, so small files are shown verbatim and
+// only genuinely large files keep bodies elided. It returns ok=false — meaning
 // the caller should fall back to a raw read — when the language is unknown, the
-// file has a syntax error, the file is below opts.MinTotalLines, or nothing was
-// elided.
+// file has a syntax error, the file is below opts.MinTotalLines, or the file is
+// larger than the budget yet has no foldable structure.
 func Summarize(text, path string, opts Options) (Summary, bool) {
 	opts = opts.withDefaults()
 
@@ -86,12 +112,25 @@ func Summarize(text, path string, opts Options) (Summary, bool) {
 		return Summary{}, false
 	}
 
-	elided := map[int]struct{}{}
+	var roots []*elidableNode
 	for i := 0; i < root.NamedChildCount(); i++ {
-		collectElisions(root.NamedChild(i), opts.MinBodyLines, elided)
+		if n := buildElidable(root.NamedChild(i), opts.MinBodyLines); n != nil {
+			roots = append(roots, n)
+		}
 	}
+
+	elided := selectFolded(roots, total, opts.UnfoldUntil, opts.UnfoldLimit)
 	if len(elided) == 0 {
-		return Summary{}, false
+		// Everything fits within the budget: show the file verbatim. Bail out
+		// only when the file is both large and unfoldable, so we never dump a
+		// huge file that has no structure to collapse.
+		if total > opts.UnfoldUntil {
+			return Summary{}, false
+		}
+		return Summary{
+			Segments:   []Segment{{Kind: Kept, Start: 1, End: total}},
+			TotalLines: total,
+		}, true
 	}
 
 	return Summary{
@@ -101,41 +140,76 @@ func Summarize(text, path string, opts Options) (Summary, bool) {
 	}, true
 }
 
-// collectElisions folds n: if n spans few lines it is kept whole; if it is a
-// container (two or more child declarations that are themselves foldable) it
-// recurses so child signatures stay visible; otherwise its interior body lines
-// are elided.
-func collectElisions(n *gts.Node, minBody int, elided map[int]struct{}) {
+// buildElidable turns a syntax node into an elidable span tree: a node spanning
+// at least minBody lines has a foldable interior (its lines minus the opening
+// and closing line), and its foldable descendants become children so unfolding
+// it reveals nested signatures while keeping their bodies folded. Returns nil
+// for nodes too small to fold.
+func buildElidable(n *gts.Node, minBody int) *elidableNode {
 	if n == nil {
-		return
+		return nil
 	}
 	start := int(n.StartPoint().Row) + 1
 	end := int(n.EndPoint().Row) + 1
-	if end-start+1 < minBody {
-		return
+	if end-start+1 < minBody || start+1 > end-1 {
+		return nil
 	}
-
-	var childDecls []*gts.Node
+	node := &elidableNode{lo: start + 1, hi: end - 1}
 	for i := 0; i < n.NamedChildCount(); i++ {
-		c := n.NamedChild(i)
-		if c != nil && int(c.EndPoint().Row-c.StartPoint().Row)+1 >= minBody {
-			childDecls = append(childDecls, c)
+		if c := buildElidable(n.NamedChild(i), minBody); c != nil {
+			node.children = append(node.children, c)
 		}
 	}
+	return node
+}
 
-	if len(childDecls) >= 2 {
-		// Container: keep this node's frame and each child's signature; recurse
-		// so nested bodies are elided but their signatures stay visible.
-		for _, c := range childDecls {
-			collectElisions(c, minBody, elided)
+// selectFolded returns the set of elided line numbers after breadth-first
+// unfolding. It starts with every root folded (minimum visible) and unfolds
+// outermost-first — replacing a folded node with its children — until at least
+// unfoldUntil lines are visible, skipping any unfold that would push the
+// visible count past unfoldLimit. Files at or below the budget end up fully
+// unfolded (empty result).
+func selectFolded(roots []*elidableNode, total, unfoldUntil, unfoldLimit int) map[int]struct{} {
+	folded := make(map[*elidableNode]struct{}, len(roots))
+	foldedLines := 0
+	queue := make([]*elidableNode, 0, len(roots))
+	for _, r := range roots {
+		folded[r] = struct{}{}
+		foldedLines += r.lines()
+		queue = append(queue, r)
+	}
+	visible := total - foldedLines
+	for len(queue) > 0 && visible < unfoldUntil {
+		node := queue[0]
+		queue = queue[1:]
+		if _, ok := folded[node]; !ok {
+			continue
 		}
-		return
+		childLines := 0
+		for _, c := range node.children {
+			childLines += c.lines()
+		}
+		revealed := node.lines() - childLines
+		if revealed < 0 {
+			revealed = 0
+		}
+		if visible+revealed > unfoldLimit {
+			continue
+		}
+		delete(folded, node)
+		for _, c := range node.children {
+			folded[c] = struct{}{}
+			queue = append(queue, c)
+		}
+		visible += revealed
 	}
-
-	// Leaf body: keep the opening line and closing line, elide the interior.
-	for line := start + 1; line <= end-1; line++ {
-		elided[line] = struct{}{}
+	elided := map[int]struct{}{}
+	for n := range folded {
+		for ln := n.lo; ln <= n.hi; ln++ {
+			elided[ln] = struct{}{}
+		}
 	}
+	return elided
 }
 
 // buildSegments partitions [1, total] into contiguous kept/elided runs.

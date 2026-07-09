@@ -325,6 +325,11 @@ type ReadOptions struct {
 	// SummarizeMinLines is the smallest file (in lines) that gets summarized;
 	// smaller files are read verbatim. Defaults to 100.
 	SummarizeMinLines int `json:"summarize_min_lines,omitempty" jsonschema:"description=Files with fewer lines are read verbatim,default=100"`
+	// SummarizeBudget is the target number of visible (kept) lines in a
+	// summary. Files at or below this length are read verbatim; larger files
+	// keep declaration signatures visible and elide bodies down toward this
+	// budget. Defaults to 400.
+	SummarizeBudget int `json:"summarize_budget,omitempty" jsonschema:"description=Target visible line count for summaries; files at or below this length are read verbatim,default=400"`
 }
 
 // SummarizeReads reports whether the Read tool should return structural
@@ -342,6 +347,15 @@ func (o Options) SummarizeMinLines() int {
 		return o.Read.SummarizeMinLines
 	}
 	return 100
+}
+
+// SummarizeBudget returns the target visible-line count for summaries. Files at
+// or below this length are read verbatim.
+func (o Options) SummarizeBudget() int {
+	if o.Read != nil && o.Read.SummarizeBudget > 0 {
+		return o.Read.SummarizeBudget
+	}
+	return 400
 }
 
 // Edit mode values for Options.EditMode.

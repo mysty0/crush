@@ -788,7 +788,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
 		tools.NewSourcegraphTool(nil),
 		tools.NewTodosTool(c.sessions),
-		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.skillTracker, c.loadedSkills, editMode, c.snapshots, c.cfg.Config().Options.SummarizeReads(), c.cfg.Config().Options.SummarizeMinLines(), c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
+		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.skillTracker, c.loadedSkills, editMode, c.snapshots, c.cfg.Config().Options.SummarizeReads(), c.cfg.Config().Options.SummarizeMinLines(), c.cfg.Config().Options.SummarizeBudget(), c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewSkillTool(c.activeSkills, c.loadedSkills),
 	)
