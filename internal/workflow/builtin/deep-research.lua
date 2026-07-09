@@ -191,7 +191,13 @@ phase("Search")
 local searchResults = pipeline(
   scope.angles,
   function(angle)
-    local r = agent(searchPrompt(angle), { label = "search:" .. angle.label, phase = "Search", schema = SEARCH_SCHEMA })
+    -- Ranking/filtering raw search-tool results into structured output
+    -- is mechanical work, not deep reasoning -- run it on the cheaper
+    -- small model. Fetch/Verify stay on the default model: claim
+    -- extraction and adversarial verification are what determine
+    -- whether the final report is trustworthy, so their quality isn't
+    -- worth trading for cost.
+    local r = agent(searchPrompt(angle), { label = "search:" .. angle.label, phase = "Search", schema = SEARCH_SCHEMA, model = "small" })
     if not r then
       return false
     end

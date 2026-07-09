@@ -46,6 +46,11 @@ type WorkflowAgentStatus struct {
 	Label string
 	// Phase is the workflow phase this agent belongs to.
 	Phase string
+	// Provider and Model identify which model actually ran this call
+	// (the workflow's default model, or a per-call override requested
+	// via agent(prompt, {model=...})), so the UI can show it.
+	Provider string
+	Model    string
 	// StartedAt marks when the agent call was dispatched.
 	StartedAt time.Time
 	// Done reports whether the agent call has returned.
