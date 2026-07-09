@@ -807,23 +807,33 @@ func (m *Chat) MessageItem(id string) chat.MessageItem {
 }
 
 // LastMessageHasNoOutput returns true if canceling the agent right now
-// would not discard any generated output. This is the case when the last
-// item in the chat is the user's own message (the assistant hasn't
-// started responding yet) or an assistant message that hasn't produced
-// any content, thinking, or tool calls yet (still spinning).
+// would not discard any generated output. A turn can span several steps
+// (each tool call round-trip creates its own assistant message), so this
+// scans backward from the end of the chat rather than checking only the
+// trailing item: a fresh, still-empty assistant message immediately
+// after a completed tool call would otherwise look like "no output yet"
+// even though the turn already did real work. Scanning stops at the
+// most recent user message, since anything before that belongs to a
+// prior turn.
 func (m *Chat) LastMessageHasNoOutput() bool {
-	if m.list.Len() == 0 {
-		return true
+	for i := m.list.Len() - 1; i >= 0; i-- {
+		switch it := m.list.ItemAt(i).(type) {
+		case *chat.UserMessageItem:
+			// Reached this turn's prompt without finding any output.
+			return true
+		case *chat.AssistantMessageItem:
+			if !it.HasNoOutput() {
+				return false
+			}
+			// Still spinning/empty — keep looking at earlier steps.
+		default:
+			// Any other item since the last user message (a tool call,
+			// shell result, etc.) is output this turn already produced.
+			return false
+		}
 	}
-	item := m.list.ItemAt(m.list.Len() - 1)
-	switch it := item.(type) {
-	case *chat.UserMessageItem:
-		return true
-	case *chat.AssistantMessageItem:
-		return it.HasNoOutput()
-	default:
-		return false
-	}
+	// No user message found (empty session).
+	return true
 }
 
 // LastUserMessage returns the ID and text of the most recent user message
