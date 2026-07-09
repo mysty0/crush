@@ -995,6 +995,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				slog.Warn("Provider warning", "type", w.Type, "message", w.Message)
 			}
 			finishReason := message.FinishReasonUnknown
+			var finishMessage, finishDetails string
 			switch stepResult.FinishReason {
 			case fantasy.FinishReasonLength:
 				finishReason = message.FinishReasonMaxTokens
@@ -1002,6 +1003,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				finishReason = message.FinishReasonEndTurn
 			case fantasy.FinishReasonToolCalls:
 				finishReason = message.FinishReasonToolUse
+			case fantasy.FinishReasonContentFilter:
+				finishReason = message.FinishReasonError
+				finishMessage = "Content filtered"
+				finishDetails = "The provider stopped the response because it violated a content filter."
+			case fantasy.FinishReasonError:
+				finishReason = message.FinishReasonError
+				finishMessage = "Provider error"
+				finishDetails = "The provider ended the response with an error but returned no details."
 			}
 			// If a tool result halted the turn (e.g. a hook halt or a
 			// permission denial), the step ends on FinishReasonToolCalls but
@@ -1015,7 +1024,26 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					}
 				}
 			}
-			currentAssistant.AddFinish(finishReason, "", "")
+			// A step that produced no visible output and reported an
+			// unrecognized finish reason is an empty response (the provider
+			// dropped the stream without an error). Surface it as an error so
+			// the turn is visible in the UI instead of rendering as a blank
+			// message with an "unknown" reason that should never happen.
+			if finishReason == message.FinishReasonUnknown {
+				hasOutput := strings.TrimSpace(currentAssistant.Content().Text) != "" ||
+					len(currentAssistant.ToolCalls()) > 0 ||
+					strings.TrimSpace(currentAssistant.ReasoningContent().Thinking) != ""
+				if !hasOutput {
+					finishReason = message.FinishReasonError
+					finishMessage = "Empty response"
+					finishDetails = fmt.Sprintf("The model returned no content and reported finish reason %q. This usually means the provider dropped the response; try again.", stepResult.FinishReason)
+					slog.Warn("Model returned an empty response",
+						"session_id", call.SessionID,
+						"finish_reason", stepResult.FinishReason,
+					)
+				}
+			}
+			currentAssistant.AddFinish(finishReason, finishMessage, finishDetails)
 			sessionLock.Lock()
 			defer sessionLock.Unlock()
 
@@ -1148,6 +1176,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		}
 		var fantasyErr *fantasy.Error
 		var providerErr *fantasy.ProviderError
+		var toolErr *ToolExecutionError
 		const defaultTitle = "Provider Error"
 		linkStyle := lipgloss.NewStyle().Foreground(charmtone.Guac).Underline(true)
 		if isCancelErr {
@@ -1172,6 +1201,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			}
 		} else if errors.As(err, &fantasyErr) {
 			currentAssistant.AddFinish(message.FinishReasonError, cmp.Or(stringext.Capitalize(fantasyErr.Title), defaultTitle), fantasyErr.Message)
+		} else if errors.As(err, &toolErr) {
+			// A tool returned a fatal error, which halts the whole run.
+			// Attribute it to the tool so it is not mistaken for a model
+			// or provider failure.
+			currentAssistant.AddFinish(
+				message.FinishReasonError,
+				fmt.Sprintf("Tool error: %s", toolErr.ToolName),
+				toolErr.Err.Error(),
+			)
 		} else {
 			currentAssistant.AddFinish(message.FinishReasonError, defaultTitle, err.Error())
 		}

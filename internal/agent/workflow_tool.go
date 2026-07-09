@@ -480,17 +480,51 @@ func summarizeWorkflowResult(result any) string {
 
 func (r *workflowRunner) CoerceObject(ctx context.Context, text string, schema *workflow.Schema, schemaName string) (any, error) {
 	schemaName = sanitizeSchemaName(cmp.Or(schemaName, "result"))
+	fantasySchema := workflowSchemaToFantasy(schema)
 	resp, err := r.smallModel.Model.GenerateObject(ctx, fantasy.ObjectCall{
 		Prompt: fantasy.Prompt{
 			fantasy.NewUserMessage("Extract the following into the requested structure:\n\n" + text),
 		},
-		Schema:     workflowSchemaToFantasy(schema),
+		Schema:     fantasySchema,
 		SchemaName: schemaName,
+		RepairText: r.repairObjectText(schemaName, fantasySchema),
 	})
 	if err != nil {
 		return nil, err
 	}
 	return resp.Object, nil
+}
+
+// repairObjectText builds a RepairText callback for GenerateObject: when
+// the model's structured output fails schema validation, it logs the raw
+// text that failed (otherwise unrecoverable once discarded) and asks the
+// small model once to fix it, quoting the exact validation error back so
+// the retry can address it directly.
+func (r *workflowRunner) repairObjectText(schemaName string, schema fantasy.Schema) func(ctx context.Context, text string, verr error) (string, error) {
+	return func(ctx context.Context, text string, verr error) (string, error) {
+		slog.Warn("Workflow structured output failed validation, attempting repair",
+			"schema", schemaName, "error", verr, "raw_text", text)
+
+		schemaJSON, err := json.Marshal(schema)
+		if err != nil {
+			return "", err
+		}
+
+		resp, err := r.smallModel.Model.Generate(ctx, fantasy.Call{
+			Prompt: fantasy.Prompt{
+				fantasy.NewUserMessage(fmt.Sprintf(
+					"The following JSON failed schema validation.\n\n"+
+						"## Schema\n%s\n\n## Invalid JSON\n%s\n\n## Validation error\n%s\n\n"+
+						"Return only the corrected JSON, with no surrounding text.",
+					schemaJSON, text, verr,
+				)),
+			},
+		})
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(resp.Content.Text()), nil
+	}
 }
 
 // workflowSchemaToFantasy converts the workflow engine's

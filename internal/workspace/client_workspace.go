@@ -186,6 +186,12 @@ func (w *ClientWorkspace) ListAllUserMessages(ctx context.Context) ([]message.Me
 	return protoToMessages(msgs), nil
 }
 
+// DiscardMessages is not yet supported over the client/server transport;
+// dropping a canceled turn's messages is a local-only convenience.
+func (w *ClientWorkspace) DiscardMessages(context.Context, string, ...string) error {
+	return nil
+}
+
 // -- Agent --
 
 func (w *ClientWorkspace) AgentRun(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) error {

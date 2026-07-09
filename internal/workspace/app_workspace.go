@@ -101,6 +101,17 @@ func (w *AppWorkspace) ListAllUserMessages(ctx context.Context) ([]message.Messa
 	return w.app.Messages.ListAllUserMessages(ctx)
 }
 
+// DiscardMessages deletes the given messages from the session. sessionID is
+// unused locally; it exists for the client/server transport.
+func (w *AppWorkspace) DiscardMessages(ctx context.Context, _ string, messageIDs ...string) error {
+	for _, id := range messageIDs {
+		if err := w.app.Messages.Delete(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // -- Agent --
 
 func (w *AppWorkspace) AgentRun(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) error {

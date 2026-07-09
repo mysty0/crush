@@ -213,6 +213,12 @@ type UI struct {
 	// isCanceling tracks whether the user has pressed escape once to cancel.
 	isCanceling bool
 
+	// cancelRestore holds the prompt to return to the editor after a
+	// no-output cancel finalizes. Set when Escape cancels a turn that has
+	// produced no visible output (thinking is discarded), consumed once the
+	// canceled assistant message settles. Nil when no restore is pending.
+	cancelRestore *cancelRestoreState
+
 	// bangMode tracks whether the editor is in bang (!) shell mode.
 	bangMode     bool
 	bangWasEmpty bool // true when bang prompt became empty on last keystroke
@@ -860,6 +866,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.updateSessionMessage(msg.Payload))
 		case pubsub.DeletedEvent:
 			m.chat.RemoveMessage(msg.Payload.ID)
+		}
+		if cmd := m.maybeRestoreCanceledPrompt(msg.Payload); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 		// start the spinner if there is a new message
 		if hasInProgressTodo(m.session.Todos) && m.isAgentBusy() && !m.todoIsSpinning {
@@ -3995,6 +4004,13 @@ func cancelTimerCmd() tea.Cmd {
 	})
 }
 
+// cancelRestoreState remembers the user prompt to return to the editor
+// when a no-output turn is canceled.
+type cancelRestoreState struct {
+	userMsgID string
+	text      string
+}
+
 // cancelAgent handles the cancel key press. The first press sets isCanceling to true
 // and starts a timer. The second press (before the timer expires) actually
 // cancels the agent. If the agent hasn't produced any output yet (no
@@ -4023,8 +4039,12 @@ func (m *UI) cancelAgent() tea.Cmd {
 	}
 
 	// Nothing has been generated yet, so cancel immediately without the
-	// confirmation step — there's no output to lose.
+	// confirmation step — there's no output to lose. Remember the prompt so
+	// it can be returned to the editor once the canceled turn settles.
 	if m.bangCancel == nil && m.chat.LastMessageHasNoOutput() {
+		if id, text, ok := m.chat.LastUserMessage(); ok && strings.TrimSpace(text) != "" {
+			m.cancelRestore = &cancelRestoreState{userMsgID: id, text: text}
+		}
 		m.doCancelAgent()
 		return nil
 	}
@@ -4047,6 +4067,51 @@ func (m *UI) doCancelAgent() {
 	// Stop the spinning todo indicator.
 	m.todoIsSpinning = false
 	m.renderPills()
+}
+
+// maybeRestoreCanceledPrompt returns the prompt of a just-canceled
+// no-output turn to the editor and drops the turn from history. It fires
+// once, when the canceled assistant message finalizes. Turns that produced
+// real output (content or tool calls) are kept in history; only thinking is
+// discarded.
+func (m *UI) maybeRestoreCanceledPrompt(msg message.Message) tea.Cmd {
+	if m.cancelRestore == nil {
+		return nil
+	}
+	if msg.Role != message.Assistant || msg.FinishReason() != message.FinishReasonCanceled {
+		return nil
+	}
+	if strings.TrimSpace(msg.Content().Text) != "" || len(msg.ToolCalls()) > 0 {
+		// The turn produced output after all; leave it in history.
+		m.cancelRestore = nil
+		return nil
+	}
+
+	cr := m.cancelRestore
+	m.cancelRestore = nil
+
+	m.textarea.SetValue(cr.text)
+	m.textarea.MoveToEnd()
+	m.syncBangModeFromTextarea()
+	m.focus = uiFocusEditor
+
+	ids := []string{msg.ID}
+	if cr.userMsgID != "" && cr.userMsgID != msg.ID {
+		ids = append(ids, cr.userMsgID)
+	}
+	return tea.Batch(m.textarea.Focus(), m.discardMessagesCmd(m.session.ID, ids))
+}
+
+// discardMessagesCmd deletes the given messages from the session. The
+// resulting DeletedEvents remove the corresponding chat items.
+func (m *UI) discardMessagesCmd(sessionID string, ids []string) tea.Cmd {
+	ws := m.com.Workspace
+	return func() tea.Msg {
+		if err := ws.DiscardMessages(context.Background(), sessionID, ids...); err != nil {
+			return util.InfoMsg{Type: util.InfoTypeError, Msg: fmt.Sprintf("%v", err)}
+		}
+		return nil
+	}
 }
 
 // openDialog opens a dialog by its ID.

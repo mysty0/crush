@@ -211,7 +211,7 @@ func (s *scheduler) execute(item queuedAgent) {
 	case item.schema != nil:
 		obj, cerr := s.runner.CoerceObject(s.ctx, text, item.schema, item.schemaName)
 		if cerr != nil {
-			slog.Warn("Workflow structured output coercion failed", "label", item.req.Label, "error", cerr)
+			slog.Warn("Workflow structured output coercion failed", "label", item.req.Label, "error", cerr, "raw_text", text)
 		} else {
 			result, ok = obj, true
 		}
