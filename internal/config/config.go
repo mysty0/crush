@@ -313,6 +313,10 @@ type Options struct {
 	// Read configures the Read tool. Nil means defaults (structural summaries
 	// on).
 	Read *ReadOptions `json:"read,omitempty" jsonschema:"description=Read tool options"`
+
+	// Edit configures the file-editing tools. Nil means defaults (syntax
+	// validation on).
+	Edit *EditOptions `json:"edit,omitempty" jsonschema:"description=Edit tool options"`
 }
 
 // ReadOptions configures the Read tool.
@@ -332,6 +336,13 @@ type ReadOptions struct {
 	SummarizeBudget int `json:"summarize_budget,omitempty" jsonschema:"description=Target visible line count for summaries; files at or below this length are read verbatim,default=400"`
 }
 
+// EditOptions configures the file-editing tools.
+type EditOptions struct {
+	// ValidateSyntax rejects an edit when it would turn a cleanly parsing file
+	// into one with a tree-sitter syntax error. On by default.
+	ValidateSyntax *bool `json:"validate_syntax,omitempty" jsonschema:"description=Reject edits that introduce a syntax error into a previously valid file,default=true"`
+}
+
 // SummarizeReads reports whether the Read tool should return structural
 // summaries. Defaults to true when unset.
 func (o Options) SummarizeReads() bool {
@@ -347,6 +358,15 @@ func (o Options) SummarizeMinLines() int {
 		return o.Read.SummarizeMinLines
 	}
 	return 100
+}
+
+// ValidateEditSyntax reports whether edits that introduce a syntax error into a
+// previously valid file should be rejected. Defaults to true when unset.
+func (o Options) ValidateEditSyntax() bool {
+	if o.Edit == nil || o.Edit.ValidateSyntax == nil {
+		return true
+	}
+	return *o.Edit.ValidateSyntax
 }
 
 // SummarizeBudget returns the target visible-line count for summaries. Files at

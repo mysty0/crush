@@ -154,7 +154,7 @@ func evalTools(env fakeEnv, mode string, store *hashline.Store) []fantasy.AgentT
 	if mode == config.EditModeHashline {
 		return append(base,
 			tools.NewViewTool(nil, env.permissions, *env.filetracker, nil, nil, config.EditModeHashline, store, os.Getenv("CRUSH_EDIT_EVAL_SUMMARIZE") != "", 0, envInt("CRUSH_EDIT_EVAL_BUDGET", 400), env.workingDir),
-			tools.NewHashlineEditTool(nil, env.permissions, env.history, *env.filetracker, store, tsblock.New(), env.workingDir),
+			tools.NewHashlineEditTool(nil, env.permissions, env.history, *env.filetracker, store, tsblock.New(), env.workingDir, os.Getenv("CRUSH_EDIT_EVAL_LINT") != "0"),
 		)
 	}
 	return append(base,
@@ -310,11 +310,11 @@ func envInt(key string, def int) int {
 }
 
 type modeAgg struct {
-	total, passed          int
-	editCalls, editErrors  int
-	tokens                 int64
-	runErrors              int
-	failed                 []string
+	total, passed         int
+	editCalls, editErrors int
+	tokens                int64
+	runErrors             int
+	failed                []string
 }
 
 func TestEditEval(t *testing.T) {

@@ -771,7 +771,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// the original list position so string-mode requests are unchanged.
 	if editMode == config.EditModeHashline {
 		allTools = append(allTools,
-			tools.NewHashlineEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.snapshots, tsblock.New(), c.cfg.WorkingDir()),
+			tools.NewHashlineEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.snapshots, tsblock.New(), c.cfg.WorkingDir(), c.cfg.Config().Options.ValidateEditSyntax()),
 		)
 	} else {
 		allTools = append(allTools,

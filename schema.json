@@ -104,6 +104,17 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "EditOptions": {
+      "properties": {
+        "validate_syntax": {
+          "type": "boolean",
+          "description": "Reject edits that introduce a syntax error into a previously valid file",
+          "default": true
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "HookConfig": {
       "properties": {
         "name": {
@@ -555,6 +566,10 @@
         "read": {
           "$ref": "#/$defs/ReadOptions",
           "description": "Read tool options"
+        },
+        "edit": {
+          "$ref": "#/$defs/EditOptions",
+          "description": "Edit tool options"
         }
       },
       "additionalProperties": false,

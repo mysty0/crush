@@ -16,7 +16,7 @@ import (
 
 func hashlineTestTool(store *hashline.Store, workingDir string) fantasy.AgentTool {
 	perms := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
-	return NewHashlineEditTool(nil, perms, &mockHistoryService{}, mockFileTracker{}, store, nil, workingDir)
+	return NewHashlineEditTool(nil, perms, &mockHistoryService{}, mockFileTracker{}, store, nil, workingDir, true)
 }
 
 func runHashlineEdit(t *testing.T, tool fantasy.AgentTool, sessionID, input string) fantasy.ToolResponse {
@@ -253,4 +253,43 @@ func TestHashlineEditRejectsConflictingDrift(t *testing.T) {
 
 	got, _ := os.ReadFile(file)
 	require.Equal(t, "line1\nDISK\nline3\n", string(got), "conflicting edit must not write")
+}
+
+func TestHashlineEditSyntaxGateRejects(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.go")
+	content := "package main\n\nfunc main() {\n\tif true {\n\t\tprintln(\"hi\")\n\t}\n}\n"
+	require.NoError(t, os.WriteFile(file, []byte(content), 0o644))
+
+	store := hashline.NewStore()
+	abs, _ := filepath.Abs(file)
+	tag := recordRead(t, store, "sess", abs, content)
+
+	tool := hashlineTestTool(store, dir)
+	// Deleting the inner closing brace unbalances the file: the gate must
+	// reject it and leave the file untouched.
+	resp := runHashlineEdit(t, tool, "sess", "[a.go#"+tag+"]\nDEL 6")
+	require.True(t, resp.IsError, resp.Content)
+	require.Contains(t, resp.Content, "syntax error")
+
+	got, _ := os.ReadFile(file)
+	require.Equal(t, content, string(got), "rejected edit must not write")
+}
+
+func TestHashlineEditSyntaxGateDisabled(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.go")
+	content := "package main\n\nfunc main() {\n\tif true {\n\t\tprintln(\"hi\")\n\t}\n}\n"
+	require.NoError(t, os.WriteFile(file, []byte(content), 0o644))
+
+	store := hashline.NewStore()
+	abs, _ := filepath.Abs(file)
+	tag := recordRead(t, store, "sess", abs, content)
+
+	perms := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tool := NewHashlineEditTool(nil, perms, &mockHistoryService{}, mockFileTracker{}, store, nil, dir, false)
+	resp := runHashlineEdit(t, tool, "sess", "[a.go#"+tag+"]\nDEL 6")
+	require.False(t, resp.IsError, resp.Content)
 }
