@@ -63,7 +63,7 @@ def category(name: str) -> str:
     return name.rsplit("-", 1)[0]
 
 
-def run_one(fx: dict, mode: str, model: str, dump: str | None) -> dict:
+def run_one(fx: dict, mode: str, model: str, dump: str | None, prompt_file: str | None = None) -> dict:
     with tempfile.TemporaryDirectory(prefix="edit-eval-") as tmp:
         tmp = Path(tmp)
         (tmp / fx["file"]).write_text(fx["input"])
@@ -71,8 +71,11 @@ def run_one(fx: dict, mode: str, model: str, dump: str | None) -> dict:
             "options": {"edit_mode": mode, "auto_lsp": False, "disable_provider_auto_update": True},
         }))
         cmd = [str(BINARY), "run", "-q", "-c", str(tmp), "-m", model, fx["prompt"]]
+        env = {**os.environ}
+        if prompt_file:
+            env["CRUSH_CODER_PROMPT_FILE"] = prompt_file
         try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env)
             stdout, stderr, rc = p.stdout, p.stderr, p.returncode
         except subprocess.TimeoutExpired:
             stdout, stderr, rc = "", "TIMEOUT", -1
@@ -99,6 +102,7 @@ def main() -> int:
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--concurrency", type=int, default=6)
     ap.add_argument("--dump", default="")
+    ap.add_argument("--prompt", default="", help="path to a coder prompt template file (CRUSH_CODER_PROMPT_FILE)")
     args = ap.parse_args()
 
     if args.build or not BINARY.exists():
@@ -126,7 +130,7 @@ def main() -> int:
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-        futs = [ex.submit(run_one, fx, mode, args.model, args.dump or None) for fx, mode in jobs]
+        futs = [ex.submit(run_one, fx, mode, args.model, args.dump or None, args.prompt or None) for fx, mode in jobs]
         for i, f in enumerate(concurrent.futures.as_completed(futs), 1):
             r = f.result()
             results.append(r)

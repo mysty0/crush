@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	_ "embed"
+	"os"
 
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/config"
@@ -18,7 +19,15 @@ var taskPromptTmpl []byte
 var initializePromptTmpl []byte
 
 func coderPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
-	systemPrompt, err := prompt.NewPrompt("coder", string(coderPromptTmpl), opts...)
+	tmpl := coderPromptTmpl
+	// CRUSH_CODER_PROMPT_FILE swaps the coder system prompt for an external
+	// template file. Used to A/B test alternate prompts without a rebuild.
+	if path := os.Getenv("CRUSH_CODER_PROMPT_FILE"); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			tmpl = data
+		}
+	}
+	systemPrompt, err := prompt.NewPrompt("coder", string(tmpl), opts...)
 	if err != nil {
 		return nil, err
 	}
