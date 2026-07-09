@@ -57,7 +57,7 @@ func (c *coordinator) workflowSubAgentTools(tmpDir string, client *http.Client) 
 		tools.NewGrepTool(tmpDir, c.cfg.Config().Tools.Grep),
 		tools.NewSourcegraphTool(client),
 		// Sub-agent read: hashline mode off (empty mode + nil store).
-		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, nil, nil, "", nil, tmpDir),
+		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, nil, nil, "", nil, false, 0, tmpDir),
 	}
 }
 

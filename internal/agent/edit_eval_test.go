@@ -131,12 +131,12 @@ func evalTools(env fakeEnv, mode string, store *hashline.Store) []fantasy.AgentT
 	}
 	if mode == config.EditModeHashline {
 		return append(base,
-			tools.NewViewTool(nil, env.permissions, *env.filetracker, nil, nil, config.EditModeHashline, store, env.workingDir),
+			tools.NewViewTool(nil, env.permissions, *env.filetracker, nil, nil, config.EditModeHashline, store, os.Getenv("CRUSH_EDIT_EVAL_SUMMARIZE") != "", 0, env.workingDir),
 			tools.NewHashlineEditTool(nil, env.permissions, env.history, *env.filetracker, store, tsblock.New(), env.workingDir),
 		)
 	}
 	return append(base,
-		tools.NewViewTool(nil, env.permissions, *env.filetracker, nil, nil, config.EditModeString, nil, env.workingDir),
+		tools.NewViewTool(nil, env.permissions, *env.filetracker, nil, nil, config.EditModeString, nil, os.Getenv("CRUSH_EDIT_EVAL_SUMMARIZE") != "", 0, env.workingDir),
 		tools.NewEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewMultiEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
 	)

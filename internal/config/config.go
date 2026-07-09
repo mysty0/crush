@@ -310,6 +310,38 @@ type Options struct {
 	// line-anchored hashline edit tool and changes the Read tool's output to
 	// emit [path#TAG] anchors.
 	EditMode string `json:"edit_mode,omitempty" jsonschema:"description=File editing mode: 'string' (exact find/replace) or 'hashline' (line-anchored patches),enum=string,enum=hashline,default=string"`
+	// Read configures the Read tool. Nil means defaults (structural summaries
+	// on).
+	Read *ReadOptions `json:"read,omitempty" jsonschema:"description=Read tool options"`
+}
+
+// ReadOptions configures the Read tool.
+type ReadOptions struct {
+	// Summarize returns structural code summaries (kept declaration signatures,
+	// elided bodies, with a re-read footer) for large parseable files read
+	// without an explicit offset/limit. On by default; set to false to always
+	// read verbatim.
+	Summarize *bool `json:"summarize,omitempty" jsonschema:"description=Return structural summaries for large files read without a selector,default=true"`
+	// SummarizeMinLines is the smallest file (in lines) that gets summarized;
+	// smaller files are read verbatim. Defaults to 100.
+	SummarizeMinLines int `json:"summarize_min_lines,omitempty" jsonschema:"description=Files with fewer lines are read verbatim,default=100"`
+}
+
+// SummarizeReads reports whether the Read tool should return structural
+// summaries. Defaults to true when unset.
+func (o Options) SummarizeReads() bool {
+	if o.Read == nil || o.Read.Summarize == nil {
+		return true
+	}
+	return *o.Read.Summarize
+}
+
+// SummarizeMinLines returns the minimum file length (lines) for summarization.
+func (o Options) SummarizeMinLines() int {
+	if o.Read != nil && o.Read.SummarizeMinLines > 0 {
+		return o.Read.SummarizeMinLines
+	}
+	return 100
 }
 
 // Edit mode values for Options.EditMode.
