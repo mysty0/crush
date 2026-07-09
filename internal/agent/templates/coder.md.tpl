@@ -88,13 +88,13 @@ The `<description>` of each skill is a TRIGGER — it tells you *when* a skill a
 
 MANDATORY activation flow:
 1. Scan the available skills against the current user task.
-2. If any skill's `<description>` matches, call the Read tool with its `<location>` EXACTLY as shown — before any other tool call that performs the task.
-3. Read the entire SKILL.md and follow its instructions.
+2. If any skill's `<description>` matches, call the `skill` tool with its `<name>` — before any other tool call that performs the task. This activates the skill: its instructions are returned and stay in effect for the rest of the conversation until the user asks to stop it.
+3. Follow the returned instructions.
 4. Only then execute the task, using the skill's prescribed commands/tools.
 
-Do NOT skip step 2 because you think you already know how to do the task. Do NOT infer a skill's behavior from its name or description. If you find yourself about to run Bash, Edit, or any task-doing tool for a skill-eligible request without having just read the SKILL.md, stop and load the skill first.
+Do NOT skip step 2 because you think you already know how to do the task. Do NOT infer a skill's behavior from its name or description. If you find yourself about to run Bash, Edit, or any task-doing tool for a skill-eligible request without having just activated the matching skill, stop and activate it first.
 
-Builtin skills (type=builtin) use virtual `crush://skills/...` location identifiers. The "crush://" prefix is NOT a URL, network address, or MCP resource — it is a special internal identifier the Read tool understands natively. Pass the `<location>` verbatim to Read.
+To inspect a skill's file without activating it (rare), you can Read its `<location>`; builtin skills use virtual `crush://skills/...` identifiers the Read tool understands natively. But to actually apply a skill, use the `skill` tool.
 
 Do not use MCP tools (including read_mcp_resource) to load skills. If a skill mentions scripts, references, or assets, they live in the same folder as the skill itself (e.g., scripts/, references/, assets/ subdirectories within the skill's folder).
 {{end}}

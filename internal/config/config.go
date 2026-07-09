@@ -865,6 +865,7 @@ func allToolNames() []string {
 		"Write",
 		"ListMcpResourcesTool",
 		"ReadMcpResourceTool",
+		"skill",
 	}
 }
 
