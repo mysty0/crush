@@ -289,6 +289,14 @@ type UI struct {
 	workflowViewSelectedPhase int
 	workflowViewRightFocus    bool
 	workflowViewAgentScroll   int
+	// workflowViewSelectedAgent indexes the highlighted row in the
+	// right (agents) pane.
+	workflowViewSelectedAgent int
+	// workflowViewReturnSessionID holds the workflow session to
+	// switch back to when exiting a workflow agent's fullscreen
+	// transcript (entered via Confirm on the right pane). Empty when
+	// the current sub-agent view was not entered from a workflow.
+	workflowViewReturnSessionID string
 
 	// agentListFocused is true when the always-visible agent picker
 	// list below the chat has keyboard focus (entered by pressing
@@ -2380,6 +2388,14 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			return tea.Batch(cmds...)
 		}
 		if m.subAgentSessionID != "" {
+			if m.workflowViewReturnSessionID != "" {
+				// Drilled into this agent from the workflow view: Esc
+				// backs out to the two-pane view instead of canceling
+				// — inspecting a workflow agent is read-only, not a
+				// steerable session.
+				m.exitSubAgentView()
+				return tea.Batch(cmds...)
+			}
 			m.com.Workspace.AgentCancelSubAgent(m.subAgentSessionID)
 			return tea.Batch(cmds...)
 		}
@@ -2482,6 +2498,9 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				m.historyReset()
 
 				if m.subAgentSessionID != "" {
+					if m.workflowViewReturnSessionID != "" {
+						return tea.Batch(util.ReportWarn("Workflow agents are read-only. Press Esc to go back."), m.loadPromptHistory())
+					}
 					return tea.Batch(m.sendToSubAgent(value), m.loadPromptHistory())
 				}
 

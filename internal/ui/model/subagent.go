@@ -67,14 +67,18 @@ func (m *UI) enterSubAgentView(sessionID, toolCallID, prompt string) tea.Cmd {
 	return m.loadSubAgentMessages(sessionID)
 }
 
-// exitSubAgentView returns the main content area to the normal session
-// chat view.
+// chat view, or back to the workflow two-pane view if the sub-agent
+// was entered from there (see enterWorkflowAgentView).
 func (m *UI) exitSubAgentView() {
 	m.subAgentSessionID = ""
 	m.subAgentToolCallID = ""
 	m.subAgentPrompt = ""
 	if m.subAgentChat != nil {
 		m.subAgentChat.ClearMessages()
+	}
+	if m.workflowViewReturnSessionID != "" {
+		m.workflowViewSessionID = m.workflowViewReturnSessionID
+		m.workflowViewReturnSessionID = ""
 	}
 	m.updateLayoutAndSize()
 }
@@ -242,7 +246,11 @@ func (m *UI) sendToSubAgent(content string) tea.Cmd {
 // area for the chat content below it.
 func (m *UI) drawSubAgentBanner(scr uv.Screen, area uv.Rectangle) uv.Rectangle {
 	sty := m.com.Styles
-	tag := sty.Tool.AgentTaskTag.Render("Sub-agent")
+	tagText := "Sub-agent"
+	if m.workflowViewReturnSessionID != "" {
+		tagText = "Workflow agent"
+	}
+	tag := sty.Tool.AgentTaskTag.Render(tagText)
 	prompt := ansi.Truncate(m.subAgentPrompt, max(area.Dx()-lipgloss.Width(tag)-1, 0), "…")
 	line := lipgloss.JoinHorizontal(lipgloss.Left, tag, " ", sty.Tool.AgentPrompt.Render(prompt))
 

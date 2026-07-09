@@ -35,9 +35,32 @@ func (m *UI) exitWorkflowView() {
 	m.updateLayoutAndSize()
 }
 
+// enterWorkflowAgentView switches the main content area from the
+// workflow two-pane view into a live, read-only transcript of one of
+// its dispatched sub-agents. Esc returns to the two-pane view instead
+// of canceling the sub-agent (see the Cancel-key handling in ui.go),
+// since drilling into a workflow agent is inspection, not a steerable
+// session.
+func (m *UI) enterWorkflowAgentView(a agent.WorkflowAgentStatus) tea.Cmd {
+	m.workflowViewReturnSessionID = m.workflowViewSessionID
+	m.workflowViewSessionID = ""
+	label := a.Label
+	if label == "" {
+		label = "agent"
+	}
+	if a.Phase != "" {
+		label = a.Phase + " · " + label
+	}
+	if modelName := m.workflowAgentModelName(a); modelName != "" {
+		label += " (" + modelName + ")"
+	}
+	return m.enterSubAgentView(a.SessionID, "", label)
+}
+
 // handleWorkflowViewKeyMsg handles navigation while the workflow view
-// is active: Up/Down move the phase selection (left pane) or scroll the
-// agent list (right pane), Tab/Right/Left switch pane focus, "c"
+// is active: Up/Down move the phase selection (left pane) or the agent
+// selection (right pane), Left/Right/Tab switch pane focus, Confirm on
+// the right pane opens the selected agent's live transcript, "c"
 // cancels the workflow, and Esc/Cancel exits.
 func (m *UI) handleWorkflowViewKeyMsg(msg tea.KeyMsg) tea.Cmd {
 	status, ok := m.com.Workspace.AgentWorkflowStatus(m.workflowViewSessionID)
@@ -46,6 +69,11 @@ func (m *UI) handleWorkflowViewKeyMsg(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	phases := sortedWorkflowPhases(status)
+	var phaseName string
+	if m.workflowViewSelectedPhase < len(phases) {
+		phaseName = phases[m.workflowViewSelectedPhase].Name
+	}
+	agents := agentsForPhase(status, phaseName)
 
 	switch {
 	case key.Matches(msg, m.keyMap.Chat.Cancel):
@@ -54,24 +82,32 @@ func (m *UI) handleWorkflowViewKeyMsg(msg tea.KeyMsg) tea.Cmd {
 	case msg.String() == "c":
 		m.com.Workspace.AgentCancelWorkflow(m.workflowViewSessionID)
 		return nil
-	case msg.String() == "tab", key.Matches(msg, m.keyMap.Chat.ScrollRight):
+	case msg.String() == "tab", key.Matches(msg, m.keyMap.Chat.PillRight):
 		m.workflowViewRightFocus = true
-	case key.Matches(msg, m.keyMap.Chat.ScrollLeft):
+	case key.Matches(msg, m.keyMap.Chat.PillLeft):
 		m.workflowViewRightFocus = false
+	case key.Matches(msg, m.keyMap.Chat.Confirm):
+		if m.workflowViewRightFocus && m.workflowViewSelectedAgent < len(agents) {
+			return m.enterWorkflowAgentView(agents[m.workflowViewSelectedAgent])
+		}
 	case key.Matches(msg, m.keyMap.Chat.Up):
 		if m.workflowViewRightFocus {
-			if m.workflowViewAgentScroll > 0 {
-				m.workflowViewAgentScroll--
+			if m.workflowViewSelectedAgent > 0 {
+				m.workflowViewSelectedAgent--
 			}
 		} else if m.workflowViewSelectedPhase > 0 {
 			m.workflowViewSelectedPhase--
+			m.workflowViewSelectedAgent = 0
 			m.workflowViewAgentScroll = 0
 		}
 	case key.Matches(msg, m.keyMap.Chat.Down):
 		if m.workflowViewRightFocus {
-			m.workflowViewAgentScroll++
+			if m.workflowViewSelectedAgent < len(agents)-1 {
+				m.workflowViewSelectedAgent++
+			}
 		} else if m.workflowViewSelectedPhase < len(phases)-1 {
 			m.workflowViewSelectedPhase++
+			m.workflowViewSelectedAgent = 0
 			m.workflowViewAgentScroll = 0
 		}
 	}
@@ -103,7 +139,7 @@ func (m *UI) drawWorkflowView(scr uv.Screen, area image.Rectangle) {
 	uv.NewStyledString(header).Draw(scr, headerRect)
 
 	// Footer hint.
-	hint := lipgloss.NewStyle().Faint(true).Render("↑/↓ navigate · tab focus agents · c cancel · esc back")
+	hint := lipgloss.NewStyle().Faint(true).Render("↑/↓ navigate · ←/→ switch pane · enter view agent · c cancel · esc back")
 	footerRect := rect
 	footerRect.Min.Y = max(rect.Max.Y-1, rect.Min.Y)
 	uv.NewStyledString(hint).Draw(scr, footerRect)
@@ -179,24 +215,36 @@ func (m *UI) drawWorkflowAgents(scr uv.Screen, area uv.Rectangle, status agent.W
 		return
 	}
 
-	// Clamp scroll to the available rows.
+	// Clamp the selection, then keep it within the visible window,
+	// scrolling as needed.
+	if m.workflowViewSelectedAgent > len(agents)-1 {
+		m.workflowViewSelectedAgent = max(0, len(agents)-1)
+	}
 	visible := max(1, area.Dy()-2)
+	if m.workflowViewAgentScroll > m.workflowViewSelectedAgent {
+		m.workflowViewAgentScroll = m.workflowViewSelectedAgent
+	}
+	if m.workflowViewSelectedAgent >= m.workflowViewAgentScroll+visible {
+		m.workflowViewAgentScroll = m.workflowViewSelectedAgent - visible + 1
+	}
 	if m.workflowViewAgentScroll > len(agents)-1 {
 		m.workflowViewAgentScroll = max(0, len(agents)-1)
 	}
 	start := m.workflowViewAgentScroll
 	end := min(len(agents), start+visible)
 
-	for _, a := range agents[start:end] {
-		lines = append(lines, m.renderWorkflowAgentRow(a, area.Dx()-1))
+	for i, a := range agents[start:end] {
+		idx := start + i
+		selected := m.workflowViewRightFocus && idx == m.workflowViewSelectedAgent
+		lines = append(lines, m.renderWorkflowAgentRow(a, area.Dx()-1, selected))
 	}
 
 	uv.NewStyledString(strings.Join(lines, "\n")).Draw(scr, area)
 }
 
 // renderWorkflowAgentRow builds one agent row: "glyph label  time  tok
-// calls".
-func (m *UI) renderWorkflowAgentRow(a agent.WorkflowAgentStatus, width int) string {
+// calls". The row is bolded when selected.
+func (m *UI) renderWorkflowAgentRow(a agent.WorkflowAgentStatus, width int, selected bool) string {
 	glyph := "◐"
 	if a.Done {
 		glyph = "●"
@@ -210,7 +258,12 @@ func (m *UI) renderWorkflowAgentRow(a agent.WorkflowAgentStatus, width int) stri
 		label = "agent"
 	}
 
-	stats := fmt.Sprintf("%s  %s tok  %d calls", formatDuration(elapsed), formatTokens(tokens), calls)
+	var stats string
+	if modelName := m.workflowAgentModelName(a); modelName != "" {
+		stats = fmt.Sprintf("%s  %s  %s tok  %d calls", modelName, formatDuration(elapsed), formatTokens(tokens), calls)
+	} else {
+		stats = fmt.Sprintf("%s  %s tok  %d calls", formatDuration(elapsed), formatTokens(tokens), calls)
+	}
 	// Reserve space for the stats column on the right.
 	statsWidth := lipgloss.Width(stats)
 	labelWidth := max(0, width-statsWidth-2-lipgloss.Width(glyph)-1)
@@ -218,7 +271,24 @@ func (m *UI) renderWorkflowAgentRow(a agent.WorkflowAgentStatus, width int) stri
 
 	left := fmt.Sprintf("%s %s", glyph, labelText)
 	pad := max(1, width-lipgloss.Width(left)-statsWidth)
+	if selected {
+		left = lipgloss.NewStyle().Bold(true).Render(left)
+	}
 	return left + strings.Repeat(" ", pad) + lipgloss.NewStyle().Faint(true).Render(stats)
+}
+
+// workflowAgentModelName resolves the display name of the model an
+// agent ran on, falling back to the raw model ID, or "" if the
+// registry has no model recorded (e.g. from before this field
+// existed).
+func (m *UI) workflowAgentModelName(a agent.WorkflowAgentStatus) string {
+	if a.Model == "" {
+		return ""
+	}
+	if model := m.com.Config().GetModel(a.Provider, a.Model); model != nil {
+		return model.Name
+	}
+	return a.Model
 }
 
 // workflowAgentStats returns the total tokens and tool-call count for a
