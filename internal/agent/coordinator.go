@@ -95,6 +95,10 @@ type Coordinator interface {
 	RunAccepted(ctx context.Context, accept *AcceptedRun, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error)
 	BeginAccepted(sessionID string) *AcceptedRun
 	Cancel(sessionID string)
+	// CancelKeepQueue stops the active run without discarding queued
+	// follow-up prompts, so the first queued prompt starts as the next
+	// turn once the canceled run unwinds.
+	CancelKeepQueue(sessionID string)
 	CancelAll()
 	IsSessionBusy(sessionID string) bool
 	IsBusy() bool
@@ -1271,6 +1275,10 @@ func (c *coordinator) BeginAccepted(sessionID string) *AcceptedRun {
 
 func (c *coordinator) Cancel(sessionID string) {
 	c.currentAgent.Cancel(sessionID)
+}
+
+func (c *coordinator) CancelKeepQueue(sessionID string) {
+	c.currentAgent.CancelKeepQueue(sessionID)
 }
 
 func (c *coordinator) CancelAll() {

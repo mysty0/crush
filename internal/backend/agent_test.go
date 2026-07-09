@@ -48,6 +48,7 @@ func (c *blockingCoordinator) RunAccepted(ctx context.Context, accept *agent.Acc
 
 func (c *blockingCoordinator) BeginAccepted(sessionID string) *agent.AcceptedRun    { return nil }
 func (c *blockingCoordinator) Cancel(string)                                        {}
+func (c *blockingCoordinator) CancelKeepQueue(string)                               {}
 func (c *blockingCoordinator) CancelAll()                                           {}
 func (c *blockingCoordinator) IsBusy() bool                                         { return false }
 func (c *blockingCoordinator) IsSessionBusy(string) bool                            { return false }

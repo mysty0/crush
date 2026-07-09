@@ -782,8 +782,15 @@ func (c *Client) ListAllUserMessages(ctx context.Context, id string) ([]proto.Me
 }
 
 // CancelAgentSession cancels an ongoing agent operation for a session.
-func (c *Client) CancelAgentSession(ctx context.Context, id string, sessionID string) error {
-	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/sessions/%s/cancel", id, sessionID), nil, nil, nil)
+// When keepQueue is true, queued follow-up prompts are left in place so
+// the first one starts as the next turn once the canceled run unwinds;
+// when false, queued prompts are discarded.
+func (c *Client) CancelAgentSession(ctx context.Context, id string, sessionID string, keepQueue bool) error {
+	var query url.Values
+	if keepQueue {
+		query = url.Values{"keep_queue": {"true"}}
+	}
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/sessions/%s/cancel", id, sessionID), query, nil, nil)
 	if err != nil {
 		return fmt.Errorf("failed to cancel agent session: %w", err)
 	}

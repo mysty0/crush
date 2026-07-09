@@ -204,6 +204,10 @@ func (c *scriptedCoordinator) Cancel(sessionID string) {
 	}
 }
 
+func (c *scriptedCoordinator) CancelKeepQueue(sessionID string) {
+	c.Cancel(sessionID)
+}
+
 func (c *scriptedCoordinator) CancelAll() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

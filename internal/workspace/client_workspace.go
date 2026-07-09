@@ -207,7 +207,11 @@ func (w *ClientWorkspace) AgentRunShellCommand(ctx context.Context, sessionID, c
 }
 
 func (w *ClientWorkspace) AgentCancel(sessionID string) {
-	_ = w.client.CancelAgentSession(context.Background(), w.workspaceID(), sessionID)
+	_ = w.client.CancelAgentSession(context.Background(), w.workspaceID(), sessionID, false)
+}
+
+func (w *ClientWorkspace) AgentCancelKeepQueue(sessionID string) {
+	_ = w.client.CancelAgentSession(context.Background(), w.workspaceID(), sessionID, true)
 }
 
 func (w *ClientWorkspace) AgentIsBusy() bool {

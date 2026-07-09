@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/proto"
@@ -837,8 +838,9 @@ func (c *controllerV1) handleGetWorkspaceAgentSession(w http.ResponseWriter, r *
 //
 //	@Summary		Cancel agent session
 //	@Tags			agent
-//	@Param			id	path	string	true	"Workspace ID"
-//	@Param			sid	path	string	true	"Session ID"
+//	@Param			id			path	string	true	"Workspace ID"
+//	@Param			sid			path	string	true	"Session ID"
+//	@Param			keep_queue	query	bool	false	"Keep queued follow-up prompts instead of discarding them"
 //	@Success		200
 //	@Failure		404	{object}	proto.Error
 //	@Failure		500	{object}	proto.Error
@@ -846,7 +848,8 @@ func (c *controllerV1) handleGetWorkspaceAgentSession(w http.ResponseWriter, r *
 func (c *controllerV1) handlePostWorkspaceAgentSessionCancel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sid := r.PathValue("sid")
-	if err := c.backend.CancelSession(id, sid); err != nil {
+	keepQueue, _ := strconv.ParseBool(r.URL.Query().Get("keep_queue"))
+	if err := c.backend.CancelSession(id, sid, keepQueue); err != nil {
 		c.handleError(w, r, err)
 		return
 	}

@@ -2354,6 +2354,30 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	}
 
 	if key.Matches(msg, m.keyMap.Quit) && !m.dialog.ContainsDialog(dialog.QuitID) {
+		// While the agent is busy, Ctrl+C cancels the current turn
+		// immediately instead of opening the quit dialog, matching the
+		// "cancel first" Ctrl+C convention. A second Ctrl+C, once idle,
+		// opens the quit dialog as usual.
+		if m.hasSession() && m.isAgentBusy() {
+			if cmd := m.ctrlCCancelAgent(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return tea.Batch(cmds...)
+		}
+
+		// If the editor has unsent text, the first Ctrl+C clears it
+		// instead of opening the quit dialog — same "cancel first"
+		// convention as the busy-agent case above. A second Ctrl+C,
+		// once the prompt is empty, proceeds to quit as usual.
+		if m.focus == uiFocusEditor && m.textarea.Value() != "" {
+			prevHeight := m.textarea.Height()
+			m.textarea.Reset()
+			if cmd := m.handleTextareaHeightChange(prevHeight); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return tea.Batch(cmds...)
+		}
+
 		// Always handle quit keys first
 		if cmd := m.openQuitDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -4081,16 +4105,64 @@ func (m *UI) cancelAgent() tea.Cmd {
 // doCancelAgent cancels any running bang command and the agent, and stops
 // the spinning todo indicator.
 func (m *UI) doCancelAgent() {
+	m.doCancelAgentKeepQueue(false)
+}
+
+// doCancelAgentKeepQueue cancels any running bang command and the agent,
+// and stops the spinning todo indicator. When keepQueue is true, queued
+// follow-up prompts are left in place so the first one starts as the next
+// turn once the canceled turn unwinds, instead of being discarded.
+func (m *UI) doCancelAgentKeepQueue(keepQueue bool) {
 	// Cancel a running bang command if one is in progress.
 	if m.bangCancel != nil {
 		m.bangCancel()
 		m.bangCancel = nil
 	}
 
-	m.com.Workspace.AgentCancel(m.session.ID)
+	if keepQueue {
+		m.com.Workspace.AgentCancelKeepQueue(m.session.ID)
+	} else {
+		m.com.Workspace.AgentCancel(m.session.ID)
+	}
 	// Stop the spinning todo indicator.
 	m.todoIsSpinning = false
 	m.renderPills()
+}
+
+// ctrlCCancelAgent implements Ctrl+C's \"cancel first\" behavior: unlike
+// Esc's two-step confirm, a single Ctrl+C press cancels the active turn
+// immediately.
+//
+//   - If prompts are queued, they are kept (not discarded, unlike Esc) so
+//     the first one starts running as the next turn once the canceled
+//     turn unwinds.
+//   - Otherwise, if the turn hasn't produced any output yet, it mirrors
+//     Esc's no-output path: the prompt is returned to the editor and the
+//     turn is dropped from history instead of just being canceled.
+func (m *UI) ctrlCCancelAgent() tea.Cmd {
+	if !m.hasSession() || !m.com.Workspace.AgentIsReady() {
+		return nil
+	}
+	// Drop any pending Esc two-step cancel state so a stale timer can't
+	// later fire a redundant second cancel.
+	m.isCanceling = false
+
+	if m.com.Workspace.AgentQueuedPrompts(m.session.ID) > 0 {
+		m.doCancelAgentKeepQueue(true)
+		return nil
+	}
+
+	// Nothing has been generated yet, so remember the prompt so it can
+	// be returned to the editor once the canceled turn settles, mirroring
+	// Esc's immediate no-output cancel.
+	if m.bangCancel == nil && m.chat.LastMessageHasNoOutput() {
+		if id, text, ok := m.chat.LastUserMessage(); ok && strings.TrimSpace(text) != "" {
+			m.cancelRestore = &cancelRestoreState{userMsgID: id, text: text}
+		}
+	}
+
+	m.doCancelAgent()
+	return nil
 }
 
 // maybeRestoreCanceledPrompt returns the prompt of a just-canceled

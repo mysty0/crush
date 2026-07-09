@@ -67,9 +67,10 @@ func (s *runCoordinator) RunAccepted(ctx context.Context, accept *agent.Accepted
 func (s *runCoordinator) BeginAccepted(sessionID string) *agent.AcceptedRun {
 	return nil
 }
-func (s *runCoordinator) Cancel(string) {}
-func (s *runCoordinator) CancelAll()    {}
-func (s *runCoordinator) IsBusy() bool  { return false }
+func (s *runCoordinator) Cancel(string)          {}
+func (s *runCoordinator) CancelKeepQueue(string) {}
+func (s *runCoordinator) CancelAll()             {}
+func (s *runCoordinator) IsBusy() bool           { return false }
 func (s *runCoordinator) IsSessionBusy(string) bool {
 	return false
 }

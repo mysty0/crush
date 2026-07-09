@@ -136,6 +136,10 @@ type SessionAgent interface {
 	SetTools(tools []fantasy.AgentTool)
 	SetSystemPrompt(systemPrompt string)
 	Cancel(sessionID string)
+	// CancelKeepQueue stops the active run without discarding queued
+	// follow-up prompts, so the first queued prompt starts as the next
+	// turn once the canceled run unwinds.
+	CancelKeepQueue(sessionID string)
 	CancelAll()
 	IsSessionBusy(sessionID string) bool
 	IsBusy() bool
@@ -1968,7 +1972,22 @@ func summaryCompletionTokens(usage fantasy.Usage, summaryMessage message.Message
 	return approxTokenCount(summaryMessage.Content().Text) + approxTokenCount(summaryMessage.ReasoningContent().String())
 }
 
+// Cancel stops the active run for sessionID and discards any queued
+// follow-up prompts. Use CancelKeepQueue to stop the active run while
+// leaving queued prompts in place so they run as the next turn.
 func (a *sessionAgent) Cancel(sessionID string) {
+	a.cancel(sessionID, true)
+}
+
+// CancelKeepQueue stops the active run for sessionID without discarding
+// queued follow-up prompts: once the canceled run unwinds, the recursive
+// hand-off in Run picks up the first queued prompt and starts it as a new
+// turn, exactly as it would after a normal (uncanceled) turn completes.
+func (a *sessionAgent) CancelKeepQueue(sessionID string) {
+	a.cancel(sessionID, false)
+}
+
+func (a *sessionAgent) cancel(sessionID string, clearQueue bool) {
 	// Serialize against the dispatch handoff in Run so the accepted ->
 	// (cancel-on-entry | queued | active) transition is atomic against
 	// this cancel. Every cancel observes at least one of: an active
@@ -2018,7 +2037,7 @@ func (a *sessionAgent) Cancel(sessionID string) {
 		a.cancelMark.Set(sessionID, max(existing, mark))
 	}
 
-	if a.QueuedPrompts(sessionID) > 0 {
+	if clearQueue && a.QueuedPrompts(sessionID) > 0 {
 		slog.Debug("Clearing queued prompts", "session_id", sessionID)
 		a.clearQueueAndNotify(sessionID)
 	}

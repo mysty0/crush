@@ -91,6 +91,11 @@ type Workspace interface {
 	AgentRun(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) error
 	AgentRunShellCommand(ctx context.Context, sessionID, command string, termWidth int, onProgress func(string), isFirstMessage bool) (proto.ShellCommandResponse, error)
 	AgentCancel(sessionID string)
+	// AgentCancelKeepQueue stops the active agent run without discarding
+	// queued follow-up prompts, so the first queued prompt starts as the
+	// next turn once the canceled run unwinds (unlike AgentCancel, which
+	// discards them).
+	AgentCancelKeepQueue(sessionID string)
 	AgentIsBusy() bool
 	AgentIsSessionBusy(sessionID string) bool
 	AgentModel() AgentModel
