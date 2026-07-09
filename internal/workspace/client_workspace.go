@@ -207,7 +207,11 @@ func (w *ClientWorkspace) AgentRunShellCommand(ctx context.Context, sessionID, c
 }
 
 func (w *ClientWorkspace) AgentCancel(sessionID string) {
-	_ = w.client.CancelAgentSession(context.Background(), w.workspaceID(), sessionID)
+	_ = w.client.CancelAgentSession(context.Background(), w.workspaceID(), sessionID, false)
+}
+
+func (w *ClientWorkspace) AgentCancelKeepQueue(sessionID string) {
+	_ = w.client.CancelAgentSession(context.Background(), w.workspaceID(), sessionID, true)
 }
 
 func (w *ClientWorkspace) AgentIsBusy() bool {
@@ -293,7 +297,9 @@ func (w *ClientWorkspace) AgentWorkflowStatus(string) (agent.WorkflowStatus, boo
 	return agent.WorkflowStatus{}, false
 }
 
-func (w *ClientWorkspace) AgentCancelWorkflow(string) {}
+func (w *ClientWorkspace) AgentCancelWorkflow(string)                         {}
+func (w *ClientWorkspace) AgentRunningSchedules() []agent.ScheduledTaskStatus { return nil }
+func (w *ClientWorkspace) AgentCancelSchedule(string)                         {}
 
 // errRewindClientUnsupported is returned by the client/server workspace
 // because rewind is not yet plumbed through the HTTP protocol. Rewind is

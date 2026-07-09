@@ -91,6 +91,11 @@ type Workspace interface {
 	AgentRun(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) error
 	AgentRunShellCommand(ctx context.Context, sessionID, command string, termWidth int, onProgress func(string), isFirstMessage bool) (proto.ShellCommandResponse, error)
 	AgentCancel(sessionID string)
+	// AgentCancelKeepQueue stops the active agent run without discarding
+	// queued follow-up prompts, so the first queued prompt starts as the
+	// next turn once the canceled run unwinds (unlike AgentCancel, which
+	// discards them).
+	AgentCancelKeepQueue(sessionID string)
 	AgentIsBusy() bool
 	AgentIsSessionBusy(sessionID string) bool
 	AgentModel() AgentModel
@@ -118,6 +123,13 @@ type Workspace interface {
 	// AgentCancelWorkflow cancels a running background workflow by its
 	// (workflow) session ID.
 	AgentCancelWorkflow(workflowSessionID string)
+	// AgentRunningSchedules returns a snapshot of every scheduled task
+	// (dispatched via ScheduleCron/ScheduleWakeup), active or recently
+	// stopped.
+	AgentRunningSchedules() []agent.ScheduledTaskStatus
+	// AgentCancelSchedule stops a scheduled task by its task ID. It is
+	// a no-op if the task is unknown or already stopped.
+	AgentCancelSchedule(taskID string)
 
 	// RewindListPoints returns the user messages a session can be rewound
 	// to, newest first.

@@ -2,6 +2,8 @@ package workflow
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,10 +19,19 @@ import (
 // labels.
 type deepResearchMockRunner struct {
 	calls atomic.Int64
+
+	mu     sync.Mutex
+	models map[string]string // label -> requested model
 }
 
 func (m *deepResearchMockRunner) RunAgent(_ context.Context, req AgentRequest) (string, error) {
 	m.calls.Add(1)
+	m.mu.Lock()
+	if m.models == nil {
+		m.models = map[string]string{}
+	}
+	m.models[req.Label] = req.Model
+	m.mu.Unlock()
 	return "ok:" + req.Label, nil
 }
 
@@ -125,6 +136,22 @@ func TestDeepResearch_EndToEnd(t *testing.T) {
 	}
 	require.Equal(t, []string{"Scope", "Search", "Fetch", "Verify", "Synthesize"}, dedup)
 	require.Greater(t, runner.calls.Load(), int64(0))
+	// Search calls are mechanical ranking/filtering work and run on
+	// the small model; extraction/verification/synthesis quality
+	// determines report trustworthiness, so they stay on the default
+	// model (an empty model request).
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	sawSearch := false
+	for label, model := range runner.models {
+		if strings.HasPrefix(label, "search:") {
+			sawSearch = true
+			require.Equal(t, "small", model, "search call %q should request the small model", label)
+		} else if label == "scope" || label == "synthesize" || strings.HasPrefix(label, "fetch:") || strings.HasPrefix(label, "v") {
+			require.Empty(t, model, "call %q should use the default model", label)
+		}
+	}
+	require.True(t, sawSearch, "expected at least one search:* call")
 }
 
 func TestDeepResearch_EmptyQuestionAsksForClarification(t *testing.T) {

@@ -1,0 +1,1 @@
+List every scheduled task (ScheduleCron or ScheduleWakeup) created from this session, active or recently stopped, with its ID, kind, state, and next-fire time or stop reason. Use this if you've lost track of a task's ID or want to check on a loop's progress without waiting for it to fire.

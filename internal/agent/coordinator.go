@@ -95,6 +95,10 @@ type Coordinator interface {
 	RunAccepted(ctx context.Context, accept *AcceptedRun, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error)
 	BeginAccepted(sessionID string) *AcceptedRun
 	Cancel(sessionID string)
+	// CancelKeepQueue stops the active run without discarding queued
+	// follow-up prompts, so the first queued prompt starts as the next
+	// turn once the canceled run unwinds.
+	CancelKeepQueue(sessionID string)
 	CancelAll()
 	IsSessionBusy(sessionID string) bool
 	IsBusy() bool
@@ -132,6 +136,13 @@ type Coordinator interface {
 	// (workflow) session ID. It is a no-op if the workflow is unknown
 	// or already finished.
 	CancelWorkflow(workflowSessionID string)
+	// RunningSchedules returns a snapshot of every scheduled task
+	// (dispatched via ScheduleCron/ScheduleWakeup) known to the
+	// coordinator, active or recently stopped.
+	RunningSchedules() []ScheduledTaskStatus
+	// CancelSchedule stops a scheduled task by its task ID. It is a
+	// no-op if the task is unknown or already stopped.
+	CancelSchedule(taskID string)
 }
 
 type coordinator struct {
@@ -168,6 +179,11 @@ type coordinator struct {
 	// "Workflow" tool) so they can be listed, viewed, and canceled
 	// while they run in the background.
 	workflows *workflowRegistry
+
+	// schedules tracks background scheduled tasks (dispatched via the
+	// ScheduleCron/ScheduleWakeup tools) so they can be listed and
+	// canceled while they run.
+	schedules *scheduleRegistry
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -226,6 +242,7 @@ func NewCoordinator(
 		taskAgents:          csync.NewMap[string, SessionAgent](),
 		defaultTaskAgentKey: csync.NewValue[string](""),
 		workflows:           newWorkflowRegistry(),
+		schedules:           newScheduleRegistry(),
 		allSkills:           allSkills,
 		activeSkills:        activeSkills,
 		skillTracker:        skillTracker,
@@ -788,6 +805,10 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewAstGrepTool(c.cfg.WorkingDir()),
 		tools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
 		tools.NewSourcegraphTool(nil),
+		c.scheduleCronTool(),
+		c.scheduleWakeupTool(),
+		c.scheduleListTool(),
+		c.scheduleCancelTool(),
 		tools.NewTodosTool(c.sessions),
 		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.skillTracker, c.loadedSkills, editMode, c.snapshots, c.cfg.Config().Options.SummarizeReads(), c.cfg.Config().Options.SummarizeMinLines(), c.cfg.Config().Options.SummarizeBudget(), c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
@@ -1255,6 +1276,10 @@ func (c *coordinator) BeginAccepted(sessionID string) *AcceptedRun {
 
 func (c *coordinator) Cancel(sessionID string) {
 	c.currentAgent.Cancel(sessionID)
+}
+
+func (c *coordinator) CancelKeepQueue(sessionID string) {
+	c.currentAgent.CancelKeepQueue(sessionID)
 }
 
 func (c *coordinator) CancelAll() {

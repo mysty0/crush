@@ -37,8 +37,9 @@ const WorkflowToolName = "Workflow"
 
 // WorkflowParams are the parameters for the Workflow tool.
 type WorkflowParams struct {
-	Name string `json:"name" description:"The workflow to run, e.g. 'deep-research'"`
-	Args string `json:"args,omitempty" description:"Freeform argument passed to the workflow, e.g. the research question"`
+	Name  string `json:"name" description:"The workflow to run, e.g. 'deep-research'"`
+	Args  string `json:"args,omitempty" description:"Freeform argument passed to the workflow, e.g. the research question"`
+	Model string `json:"model,omitempty" description:"Optional. The ID of the model to run this workflow's sub-agents on, chosen from the list of available models in this tool's description. Omit to use the default model. Prefer a more capable model for hard, reasoning-heavy research and a smaller, faster model for cheaper, simpler runs."`
 }
 
 // workflowSubAgentTools returns the fixed, read-only tool policy every
@@ -85,6 +86,7 @@ func (c *coordinator) workflowTool(ctx context.Context, client *http.Client) (fa
 	if err != nil {
 		return nil, fmt.Errorf("render workflow tool description: %w", err)
 	}
+	description += c.availableModelsDescription()
 
 	if client == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -115,6 +117,15 @@ func (c *coordinator) workflowTool(ctx context.Context, client *http.Client) (fa
 			}
 			if wf == nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("Unknown workflow: %q", params.Name)), nil
+			}
+
+			if params.Model != "" {
+				if _, ok := c.resolveTaskModel(params.Model); !ok {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf(
+						"unknown model %q; choose one of the available model IDs: %s",
+						params.Model, strings.Join(c.availableModelIDs(), ", "),
+					)), nil
+				}
 			}
 
 			coderSessionID := tools.GetSessionFromContext(ctx)
@@ -179,6 +190,7 @@ func (c *coordinator) workflowTool(ctx context.Context, client *http.Client) (fa
 				toolCallID:        call.ID,
 				agentMessageID:    agentMessageID,
 				httpClient:        client,
+				modelID:           params.Model,
 			})
 
 			return fantasy.NewTextResponse(fmt.Sprintf(
@@ -199,6 +211,72 @@ type workflowBackgroundParams struct {
 	toolCallID        string
 	agentMessageID    string
 	httpClient        *http.Client
+	// modelID optionally overrides the workflow's default (large)
+	// model, validated against resolveTaskModel before the background
+	// run starts. Empty uses the configured large model.
+	modelID string
+}
+
+// resolveWorkflowModels resolves the primary/small model pair a
+// workflow run uses. modelID overrides the primary (large) model when
+// non-empty (already validated by the tool handler); the small model
+// is always the configured one (used for CoerceObject and any
+// "small"-tier per-call override).
+func (c *coordinator) resolveWorkflowModels(ctx context.Context, modelID string) (Model, Model, error) {
+	large, small, err := c.buildAgentModels(ctx, true)
+	if err != nil {
+		return Model{}, Model{}, err
+	}
+	if modelID == "" {
+		return large, small, nil
+	}
+	selected, ok := c.resolveTaskModel(modelID)
+	if !ok {
+		// Already validated in the tool handler; defensive fallback.
+		return large, small, nil
+	}
+	primary, err := c.buildModelFromSelected(ctx, selected, true)
+	if err != nil {
+		return Model{}, Model{}, err
+	}
+	return primary, small, nil
+}
+
+// buildWorkflowSubAgent builds a SessionAgent that runs a workflow's
+// agent() calls on the given primary model, under the workflow's
+// fixed, restricted tool policy (workflowSubAgentTools). Used for the
+// run's default model and lazily by workflowRunner for any per-call
+// model override (see AgentRequest.Model).
+func (c *coordinator) buildWorkflowSubAgent(ctx context.Context, tmpDir string, primary, small Model, httpClient *http.Client) (SessionAgent, error) {
+	providerCfg, ok := c.cfg.Config().Providers.Get(primary.ModelCfg.Provider)
+	if !ok {
+		return nil, fmt.Errorf("provider %q not configured", primary.ModelCfg.Provider)
+	}
+	promptTemplate, err := prompt.NewPrompt("workflow-subagent", string(workflowSubAgentPromptTmpl), prompt.WithWorkingDir(tmpDir))
+	if err != nil {
+		return nil, err
+	}
+	systemPrompt, err := promptTemplate.Build(ctx, primary.Model.Provider(), primary.Model.Model(), c.cfg)
+	if err != nil {
+		return nil, err
+	}
+	return NewSessionAgent(SessionAgentOptions{
+		LargeModel:           primary,
+		SmallModel:           small,
+		SystemPromptPrefix:   providerCfg.SystemPromptPrefix,
+		SystemPrompt:         systemPrompt,
+		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
+		IsYolo:               c.permissions.SkipRequests(),
+		Sessions:             c.sessions,
+		Messages:             c.messages,
+		Tools:                c.workflowSubAgentTools(tmpDir, httpClient),
+	}), nil
+}
+
+// workflowModelCacheKey identifies a built workflow sub-agent by the
+// model it runs on, for workflowRunner's per-model agent cache.
+func workflowModelCacheKey(m Model) string {
+	return m.ModelCfg.Provider + "/" + m.ModelCfg.Model
 }
 
 // runWorkflowBackground executes a workflow to completion on a
@@ -217,45 +295,27 @@ func (c *coordinator) runWorkflowBackground(ctx context.Context, cancel context.
 	}
 	defer os.RemoveAll(tmpDir)
 
-	large, small, err := c.buildAgentModels(ctx, true)
+	large, small, err := c.resolveWorkflowModels(ctx, p.modelID)
 	if err != nil {
 		c.finishWorkflow(p, WorkflowFailed, fmt.Sprintf("Failed to build models: %s", err), nil)
 		return
 	}
-	largeProviderCfg, ok := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
-	if !ok {
-		c.finishWorkflow(p, WorkflowFailed, "Large model provider not configured.", nil)
-		return
-	}
 
-	promptTemplate, err := prompt.NewPrompt("workflow-subagent", string(workflowSubAgentPromptTmpl), prompt.WithWorkingDir(tmpDir))
+	subAgent, err := c.buildWorkflowSubAgent(ctx, tmpDir, large, small, p.httpClient)
 	if err != nil {
-		c.finishWorkflow(p, WorkflowFailed, fmt.Sprintf("Failed to create prompt: %s", err), nil)
+		c.finishWorkflow(p, WorkflowFailed, fmt.Sprintf("Failed to build agent: %s", err), nil)
 		return
 	}
-	systemPrompt, err := promptTemplate.Build(ctx, large.Model.Provider(), large.Model.Model(), c.cfg)
-	if err != nil {
-		c.finishWorkflow(p, WorkflowFailed, fmt.Sprintf("Failed to build system prompt: %s", err), nil)
-		return
-	}
-
-	subAgent := NewSessionAgent(SessionAgentOptions{
-		LargeModel:           large,
-		SmallModel:           small,
-		SystemPromptPrefix:   largeProviderCfg.SystemPromptPrefix,
-		SystemPrompt:         systemPrompt,
-		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
-		IsYolo:               c.permissions.SkipRequests(),
-		Sessions:             c.sessions,
-		Messages:             c.messages,
-		Tools:                c.workflowSubAgentTools(tmpDir, p.httpClient),
-	})
 
 	runner := &workflowRunner{
 		c:                 c,
-		agent:             subAgent,
+		tmpDir:            tmpDir,
+		httpClient:        p.httpClient,
 		smallModel:        small,
 		workflowSessionID: p.workflowSessionID,
+		agents:            map[string]SessionAgent{workflowModelCacheKey(large): subAgent},
+		defaultAgent:      subAgent,
+		defaultModel:      large,
 	}
 
 	// Stream a human-readable transcript into the in-place tool call so
@@ -398,9 +458,60 @@ func (c *coordinator) CancelWorkflow(workflowSessionID string) {
 // two-pane view can show per-agent stats.
 type workflowRunner struct {
 	c                 *coordinator
-	agent             SessionAgent
-	smallModel        Model
 	workflowSessionID string
+	tmpDir            string
+	httpClient        *http.Client
+	smallModel        Model
+	defaultAgent      SessionAgent
+	defaultModel      Model
+
+	// agents caches SessionAgents built for a per-call model override
+	// (see AgentRequest.Model), keyed by workflowModelCacheKey. Guarded
+	// by agentsMu since agent() calls can run concurrently up to the
+	// run's MaxConcurrency.
+	agentsMu sync.Mutex
+	agents   map[string]SessionAgent
+}
+
+// agentFor resolves a per-call model request to a SessionAgent and the
+// Model it runs on: "" uses the workflow's default model, "small" uses
+// the run's configured small/fast model, and any other value is an
+// explicit model ID. Agents for non-default models are built lazily
+// and cached for the rest of the run.
+func (r *workflowRunner) agentFor(ctx context.Context, modelID string) (SessionAgent, Model, error) {
+	var target Model
+	switch modelID {
+	case "":
+		return r.defaultAgent, r.defaultModel, nil
+	case "small":
+		target = r.smallModel
+	default:
+		selected, ok := r.c.resolveTaskModel(modelID)
+		if !ok {
+			return nil, Model{}, fmt.Errorf(
+				"unknown model %q; choose one of the available model IDs: %s",
+				modelID, strings.Join(r.c.availableModelIDs(), ", "),
+			)
+		}
+		built, err := r.c.buildModelFromSelected(ctx, selected, true)
+		if err != nil {
+			return nil, Model{}, err
+		}
+		target = built
+	}
+
+	key := workflowModelCacheKey(target)
+	r.agentsMu.Lock()
+	defer r.agentsMu.Unlock()
+	if existing, ok := r.agents[key]; ok {
+		return existing, target, nil
+	}
+	built, err := r.c.buildWorkflowSubAgent(ctx, r.tmpDir, target, r.smallModel, r.httpClient)
+	if err != nil {
+		return nil, Model{}, err
+	}
+	r.agents[key] = built
+	return built, target, nil
 }
 
 func (r *workflowRunner) RunAgent(ctx context.Context, req workflow.AgentRequest) (string, error) {
@@ -409,15 +520,22 @@ func (r *workflowRunner) RunAgent(ctx context.Context, req workflow.AgentRequest
 	// per-agent stats.
 	agentSessionID := r.c.sessions.CreateAgentToolSessionID(r.workflowSessionID, fmt.Sprintf("agent-%d", req.Seq))
 
+	selectedAgent, model, err := r.agentFor(ctx, req.Model)
+	if err != nil {
+		return "", err
+	}
+
 	r.c.workflows.recordAgent(r.workflowSessionID, WorkflowAgentStatus{
 		SessionID: agentSessionID,
 		Label:     req.Label,
 		Phase:     req.Phase,
+		Provider:  model.ModelCfg.Provider,
+		Model:     model.ModelCfg.Model,
 		StartedAt: time.Now(),
 	})
 
 	resp, err := r.c.runSubAgent(ctx, subAgentParams{
-		Agent:          r.agent,
+		Agent:          selectedAgent,
 		SessionID:      r.workflowSessionID,
 		AgentMessageID: r.workflowSessionID,
 		ToolCallID:     fmt.Sprintf("agent-%d", req.Seq),

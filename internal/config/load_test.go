@@ -714,7 +714,7 @@ func TestConfig_setupAgentsWithDisabledTools(t *testing.T) {
 	coderAgent, ok := cfg.Agents[AgentCoder]
 	require.True(t, ok)
 
-	assert.Equal(t, []string{"agent", "Bash", "crush_info", "crush_logs", "job_output", "job_kill", "MultiEdit", "lsp_diagnostics", "lsp_references", "lsp_restart", "fetch", "agentic_fetch", "Workflow", "Glob", "ls", "sourcegraph", "TodoWrite", "Read", "Write", "ListMcpResourcesTool", "ReadMcpResourceTool", "skill"}, coderAgent.AllowedTools)
+	assert.Equal(t, []string{"agent", "Bash", "crush_info", "crush_logs", "job_output", "job_kill", "MultiEdit", "lsp_diagnostics", "lsp_references", "lsp_restart", "fetch", "agentic_fetch", "Workflow", "ScheduleCron", "ScheduleWakeup", "ScheduleList", "ScheduleCancel", "Glob", "ls", "sourcegraph", "TodoWrite", "Read", "Write", "ListMcpResourcesTool", "ReadMcpResourceTool", "skill"}, coderAgent.AllowedTools)
 
 	taskAgent, ok := cfg.Agents[AgentTask]
 	require.True(t, ok)
@@ -738,7 +738,7 @@ func TestConfig_setupAgentsWithEveryReadOnlyToolDisabled(t *testing.T) {
 	cfg.SetupAgents()
 	coderAgent, ok := cfg.Agents[AgentCoder]
 	require.True(t, ok)
-	assert.Equal(t, []string{"agent", "Bash", "crush_info", "crush_logs", "job_output", "job_kill", "download", "Edit", "MultiEdit", "lsp_diagnostics", "lsp_references", "lsp_restart", "fetch", "Workflow", "TodoWrite", "Write", "ListMcpResourcesTool", "ReadMcpResourceTool", "skill"}, coderAgent.AllowedTools)
+	assert.Equal(t, []string{"agent", "Bash", "crush_info", "crush_logs", "job_output", "job_kill", "download", "Edit", "MultiEdit", "lsp_diagnostics", "lsp_references", "lsp_restart", "fetch", "Workflow", "ScheduleCron", "ScheduleWakeup", "ScheduleList", "ScheduleCancel", "TodoWrite", "Write", "ListMcpResourcesTool", "ReadMcpResourceTool", "skill"}, coderAgent.AllowedTools)
 
 	taskAgent, ok := cfg.Agents[AgentTask]
 	require.True(t, ok)

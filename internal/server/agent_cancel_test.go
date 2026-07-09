@@ -67,9 +67,10 @@ func (s *runCoordinator) RunAccepted(ctx context.Context, accept *agent.Accepted
 func (s *runCoordinator) BeginAccepted(sessionID string) *agent.AcceptedRun {
 	return nil
 }
-func (s *runCoordinator) Cancel(string) {}
-func (s *runCoordinator) CancelAll()    {}
-func (s *runCoordinator) IsBusy() bool  { return false }
+func (s *runCoordinator) Cancel(string)          {}
+func (s *runCoordinator) CancelKeepQueue(string) {}
+func (s *runCoordinator) CancelAll()             {}
+func (s *runCoordinator) IsBusy() bool           { return false }
 func (s *runCoordinator) IsSessionBusy(string) bool {
 	return false
 }
@@ -93,7 +94,9 @@ func (s *runCoordinator) RunningWorkflows() []agent.WorkflowStatus { return nil 
 func (s *runCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
 	return agent.WorkflowStatus{}, false
 }
-func (s *runCoordinator) CancelWorkflow(string) {}
+func (s *runCoordinator) CancelWorkflow(string)                         {}
+func (s *runCoordinator) RunningSchedules() []agent.ScheduledTaskStatus { return nil }
+func (s *runCoordinator) CancelSchedule(string)                         {}
 
 func (s *runCoordinator) capturedCtx() context.Context {
 	s.mu.Lock()

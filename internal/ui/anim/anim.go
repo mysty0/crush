@@ -435,6 +435,15 @@ func (a *Anim) Step() tea.Cmd {
 	})
 }
 
+// Interval is the fixed period between animation ticks. Exported so
+// callers that need to reason about tick timing outside the anim
+// package (e.g. throttling how often an animation chain is restarted)
+// use the same constant this package ticks at, instead of a
+// hand-picked duration that could drift out of sync.
+func Interval() time.Duration {
+	return time.Second / time.Duration(fps)
+}
+
 // makeGradientRamp() returns a slice of colors blended between the given keys.
 // Blending is done as Hcl to stay in gamut.
 func makeGradientRamp(size int, stops ...color.Color) []color.Color {

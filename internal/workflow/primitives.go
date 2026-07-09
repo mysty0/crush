@@ -69,17 +69,18 @@ func (s *scheduler) luaLog(co *lua.LState) int {
 
 // luaAgent implements agent(prompt, opts): dispatches one sub-agent
 // turn. opts is an optional table with string fields `label`,
-// `phase`, and a `schema` table requesting structured output. It
-// always yields the calling coroutine — the result becomes the
-// return value of the agent(...) call once the scheduler resumes it
-// with the (Lua-converted) outcome — except when the run's agent-call
-// budget has been exhausted, in which case it returns nil
-// synchronously without dispatching any work, matching how workflow
-// scripts already treat a failed/skipped call.
+// `phase`, `model` (see AgentRequest.Model), and a `schema` table
+// requesting structured output. It always yields the calling
+// coroutine — the result becomes the return value of the agent(...)
+// call once the scheduler resumes it with the (Lua-converted) outcome
+// — except when the run's agent-call budget has been exhausted, in
+// which case it returns nil synchronously without dispatching any
+// work, matching how workflow scripts already treat a
+// failed/skipped call.
 func (s *scheduler) luaAgent(co *lua.LState) int {
 	prompt := co.CheckString(1)
 
-	var label, phase, schemaName string
+	var label, phase, model, schemaName string
 	var schema *Schema
 	if optsVal := co.Get(2); optsVal != lua.LNil {
 		opts, ok := optsVal.(*lua.LTable)
@@ -88,6 +89,7 @@ func (s *scheduler) luaAgent(co *lua.LState) int {
 		}
 		label = lua.LVAsString(opts.RawGetString("label"))
 		phase = lua.LVAsString(opts.RawGetString("phase"))
+		model = lua.LVAsString(opts.RawGetString("model"))
 		if schemaVal := opts.RawGetString("schema"); schemaVal != lua.LNil {
 			schema = schemaFromLua(schemaVal)
 			schemaName = label
@@ -111,7 +113,7 @@ func (s *scheduler) luaAgent(co *lua.LState) int {
 
 	s.queue = append(s.queue, queuedAgent{
 		co:         co,
-		req:        AgentRequest{Prompt: prompt, Label: label, Phase: phase, Seq: s.agentCalls},
+		req:        AgentRequest{Prompt: prompt, Label: label, Phase: phase, Model: model, Seq: s.agentCalls},
 		schema:     schema,
 		schemaName: schemaName,
 	})

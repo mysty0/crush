@@ -166,7 +166,10 @@ type baseToolMessageItem struct {
 	partialOutput string
 }
 
-var _ Expandable = (*baseToolMessageItem)(nil)
+var (
+	_ Expandable        = (*baseToolMessageItem)(nil)
+	_ ExpandStateSetter = (*baseToolMessageItem)(nil)
+)
 
 // newBaseToolMessageItem is the internal constructor for base tool message items.
 func newBaseToolMessageItem(
@@ -510,6 +513,23 @@ func (t *baseToolMessageItem) ToggleExpanded() bool {
 	t.clearCache()
 	t.Bump()
 	return t.expandedContent
+}
+
+// IsExpanded implements [ExpandStateSetter].
+func (t *baseToolMessageItem) IsExpanded() bool {
+	return t.expandedContent
+}
+
+// SetExpanded implements [ExpandStateSetter], setting the expanded state
+// directly rather than toggling it. Used for bulk actions like "expand
+// all diffs".
+func (t *baseToolMessageItem) SetExpanded(expanded bool) {
+	if t.expandedContent == expanded {
+		return
+	}
+	t.expandedContent = expanded
+	t.clearCache()
+	t.Bump()
 }
 
 // Finished implements list.Item. A tool call is freezable once the

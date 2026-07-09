@@ -283,6 +283,39 @@ func TestCancel_QueuedRunIDPromptPublishesCancelledRunComplete(t *testing.T) {
 	require.False(t, ok, "Cancel must clear the queue")
 }
 
+// TestCancelKeepQueue_PreservesQueuedPrompts verifies that
+// CancelKeepQueue leaves queued follow-up prompts in place (unlike
+// Cancel, which discards them), so they remain available to run as the
+// next turn once the canceled run unwinds.
+func TestCancelKeepQueue_PreservesQueuedPrompts(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	broker := pubsub.NewBroker[notify.RunComplete]()
+	t.Cleanup(broker.Shutdown)
+
+	a := NewSessionAgent(SessionAgentOptions{
+		Sessions:    env.sessions,
+		Messages:    env.messages,
+		RunComplete: broker,
+	}).(*sessionAgent)
+
+	const sessionID = "cancel-keep-queue"
+	queued := []SessionAgentCall{
+		{SessionID: sessionID, Prompt: "first"},
+		{SessionID: sessionID, Prompt: "second"},
+	}
+	a.messageQueue.Set(sessionID, queued)
+
+	a.CancelKeepQueue(sessionID)
+
+	got, ok := a.messageQueue.Get(sessionID)
+	require.True(t, ok, "CancelKeepQueue must not clear the queue")
+	require.Len(t, got, 2)
+	require.Equal(t, "first", got[0].Prompt)
+	require.Equal(t, "second", got[1].Prompt)
+}
+
 // TestDrainQueueForStep_DroppedRunIDPublishesCancelledRunComplete drives
 // the production drain sequence (drainQueueForStep then
 // publishCanceledQueueDrops, mirroring the PrepareStep handoff) and

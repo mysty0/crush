@@ -289,6 +289,14 @@ type UI struct {
 	workflowViewSelectedPhase int
 	workflowViewRightFocus    bool
 	workflowViewAgentScroll   int
+	// workflowViewSelectedAgent indexes the highlighted row in the
+	// right (agents) pane.
+	workflowViewSelectedAgent int
+	// workflowViewReturnSessionID holds the workflow session to
+	// switch back to when exiting a workflow agent's fullscreen
+	// transcript (entered via Confirm on the right pane). Empty when
+	// the current sub-agent view was not entered from a workflow.
+	workflowViewReturnSessionID string
 
 	// agentListFocused is true when the always-visible agent picker
 	// list below the chat has keyboard focus (entered by pressing
@@ -1886,6 +1894,11 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			}
 			return rewindDoneMsg{result: res, mode: mode}
 		})
+	case dialog.ActionScheduleCancelConfirm:
+		m.dialog.CloseDialog(dialog.ScheduleCancelID)
+		taskID := msg.TaskID
+		m.com.Workspace.AgentCancelSchedule(taskID)
+		cmds = append(cmds, util.ReportInfo(fmt.Sprintf("Stopped %s.", taskID)))
 	case dialog.ActionToggleHelp:
 		m.status.ToggleHelp()
 		m.dialog.CloseDialog(dialog.CommandsID)
@@ -2341,6 +2354,30 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	}
 
 	if key.Matches(msg, m.keyMap.Quit) && !m.dialog.ContainsDialog(dialog.QuitID) {
+		// While the agent is busy, Ctrl+C cancels the current turn
+		// immediately instead of opening the quit dialog, matching the
+		// "cancel first" Ctrl+C convention. A second Ctrl+C, once idle,
+		// opens the quit dialog as usual.
+		if m.hasSession() && m.isAgentBusy() {
+			if cmd := m.ctrlCCancelAgent(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return tea.Batch(cmds...)
+		}
+
+		// If the editor has unsent text, the first Ctrl+C clears it
+		// instead of opening the quit dialog — same "cancel first"
+		// convention as the busy-agent case above. A second Ctrl+C,
+		// once the prompt is empty, proceeds to quit as usual.
+		if m.focus == uiFocusEditor && m.textarea.Value() != "" {
+			prevHeight := m.textarea.Height()
+			m.textarea.Reset()
+			if cmd := m.handleTextareaHeightChange(prevHeight); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return tea.Batch(cmds...)
+		}
+
 		// Always handle quit keys first
 		if cmd := m.openQuitDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -2380,6 +2417,14 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			return tea.Batch(cmds...)
 		}
 		if m.subAgentSessionID != "" {
+			if m.workflowViewReturnSessionID != "" {
+				// Drilled into this agent from the workflow view: Esc
+				// backs out to the two-pane view instead of canceling
+				// — inspecting a workflow agent is read-only, not a
+				// steerable session.
+				m.exitSubAgentView()
+				return tea.Batch(cmds...)
+			}
 			m.com.Workspace.AgentCancelSubAgent(m.subAgentSessionID)
 			return tea.Batch(cmds...)
 		}
@@ -2482,6 +2527,9 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				m.historyReset()
 
 				if m.subAgentSessionID != "" {
+					if m.workflowViewReturnSessionID != "" {
+						return tea.Batch(util.ReportWarn("Workflow agents are read-only. Press Esc to go back."), m.loadPromptHistory())
+					}
 					return tea.Batch(m.sendToSubAgent(value), m.loadPromptHistory())
 				}
 
@@ -2672,6 +2720,14 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				}
 			case key.Matches(msg, m.keyMap.Chat.Expand):
 				activeChat.ToggleExpandedSelectedItem()
+			case key.Matches(msg, m.keyMap.Chat.ExpandAllDiffs):
+				if activeChat.ToggleAllDiffsExpanded() {
+					if activeChat.AtBottom() {
+						cmds = append(cmds, activeChat.ScrollToBottomAndAnimate())
+					}
+				} else {
+					cmds = append(cmds, util.ReportInfo("No diffs to expand."))
+				}
 			case key.Matches(msg, m.keyMap.Chat.Up):
 				if cmd := activeChat.ScrollByAndAnimate(-1); cmd != nil {
 					cmds = append(cmds, cmd)
@@ -3110,6 +3166,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 				[]key.Binding{
 					k.Chat.Copy,
 					k.Chat.ClearHighlight,
+					k.Chat.ExpandAllDiffs,
 				},
 			)
 			if m.pillsExpanded && hasIncompleteTodos(m.session.Todos) && m.promptQueue > 0 {
@@ -4057,16 +4114,64 @@ func (m *UI) cancelAgent() tea.Cmd {
 // doCancelAgent cancels any running bang command and the agent, and stops
 // the spinning todo indicator.
 func (m *UI) doCancelAgent() {
+	m.doCancelAgentKeepQueue(false)
+}
+
+// doCancelAgentKeepQueue cancels any running bang command and the agent,
+// and stops the spinning todo indicator. When keepQueue is true, queued
+// follow-up prompts are left in place so the first one starts as the next
+// turn once the canceled turn unwinds, instead of being discarded.
+func (m *UI) doCancelAgentKeepQueue(keepQueue bool) {
 	// Cancel a running bang command if one is in progress.
 	if m.bangCancel != nil {
 		m.bangCancel()
 		m.bangCancel = nil
 	}
 
-	m.com.Workspace.AgentCancel(m.session.ID)
+	if keepQueue {
+		m.com.Workspace.AgentCancelKeepQueue(m.session.ID)
+	} else {
+		m.com.Workspace.AgentCancel(m.session.ID)
+	}
 	// Stop the spinning todo indicator.
 	m.todoIsSpinning = false
 	m.renderPills()
+}
+
+// ctrlCCancelAgent implements Ctrl+C's \"cancel first\" behavior: unlike
+// Esc's two-step confirm, a single Ctrl+C press cancels the active turn
+// immediately.
+//
+//   - If prompts are queued, they are kept (not discarded, unlike Esc) so
+//     the first one starts running as the next turn once the canceled
+//     turn unwinds.
+//   - Otherwise, if the turn hasn't produced any output yet, it mirrors
+//     Esc's no-output path: the prompt is returned to the editor and the
+//     turn is dropped from history instead of just being canceled.
+func (m *UI) ctrlCCancelAgent() tea.Cmd {
+	if !m.hasSession() || !m.com.Workspace.AgentIsReady() {
+		return nil
+	}
+	// Drop any pending Esc two-step cancel state so a stale timer can't
+	// later fire a redundant second cancel.
+	m.isCanceling = false
+
+	if m.com.Workspace.AgentQueuedPrompts(m.session.ID) > 0 {
+		m.doCancelAgentKeepQueue(true)
+		return nil
+	}
+
+	// Nothing has been generated yet, so remember the prompt so it can
+	// be returned to the editor once the canceled turn settles, mirroring
+	// Esc's immediate no-output cancel.
+	if m.bangCancel == nil && m.chat.LastMessageHasNoOutput() {
+		if id, text, ok := m.chat.LastUserMessage(); ok && strings.TrimSpace(text) != "" {
+			m.cancelRestore = &cancelRestoreState{userMsgID: id, text: text}
+		}
+	}
+
+	m.doCancelAgent()
+	return nil
 }
 
 // maybeRestoreCanceledPrompt returns the prompt of a just-canceled
@@ -4148,6 +4253,10 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		}
 	case dialog.RewindID:
 		if cmd := m.openRewindDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.ReviewID:
+		if cmd := m.openReviewDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	case dialog.QuitID:
@@ -4280,6 +4389,47 @@ func (m *UI) openRewindDialog() tea.Cmd {
 		return util.ReportError(err)
 	}
 	m.dialog.OpenDialog(rewindDialog)
+	return nil
+}
+
+// openScheduleCancelDialog opens a confirmation dialog for stopping the
+// scheduled task with the given ID, showing its metadata (kind, prompt,
+// timing, run count) so the user knows what they're stopping before
+// confirming. Returns a warning if the task can no longer be found
+// (e.g. it just self-stopped and lingered off the registry).
+func (m *UI) openScheduleCancelDialog(taskID string) tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.ScheduleCancelID) {
+		m.dialog.BringToFront(dialog.ScheduleCancelID)
+		return nil
+	}
+	for _, s := range m.runningSchedules() {
+		if s.ID == taskID {
+			m.dialog.OpenDialog(dialog.NewScheduleCancel(m.com, s))
+			return nil
+		}
+	}
+	return util.ReportWarn(fmt.Sprintf("%s is no longer active.", taskID))
+}
+
+// openReviewDialog opens a fullscreen review of every file changed in
+// the current session, diffing each file's first recorded version
+// against its latest.
+func (m *UI) openReviewDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.ReviewID) {
+		m.dialog.BringToFront(dialog.ReviewID)
+		return nil
+	}
+	if m.session == nil {
+		return util.ReportWarn("No active session to review.")
+	}
+	reviewDialog, err := dialog.NewReview(m.com, m.session.ID)
+	if err != nil {
+		return util.ReportError(err)
+	}
+	if !reviewDialog.HasFiles() {
+		return util.ReportInfo("No changes to review in this session.")
+	}
+	m.dialog.OpenDialog(reviewDialog)
 	return nil
 }
 

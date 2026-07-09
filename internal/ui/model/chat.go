@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/chat"
@@ -55,6 +56,26 @@ type Chat struct {
 	// being scrolled out of view. When items become visible again, their
 	// animations are restarted.
 	pausedAnimations map[string]struct{}
+
+	// restartedAt throttles how often RestartPausedVisibleAnimations may
+	// spin up a new animation chain for a given item ID. Without this,
+	// an item that repeatedly flickers in and out of the visible range
+	// (e.g. a neighbor pushed out of view by a fast-growing streamed
+	// message below it) gets a brand-new tea.Tick chain — a new
+	// goroutine and timer — on every single flicker, with no cap on
+	// the rate. Since bubbletea has no way to cancel an
+	// already-scheduled Cmd, a burst of flickers faster than the
+	// animation's own frame rate leaves every stale chain alive; if
+	// that rate ever outpaces the single event-loop goroutine's
+	// ability to drain them, the backlog is self-sustaining and grows
+	// without bound (see the regression test in
+	// freeze_repro_test.go, which reproduces the exact stuck state
+	// recovered from a live frozen session). Capping restarts to at
+	// most one per animation frame interval (anim.Interval) bounds the
+	// goroutine creation rate to the animation's own intended cadence
+	// regardless of how often the underlying event stream flickers
+	// visibility.
+	restartedAt map[string]time.Time
 
 	// Mouse state
 	mouseDown     bool
@@ -157,6 +178,7 @@ func NewChat(com *common.Common, scrollbarMode string) *Chat {
 		com:              com,
 		idInxMap:         make(map[string]int),
 		pausedAnimations: make(map[string]struct{}),
+		restartedAt:      make(map[string]time.Time),
 		scrollbarMode:    scrollbarMode,
 	}
 	l := list.NewList()
@@ -362,6 +384,7 @@ func (m *Chat) Items() []chat.MessageItem {
 func (m *Chat) SetMessages(msgs ...chat.MessageItem) tea.Cmd {
 	m.idInxMap = make(map[string]int)
 	m.pausedAnimations = make(map[string]struct{})
+	m.restartedAt = make(map[string]time.Time)
 	m.scrollbarVisible = false // Reset scrollbar visibility on new session load
 
 	items := make([]list.Item, len(msgs))
@@ -451,8 +474,16 @@ func (m *Chat) Animate(msg anim.StepMsg) tea.Cmd {
 	return animatable.Animate(msg)
 }
 
-// RestartPausedVisibleAnimations restarts animations for items that were paused
-// due to being scrolled out of view but are now visible again.
+// RestartPausedVisibleAnimations restarts animations for items that were
+// paused due to being scrolled out of view but are now visible again.
+//
+// Restarts are throttled per ID to at most one per anim.Interval (see
+// the restartedAt field doc): an item whose visibility flickers faster
+// than that — e.g. repeatedly pushed in and out of view by a
+// fast-growing streamed message below it — stays in pausedAnimations
+// across the skipped calls and is retried on the next call once the
+// interval has elapsed, instead of spinning up an unbounded number of
+// concurrent tea.Tick chains for the same ID.
 func (m *Chat) RestartPausedVisibleAnimations() tea.Cmd {
 	if len(m.pausedAnimations) == 0 {
 		return nil
@@ -460,24 +491,35 @@ func (m *Chat) RestartPausedVisibleAnimations() tea.Cmd {
 
 	startIdx, endIdx := m.list.VisibleItemIndices()
 	var cmds []tea.Cmd
+	now := time.Now()
 
 	for id := range m.pausedAnimations {
 		idx, ok := m.idInxMap[id]
 		if !ok {
 			// Item no longer exists.
 			delete(m.pausedAnimations, id)
+			delete(m.restartedAt, id)
 			continue
 		}
 
-		if idx >= startIdx && idx <= endIdx {
-			// Item is now visible - restart its animation.
-			if animatable, ok := m.list.ItemAt(idx).(chat.Animatable); ok {
-				if cmd := animatable.StartAnimation(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
-			delete(m.pausedAnimations, id)
+		if idx < startIdx || idx > endIdx {
+			continue
 		}
+
+		if last, ok := m.restartedAt[id]; ok && now.Sub(last) < anim.Interval() {
+			// Restarted too recently — leave it paused and retry on
+			// a later call once the interval has elapsed.
+			continue
+		}
+
+		// Item is now visible - restart its animation.
+		if animatable, ok := m.list.ItemAt(idx).(chat.Animatable); ok {
+			if cmd := animatable.StartAnimation(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		m.restartedAt[id] = now
+		delete(m.pausedAnimations, id)
 	}
 
 	if len(cmds) == 0 {
@@ -721,6 +763,7 @@ func (m *Chat) SelectLastInView() {
 func (m *Chat) ClearMessages() {
 	m.idInxMap = make(map[string]int)
 	m.pausedAnimations = make(map[string]struct{})
+	m.restartedAt = make(map[string]time.Time)
 	m.scrollbarVisible = false
 	m.list.SetItems()
 	m.ClearMouse()
@@ -748,6 +791,7 @@ func (m *Chat) RemoveMessage(id string) {
 
 	// Clean up any paused animations for this message
 	delete(m.pausedAnimations, id)
+	delete(m.restartedAt, id)
 }
 
 // MessageItem returns the message item with the given ID, or nil if not found.
@@ -764,23 +808,33 @@ func (m *Chat) MessageItem(id string) chat.MessageItem {
 }
 
 // LastMessageHasNoOutput returns true if canceling the agent right now
-// would not discard any generated output. This is the case when the last
-// item in the chat is the user's own message (the assistant hasn't
-// started responding yet) or an assistant message that hasn't produced
-// any content, thinking, or tool calls yet (still spinning).
+// would not discard any generated output. A turn can span several steps
+// (each tool call round-trip creates its own assistant message), so this
+// scans backward from the end of the chat rather than checking only the
+// trailing item: a fresh, still-empty assistant message immediately
+// after a completed tool call would otherwise look like "no output yet"
+// even though the turn already did real work. Scanning stops at the
+// most recent user message, since anything before that belongs to a
+// prior turn.
 func (m *Chat) LastMessageHasNoOutput() bool {
-	if m.list.Len() == 0 {
-		return true
+	for i := m.list.Len() - 1; i >= 0; i-- {
+		switch it := m.list.ItemAt(i).(type) {
+		case *chat.UserMessageItem:
+			// Reached this turn's prompt without finding any output.
+			return true
+		case *chat.AssistantMessageItem:
+			if !it.HasNoOutput() {
+				return false
+			}
+			// Still spinning/empty — keep looking at earlier steps.
+		default:
+			// Any other item since the last user message (a tool call,
+			// shell result, etc.) is output this turn already produced.
+			return false
+		}
 	}
-	item := m.list.ItemAt(m.list.Len() - 1)
-	switch it := item.(type) {
-	case *chat.UserMessageItem:
-		return true
-	case *chat.AssistantMessageItem:
-		return it.HasNoOutput()
-	default:
-		return false
-	}
+	// No user message found (empty session).
+	return true
 }
 
 // LastUserMessage returns the ID and text of the most recent user message
@@ -804,6 +858,51 @@ func (m *Chat) ToggleExpandedSelectedItem() {
 			m.ScrollToBottom()
 		}
 	}
+}
+
+// ToggleAllDiffsExpanded expands every edit/write/multiedit diff in the
+// chat (including diffs nested inside sub-agent tool calls) if any is
+// currently collapsed, or collapses them all if every one is already
+// expanded, mirroring a "select all" toggle. Returns whether any diff
+// item was found so the caller can no-op when there's nothing to expand.
+func (m *Chat) ToggleAllDiffsExpanded() bool {
+	var setters []chat.ExpandStateSetter
+	allExpanded := true
+
+	var collect func(item chat.MessageItem)
+	collect = func(item chat.MessageItem) {
+		if tm, ok := item.(chat.ToolMessageItem); ok {
+			switch tm.ToolCall().Name {
+			case tools.EditToolName, tools.MultiEditToolName, tools.WriteToolName:
+				if setter, ok := item.(chat.ExpandStateSetter); ok {
+					setters = append(setters, setter)
+					if !setter.IsExpanded() {
+						allExpanded = false
+					}
+				}
+			}
+		}
+		if container, ok := item.(chat.NestedToolContainer); ok {
+			for _, nested := range container.NestedTools() {
+				collect(nested)
+			}
+		}
+	}
+
+	for i := range m.list.Len() {
+		if item, ok := m.list.ItemAt(i).(chat.MessageItem); ok {
+			collect(item)
+		}
+	}
+
+	if len(setters) == 0 {
+		return false
+	}
+	target := !allExpanded
+	for _, s := range setters {
+		s.SetExpanded(target)
+	}
+	return true
 }
 
 // IsSelectedShellItem returns true if the currently selected item is a

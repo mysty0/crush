@@ -20,6 +20,13 @@ type AgentRequest struct {
 	// Phase is the workflow phase active when the call was made, if
 	// any (set via phase(name) before the call).
 	Phase string
+	// Model optionally overrides which model runs this call. Empty
+	// uses the workflow's default model; "small" uses the run's
+	// configured fast/cheap model; any other non-empty value is
+	// treated as an explicit model ID. Runner implementations resolve
+	// this the same way the "agent" tool resolves its own "model"
+	// parameter.
+	Model string
 	// Seq is a monotonic, run-scoped sequence number identifying this
 	// call, distinct from every other agent() call in the same run
 	// (including concurrent ones). Runner implementations can use it

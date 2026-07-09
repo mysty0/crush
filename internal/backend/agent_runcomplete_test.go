@@ -38,6 +38,7 @@ func (c *errorCoordinator) RunAccepted(ctx context.Context, accept *agent.Accept
 
 func (c *errorCoordinator) BeginAccepted(sessionID string) *agent.AcceptedRun    { return nil }
 func (c *errorCoordinator) Cancel(string)                                        {}
+func (c *errorCoordinator) CancelKeepQueue(string)                               {}
 func (c *errorCoordinator) CancelAll()                                           {}
 func (c *errorCoordinator) IsBusy() bool                                         { return false }
 func (c *errorCoordinator) IsSessionBusy(string) bool                            { return false }
@@ -57,7 +58,9 @@ func (c *errorCoordinator) RunningWorkflows() []agent.WorkflowStatus { return ni
 func (c *errorCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
 	return agent.WorkflowStatus{}, false
 }
-func (c *errorCoordinator) CancelWorkflow(string) {}
+func (c *errorCoordinator) CancelWorkflow(string)                         {}
+func (c *errorCoordinator) RunningSchedules() []agent.ScheduledTaskStatus { return nil }
+func (c *errorCoordinator) CancelSchedule(string)                         {}
 
 // insertRunCompleteWorkspace installs a workspace backed by a real
 // app.App (so the runCompletions broker exists) with the given

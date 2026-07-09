@@ -162,15 +162,21 @@ func (b *Backend) UpdateAgent(ctx context.Context, workspaceID string) error {
 }
 
 // CancelSession cancels an ongoing agent operation for the given
-// session.
-func (b *Backend) CancelSession(workspaceID, sessionID string) error {
+// session. When keepQueue is true, queued follow-up prompts are left in
+// place so the first one starts as the next turn once the canceled run
+// unwinds; when false, queued prompts are discarded.
+func (b *Backend) CancelSession(workspaceID, sessionID string, keepQueue bool) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
 
 	if ws.AgentCoordinator != nil {
-		ws.AgentCoordinator.Cancel(sessionID)
+		if keepQueue {
+			ws.AgentCoordinator.CancelKeepQueue(sessionID)
+		} else {
+			ws.AgentCoordinator.Cancel(sessionID)
+		}
 	}
 	return nil
 }

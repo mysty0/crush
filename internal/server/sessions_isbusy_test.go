@@ -38,9 +38,10 @@ func (s *stubCoordinator) RunAccepted(ctx context.Context, accept *agent.Accepte
 func (s *stubCoordinator) BeginAccepted(sessionID string) *agent.AcceptedRun {
 	return nil
 }
-func (s *stubCoordinator) Cancel(string) {}
-func (s *stubCoordinator) CancelAll()    {}
-func (s *stubCoordinator) IsBusy() bool  { return false }
+func (s *stubCoordinator) Cancel(string)          {}
+func (s *stubCoordinator) CancelKeepQueue(string) {}
+func (s *stubCoordinator) CancelAll()             {}
+func (s *stubCoordinator) IsBusy() bool           { return false }
 func (s *stubCoordinator) IsSessionBusy(id string) bool {
 	return s.busy[id]
 }
@@ -64,7 +65,9 @@ func (s *stubCoordinator) RunningWorkflows() []agent.WorkflowStatus { return nil
 func (s *stubCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
 	return agent.WorkflowStatus{}, false
 }
-func (s *stubCoordinator) CancelWorkflow(string) {}
+func (s *stubCoordinator) CancelWorkflow(string)                         {}
+func (s *stubCoordinator) RunningSchedules() []agent.ScheduledTaskStatus { return nil }
+func (s *stubCoordinator) CancelSchedule(string)                         {}
 
 // stubSessions is a minimal session.Service that returns a fixed list
 // (and supports Get by ID). All other methods return zero values; the

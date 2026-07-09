@@ -48,6 +48,7 @@ func (c *blockingCoordinator) RunAccepted(ctx context.Context, accept *agent.Acc
 
 func (c *blockingCoordinator) BeginAccepted(sessionID string) *agent.AcceptedRun    { return nil }
 func (c *blockingCoordinator) Cancel(string)                                        {}
+func (c *blockingCoordinator) CancelKeepQueue(string)                               {}
 func (c *blockingCoordinator) CancelAll()                                           {}
 func (c *blockingCoordinator) IsBusy() bool                                         { return false }
 func (c *blockingCoordinator) IsSessionBusy(string) bool                            { return false }
@@ -67,7 +68,9 @@ func (c *blockingCoordinator) RunningWorkflows() []agent.WorkflowStatus { return
 func (c *blockingCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
 	return agent.WorkflowStatus{}, false
 }
-func (c *blockingCoordinator) CancelWorkflow(string) {}
+func (c *blockingCoordinator) CancelWorkflow(string)                         {}
+func (c *blockingCoordinator) RunningSchedules() []agent.ScheduledTaskStatus { return nil }
+func (c *blockingCoordinator) CancelSchedule(string)                         {}
 
 // insertAgentWorkspace installs a synthetic workspace with the given
 // coordinator (or none) and a workspace run context, mirroring the

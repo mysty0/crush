@@ -174,6 +174,12 @@ func (w *AppWorkspace) AgentCancel(sessionID string) {
 	}
 }
 
+func (w *AppWorkspace) AgentCancelKeepQueue(sessionID string) {
+	if w.app.AgentCoordinator != nil {
+		w.app.AgentCoordinator.CancelKeepQueue(sessionID)
+	}
+}
+
 func (w *AppWorkspace) AgentIsBusy() bool {
 	if w.app.AgentCoordinator == nil {
 		return false
@@ -260,6 +266,19 @@ func (w *AppWorkspace) AgentWorkflowStatus(workflowSessionID string) (agent.Work
 func (w *AppWorkspace) AgentCancelWorkflow(workflowSessionID string) {
 	if w.app.AgentCoordinator != nil {
 		w.app.AgentCoordinator.CancelWorkflow(workflowSessionID)
+	}
+}
+
+func (w *AppWorkspace) AgentRunningSchedules() []agent.ScheduledTaskStatus {
+	if w.app.AgentCoordinator == nil {
+		return nil
+	}
+	return w.app.AgentCoordinator.RunningSchedules()
+}
+
+func (w *AppWorkspace) AgentCancelSchedule(taskID string) {
+	if w.app.AgentCoordinator != nil {
+		w.app.AgentCoordinator.CancelSchedule(taskID)
 	}
 }
 
