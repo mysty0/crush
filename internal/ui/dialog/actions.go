@@ -84,6 +84,12 @@ type (
 		MessageID string
 		Mode      rewind.Mode
 	}
+	// ActionScheduleCancelConfirm is sent when the user confirms
+	// stopping a scheduled task from the ScheduleCancel confirmation
+	// dialog.
+	ActionScheduleCancelConfirm struct {
+		TaskID string
+	}
 	// ActionSelectReasoningEffort is a message indicating a reasoning effort
 	// has been selected.
 	ActionSelectReasoningEffort struct {

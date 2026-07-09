@@ -263,6 +263,19 @@ func (w *AppWorkspace) AgentCancelWorkflow(workflowSessionID string) {
 	}
 }
 
+func (w *AppWorkspace) AgentRunningSchedules() []agent.ScheduledTaskStatus {
+	if w.app.AgentCoordinator == nil {
+		return nil
+	}
+	return w.app.AgentCoordinator.RunningSchedules()
+}
+
+func (w *AppWorkspace) AgentCancelSchedule(taskID string) {
+	if w.app.AgentCoordinator != nil {
+		w.app.AgentCoordinator.CancelSchedule(taskID)
+	}
+}
+
 func (w *AppWorkspace) RewindListPoints(ctx context.Context, sessionID string) ([]rewind.RewindPoint, error) {
 	return w.app.Rewind.ListRewindPoints(ctx, sessionID)
 }

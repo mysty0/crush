@@ -1894,6 +1894,11 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			}
 			return rewindDoneMsg{result: res, mode: mode}
 		})
+	case dialog.ActionScheduleCancelConfirm:
+		m.dialog.CloseDialog(dialog.ScheduleCancelID)
+		taskID := msg.TaskID
+		m.com.Workspace.AgentCancelSchedule(taskID)
+		cmds = append(cmds, util.ReportInfo(fmt.Sprintf("Stopped %s.", taskID)))
 	case dialog.ActionToggleHelp:
 		m.status.ToggleHelp()
 		m.dialog.CloseDialog(dialog.CommandsID)
@@ -4300,6 +4305,25 @@ func (m *UI) openRewindDialog() tea.Cmd {
 	}
 	m.dialog.OpenDialog(rewindDialog)
 	return nil
+}
+
+// openScheduleCancelDialog opens a confirmation dialog for stopping the
+// scheduled task with the given ID, showing its metadata (kind, prompt,
+// timing, run count) so the user knows what they're stopping before
+// confirming. Returns a warning if the task can no longer be found
+// (e.g. it just self-stopped and lingered off the registry).
+func (m *UI) openScheduleCancelDialog(taskID string) tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.ScheduleCancelID) {
+		m.dialog.BringToFront(dialog.ScheduleCancelID)
+		return nil
+	}
+	for _, s := range m.runningSchedules() {
+		if s.ID == taskID {
+			m.dialog.OpenDialog(dialog.NewScheduleCancel(m.com, s))
+			return nil
+		}
+	}
+	return util.ReportWarn(fmt.Sprintf("%s is no longer active.", taskID))
 }
 
 // openSessionsDialog opens the sessions dialog. If the dialog is already open,

@@ -118,6 +118,13 @@ type Workspace interface {
 	// AgentCancelWorkflow cancels a running background workflow by its
 	// (workflow) session ID.
 	AgentCancelWorkflow(workflowSessionID string)
+	// AgentRunningSchedules returns a snapshot of every scheduled task
+	// (dispatched via ScheduleCron/ScheduleWakeup), active or recently
+	// stopped.
+	AgentRunningSchedules() []agent.ScheduledTaskStatus
+	// AgentCancelSchedule stops a scheduled task by its task ID. It is
+	// a no-op if the task is unknown or already stopped.
+	AgentCancelSchedule(taskID string)
 
 	// RewindListPoints returns the user messages a session can be rewound
 	// to, newest first.

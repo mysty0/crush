@@ -1,0 +1,1 @@
+Stop a scheduled task (created with ScheduleCron or ScheduleWakeup) by its ID so it never fires again. Use this once a recurring check or wakeup loop's goal is reached, or it's no longer needed -- it's faster and more explicit than letting a wakeup loop time out on its own.

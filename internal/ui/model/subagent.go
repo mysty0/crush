@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"image"
 
 	"charm.land/bubbles/v2/key"
@@ -347,25 +348,36 @@ func (m *UI) runningSubAgents() []subAgentEntry {
 }
 
 // agentListEntryKind distinguishes a plain sub-agent entry from a
-// background workflow entry in the picker list.
+// background workflow entry, and a scheduled task entry, in the
+// picker list.
 type agentListEntryKind int
 
 const (
 	agentListKindSubAgent agentListEntryKind = iota
 	agentListKindWorkflow
+	agentListKindSchedule
 )
 
 // agentListEntry is one row in the agent picker list.
 type agentListEntry struct {
 	Label      string
-	SessionID  string // empty for "Main"
+	SessionID  string // empty for "Main" and for schedule entries
 	ToolCallID string
-	Kind       agentListEntryKind
+	// TaskID identifies a schedule entry (agentListKindSchedule); the
+	// registry keys scheduled tasks by ID rather than session, since a
+	// task's firings run in the origin session rather than a
+	// dedicated one.
+	TaskID string
+	// Stopped is true for a schedule entry whose task already stopped
+	// (canceled, expired, or reached max_runs), so selecting it
+	// doesn't attempt a redundant cancel.
+	Stopped bool
+	Kind    agentListEntryKind
 }
 
 // agentListEntries returns the picker list's entries: "Main" first,
-// then one entry per running sub-agent, then one per background
-// workflow.
+// then one entry per running sub-agent, one per background workflow,
+// and one per scheduled task (ScheduleCron/ScheduleWakeup).
 func (m *UI) agentListEntries() []agentListEntry {
 	entries := make([]agentListEntry, 0, 1)
 	entries = append(entries, agentListEntry{Label: "Main"})
@@ -385,6 +397,15 @@ func (m *UI) agentListEntries() []agentListEntry {
 			SessionID:  wf.SessionID,
 			ToolCallID: wf.ToolCallID,
 			Kind:       agentListKindWorkflow,
+		})
+	}
+	for _, s := range m.runningSchedules() {
+		label := ansi.Truncate(scheduleListLabel(s), maxAgentListPromptLength, "…")
+		entries = append(entries, agentListEntry{
+			Label:   label,
+			TaskID:  s.ID,
+			Stopped: s.State != agent.ScheduleActive,
+			Kind:    agentListKindSchedule,
 		})
 	}
 	return entries
@@ -409,6 +430,25 @@ func workflowListLabel(wf agent.WorkflowStatus) string {
 	return label
 }
 
+// scheduleListLabel builds the picker-row label for a scheduled task,
+// e.g. "◇ cron · check the build" or "⊘ wakeup · watch the deploy"
+// with a state marker and its kind.
+func scheduleListLabel(s agent.ScheduledTaskStatus) string {
+	marker := "◇"
+	if s.State == agent.ScheduleStopped {
+		if s.StopReason == "canceled" {
+			marker = "⊘"
+		} else {
+			marker = "✓"
+		}
+	}
+	kind := "cron"
+	if s.Kind == agent.ScheduleKindWakeup {
+		kind = "wakeup"
+	}
+	return fmt.Sprintf("%s %s · %s", marker, kind, s.Prompt)
+}
+
 // agentListAreaHeight returns the number of rows the agent picker list
 // needs (including a one-row gap above it, separating it from the
 // editor), or 0 if no sub-agents are currently running (in which case
@@ -417,7 +457,7 @@ func (m *UI) agentListAreaHeight() int {
 	if !m.hasSession() {
 		return 0
 	}
-	if len(m.runningSubAgents()) == 0 && len(m.runningWorkflows()) == 0 {
+	if len(m.runningSubAgents()) == 0 && len(m.runningWorkflows()) == 0 && len(m.runningSchedules()) == 0 {
 		return 0
 	}
 	return len(m.agentListEntries()) + 1
@@ -430,6 +470,16 @@ func (m *UI) runningWorkflows() []agent.WorkflowStatus {
 		return nil
 	}
 	return m.com.Workspace.AgentRunningWorkflows()
+}
+
+// runningSchedules returns the coordinator's scheduled tasks
+// (ScheduleCron/ScheduleWakeup), guarding against a nil Workspace
+// (some tests construct a bare UI).
+func (m *UI) runningSchedules() []agent.ScheduledTaskStatus {
+	if m.com == nil || m.com.Workspace == nil {
+		return nil
+	}
+	return m.com.Workspace.AgentRunningSchedules()
 }
 
 // currentAgentListIndex returns the index into agentListEntries() of
@@ -508,6 +558,12 @@ func (m *UI) confirmAgentListSelection() tea.Cmd {
 	idx := max(0, min(len(entries)-1, m.agentListSelected))
 	entry := entries[idx]
 	m.exitAgentListToEditor()
+	if entry.Kind == agentListKindSchedule {
+		if entry.Stopped {
+			return util.ReportInfo(fmt.Sprintf("%s is already stopped.", entry.TaskID))
+		}
+		return m.openScheduleCancelDialog(entry.TaskID)
+	}
 	if entry.SessionID == "" {
 		// "Main" selected.
 		if m.subAgentSessionID != "" {
