@@ -232,7 +232,9 @@ func (c *scriptedCoordinator) RunningWorkflows() []agent.WorkflowStatus { return
 func (c *scriptedCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
 	return agent.WorkflowStatus{}, false
 }
-func (c *scriptedCoordinator) CancelWorkflow(string) {}
+func (c *scriptedCoordinator) CancelWorkflow(string)                         {}
+func (c *scriptedCoordinator) RunningSchedules() []agent.ScheduledTaskStatus { return nil }
+func (c *scriptedCoordinator) CancelSchedule(string)                         {}
 
 // agentE2EHarness extends the SSE harness with a scripted coordinator
 // wired into the workspace's embedded app.App, so POST /agent drives a

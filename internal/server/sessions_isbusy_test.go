@@ -64,7 +64,9 @@ func (s *stubCoordinator) RunningWorkflows() []agent.WorkflowStatus { return nil
 func (s *stubCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
 	return agent.WorkflowStatus{}, false
 }
-func (s *stubCoordinator) CancelWorkflow(string) {}
+func (s *stubCoordinator) CancelWorkflow(string)                         {}
+func (s *stubCoordinator) RunningSchedules() []agent.ScheduledTaskStatus { return nil }
+func (s *stubCoordinator) CancelSchedule(string)                         {}
 
 // stubSessions is a minimal session.Service that returns a fixed list
 // (and supports Get by ID). All other methods return zero values; the

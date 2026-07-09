@@ -67,7 +67,9 @@ func (c *blockingCoordinator) RunningWorkflows() []agent.WorkflowStatus { return
 func (c *blockingCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
 	return agent.WorkflowStatus{}, false
 }
-func (c *blockingCoordinator) CancelWorkflow(string) {}
+func (c *blockingCoordinator) CancelWorkflow(string)                         {}
+func (c *blockingCoordinator) RunningSchedules() []agent.ScheduledTaskStatus { return nil }
+func (c *blockingCoordinator) CancelSchedule(string)                         {}
 
 // insertAgentWorkspace installs a synthetic workspace with the given
 // coordinator (or none) and a workspace run context, mirroring the
