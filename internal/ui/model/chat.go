@@ -56,6 +56,26 @@ type Chat struct {
 	// animations are restarted.
 	pausedAnimations map[string]struct{}
 
+	// restartedAt throttles how often RestartPausedVisibleAnimations may
+	// spin up a new animation chain for a given item ID. Without this,
+	// an item that repeatedly flickers in and out of the visible range
+	// (e.g. a neighbor pushed out of view by a fast-growing streamed
+	// message below it) gets a brand-new tea.Tick chain — a new
+	// goroutine and timer — on every single flicker, with no cap on
+	// the rate. Since bubbletea has no way to cancel an
+	// already-scheduled Cmd, a burst of flickers faster than the
+	// animation's own frame rate leaves every stale chain alive; if
+	// that rate ever outpaces the single event-loop goroutine's
+	// ability to drain them, the backlog is self-sustaining and grows
+	// without bound (see the regression test in
+	// freeze_repro_test.go, which reproduces the exact stuck state
+	// recovered from a live frozen session). Capping restarts to at
+	// most one per animation frame interval (anim.Interval) bounds the
+	// goroutine creation rate to the animation's own intended cadence
+	// regardless of how often the underlying event stream flickers
+	// visibility.
+	restartedAt map[string]time.Time
+
 	// Mouse state
 	mouseDown     bool
 	mouseDownItem int // Item index where mouse was pressed
@@ -157,6 +177,7 @@ func NewChat(com *common.Common, scrollbarMode string) *Chat {
 		com:              com,
 		idInxMap:         make(map[string]int),
 		pausedAnimations: make(map[string]struct{}),
+		restartedAt:      make(map[string]time.Time),
 		scrollbarMode:    scrollbarMode,
 	}
 	l := list.NewList()
@@ -362,6 +383,7 @@ func (m *Chat) Items() []chat.MessageItem {
 func (m *Chat) SetMessages(msgs ...chat.MessageItem) tea.Cmd {
 	m.idInxMap = make(map[string]int)
 	m.pausedAnimations = make(map[string]struct{})
+	m.restartedAt = make(map[string]time.Time)
 	m.scrollbarVisible = false // Reset scrollbar visibility on new session load
 
 	items := make([]list.Item, len(msgs))
@@ -451,8 +473,16 @@ func (m *Chat) Animate(msg anim.StepMsg) tea.Cmd {
 	return animatable.Animate(msg)
 }
 
-// RestartPausedVisibleAnimations restarts animations for items that were paused
-// due to being scrolled out of view but are now visible again.
+// RestartPausedVisibleAnimations restarts animations for items that were
+// paused due to being scrolled out of view but are now visible again.
+//
+// Restarts are throttled per ID to at most one per anim.Interval (see
+// the restartedAt field doc): an item whose visibility flickers faster
+// than that — e.g. repeatedly pushed in and out of view by a
+// fast-growing streamed message below it — stays in pausedAnimations
+// across the skipped calls and is retried on the next call once the
+// interval has elapsed, instead of spinning up an unbounded number of
+// concurrent tea.Tick chains for the same ID.
 func (m *Chat) RestartPausedVisibleAnimations() tea.Cmd {
 	if len(m.pausedAnimations) == 0 {
 		return nil
@@ -460,24 +490,35 @@ func (m *Chat) RestartPausedVisibleAnimations() tea.Cmd {
 
 	startIdx, endIdx := m.list.VisibleItemIndices()
 	var cmds []tea.Cmd
+	now := time.Now()
 
 	for id := range m.pausedAnimations {
 		idx, ok := m.idInxMap[id]
 		if !ok {
 			// Item no longer exists.
 			delete(m.pausedAnimations, id)
+			delete(m.restartedAt, id)
 			continue
 		}
 
-		if idx >= startIdx && idx <= endIdx {
-			// Item is now visible - restart its animation.
-			if animatable, ok := m.list.ItemAt(idx).(chat.Animatable); ok {
-				if cmd := animatable.StartAnimation(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
-			delete(m.pausedAnimations, id)
+		if idx < startIdx || idx > endIdx {
+			continue
 		}
+
+		if last, ok := m.restartedAt[id]; ok && now.Sub(last) < anim.Interval() {
+			// Restarted too recently — leave it paused and retry on
+			// a later call once the interval has elapsed.
+			continue
+		}
+
+		// Item is now visible - restart its animation.
+		if animatable, ok := m.list.ItemAt(idx).(chat.Animatable); ok {
+			if cmd := animatable.StartAnimation(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		m.restartedAt[id] = now
+		delete(m.pausedAnimations, id)
 	}
 
 	if len(cmds) == 0 {
@@ -721,6 +762,7 @@ func (m *Chat) SelectLastInView() {
 func (m *Chat) ClearMessages() {
 	m.idInxMap = make(map[string]int)
 	m.pausedAnimations = make(map[string]struct{})
+	m.restartedAt = make(map[string]time.Time)
 	m.scrollbarVisible = false
 	m.list.SetItems()
 	m.ClearMouse()
@@ -748,6 +790,7 @@ func (m *Chat) RemoveMessage(id string) {
 
 	// Clean up any paused animations for this message
 	delete(m.pausedAnimations, id)
+	delete(m.restartedAt, id)
 }
 
 // MessageItem returns the message item with the given ID, or nil if not found.

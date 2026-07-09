@@ -186,17 +186,24 @@ func (l *List) TotalHeight() int {
 }
 
 // itemHeightForSum returns a height for the item at idx suitable for
-// scrollbar math (TotalHeight / Offset). It never triggers a full
-// render: if the item has already been rendered its exact cached height
-// is used; otherwise a cheap estimate is used (falling back to a small
-// constant for items that do not implement HeightEstimator). This keeps
-// opening a long conversation from rendering every off-screen item.
+// scrollbar math (TotalHeight / Offset) and, since it now also backs
+// lastOffsetItem / VisibleItemIndices, for visibility determination on
+// the animation hot path. It never triggers a full render: if the item
+// has already been rendered AT ITS CURRENT VERSION its exact cached
+// height is used; a cache entry from before the item's last mutation
+// (Bump) is stale and must not be trusted — otherwise an item that
+// mutates after being rendered once (e.g. every streamed message)
+// would report its old height forever, since nothing else in this
+// path would invalidate the entry. Falls back to a cheap estimate
+// (and finally a small constant for items without an estimator) so
+// opening a long conversation still does not require rendering every
+// off-screen item.
 func (l *List) itemHeightForSum(idx int) int {
 	if idx < 0 || idx >= len(l.items) {
 		return 0
 	}
 	rawItem := l.items[idx]
-	if entry := l.cache[rawItem]; entry != nil && entry.width == l.width {
+	if entry := l.cache[rawItem]; entry != nil && entry.width == l.width && entry.version == rawItem.Version() {
 		return entry.height
 	}
 	if est, ok := rawItem.(HeightEstimator); ok {
@@ -207,6 +214,36 @@ func (l *List) itemHeightForSum(idx int) int {
 	// Fallback for items without an estimator: assume a single line.
 	// They will be corrected to their true height once rendered.
 	return 1
+}
+
+// itemHeightForVisibility returns a height for the item at idx for
+// lastOffsetItem and VisibleItemIndices: callers on the animation hot
+// path that determine the actual scroll anchor and visible range, not
+// just an approximate scrollbar size. Like itemHeightForSum, it prefers
+// an up-to-date cached height or a cheap estimate over a full render.
+// Unlike itemHeightForSum, an item with neither (no HeightEstimator
+// and never rendered at this width/version) falls back to an actual
+// render rather than assuming a single line — a scrollbar being a
+// line short is invisible, but an item without a HeightEstimator
+// (e.g. UserMessageItem) getting the wrong scroll anchor or wrongly
+// excluded from the visible range is a real, user-facing correctness
+// bug. Items that do implement HeightEstimator (assistant/tool
+// items — the ones actually driving the animation hot path this
+// method exists to keep cheap) still avoid the render entirely.
+func (l *List) itemHeightForVisibility(idx int) int {
+	if idx < 0 || idx >= len(l.items) {
+		return 0
+	}
+	rawItem := l.items[idx]
+	if entry := l.cache[rawItem]; entry != nil && entry.width == l.width && entry.version == rawItem.Version() {
+		return entry.height
+	}
+	if est, ok := rawItem.(HeightEstimator); ok {
+		if h := est.EstimatedHeight(l.width); h > 0 {
+			return h
+		}
+	}
+	return l.getItem(idx).height
 }
 
 // Offset returns the current scroll offset in lines from the top.
@@ -222,14 +259,27 @@ func (l *List) Offset() int {
 	return offset
 }
 
-// lastOffsetItem returns the index and line offsets of the last item that can
-// be partially visible in the viewport.
+// lastOffsetItem returns the index and line offsets of the last item
+// that can be partially visible in the viewport.
+//
+// Uses itemHeightForVisibility rather than an unconditional full
+// render (getItem) for items that provide a cheap estimate: this is a
+// boundary-finding walk over every item's height, and a cached or
+// estimated height is sufficient to locate the boundary for those
+// items — the actual visible items still get rendered exactly by the
+// subsequent Draw. Calling getItem unconditionally would force a full
+// re-render of every item touched on every call, including for items
+// whose content hasn't changed; for a caller invoked on every
+// animation tick or streamed message (as Chat.ScrollToBottomAndAnimate
+// is), that cost is paid far more often than the render itself is
+// invalidated. Items without an estimator still render exactly as
+// before — see itemHeightForVisibility's doc comment for why that
+// fallback matters here.
 func (l *List) lastOffsetItem() (int, int, int) {
 	var totalHeight int
 	var idx int
 	for idx = len(l.items) - 1; idx >= 0; idx-- {
-		item := l.getItem(idx)
-		itemHeight := item.height
+		itemHeight := l.itemHeightForVisibility(idx)
 		if l.gap > 0 && idx < len(l.items)-1 {
 			itemHeight += l.gap
 		}
@@ -495,8 +545,15 @@ func (l *List) ScrollBy(lines int) {
 	}
 }
 
-// VisibleItemIndices finds the range of items that are visible in the viewport.
-// This is used for checking if selected item is in view.
+// VisibleItemIndices finds the range of items that are visible in the
+// viewport. This is used for checking if selected item is in view.
+//
+// Uses itemHeightForVisibility rather than an unconditional full
+// render for the same reason lastOffsetItem does — see its doc
+// comment. This method is called on every animation tick
+// (Chat.Animate) to decide whether to keep propagating a spinner, so
+// an unconditional render here is paid at the animation's frame rate
+// for items whose content isn't otherwise changing.
 func (l *List) VisibleItemIndices() (startIdx, endIdx int) {
 	if len(l.items) == 0 {
 		return 0, 0
@@ -507,8 +564,8 @@ func (l *List) VisibleItemIndices() (startIdx, endIdx int) {
 	visibleHeight := -l.offsetLine
 
 	for currentIdx < len(l.items) {
-		item := l.getItem(currentIdx)
-		visibleHeight += item.height
+		itemHeight := l.itemHeightForVisibility(currentIdx)
+		visibleHeight += itemHeight
 		if l.gap > 0 {
 			visibleHeight += l.gap
 		}

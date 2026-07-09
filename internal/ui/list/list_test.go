@@ -84,6 +84,104 @@ func TestList_RenderMemo_PointerKey(t *testing.T) {
 	require.Contains(t, first, "alpha")
 }
 
+// estimatingTrackedItem extends trackedItem with a cheap HeightEstimator,
+// mirroring how a real chat item (e.g. AssistantMessageItem,
+// baseToolMessageItem) both estimates and renders. estimateHits counts
+// calls separately from renderHits so a test can prove which path the
+// list actually took.
+type estimatingTrackedItem struct {
+	*trackedItem
+	estimatedHeight int
+	estimateHits    int
+}
+
+func newEstimatingTrackedItem(id, body string, finished bool, estimatedHeight int) *estimatingTrackedItem {
+	return &estimatingTrackedItem{
+		trackedItem:     newTrackedItem(id, body, finished),
+		estimatedHeight: estimatedHeight,
+	}
+}
+
+func (e *estimatingTrackedItem) EstimatedHeight(int) int {
+	e.estimateHits++
+	return e.estimatedHeight
+}
+
+var _ HeightEstimator = (*estimatingTrackedItem)(nil)
+
+// TestList_ScrollToBottom_UsesEstimatorNotRender guards against a
+// regression of a real freeze: repeatedly mutating the last item in a
+// list (as handleChildSessionMessage does on every event from a live
+// sub-agent, and as an animation tick does via Bump) and then calling
+// ScrollToBottom — exactly the internal/ui/model.Chat.ScrollToBottomAndAnimate
+// path taken on every such event while in follow mode — must not force
+// a full, expensive Render of that item purely to compute the new
+// scroll offset.
+//
+// TotalHeight/Offset already avoid this: itemHeightForSum (list.go)
+// uses the item's cheap HeightEstimator, falling back to Render only
+// for items that don't implement it, specifically so that "opening a
+// long conversation does not have to render every off-screen item"
+// (see its doc comment). lastOffsetItem and VisibleItemIndices — which
+// ScrollToBottom and the animation-tick visibility check call,
+// respectively — now share that same fallback instead of
+// unconditionally calling getItem (a full Render) on every item they
+// walk over, even ones with a stale cache entry from a version bump
+// one line ago.
+//
+// This test is deterministic (a call count, not a timing threshold) so
+// it holds regardless of hardware speed. Before the fix, a burst of
+// events against a large or slow-to-render item (a long prompt with
+// several nested tool calls, as produced by a real live sub-agent
+// transcript) rendered on every single event; that Render-instead-of-
+// estimate cost is what let Update fall behind and triggered the
+// unbounded goroutine pileup recovered from a real frozen session (see
+// internal/ui/model/freeze_repro_test.go for the animation-restart
+// half of that reproduction).
+func TestList_ScrollToBottom_UsesEstimatorNotRender(t *testing.T) {
+	t.Parallel()
+
+	a := newEstimatingTrackedItem("a", "alpha", true, 1)
+	// last is unfinished (still "spinning"), matching a live in-progress
+	// tool call — the exact item type that keeps getting mutated by
+	// incoming sub-agent events.
+	last := newEstimatingTrackedItem("last", "the active item", false, 1)
+	l := NewList(a, last)
+	l.SetSize(40, 10)
+	_ = l.Render() // populate the cache for both items.
+	require.Equal(t, 1, last.renderHits)
+
+	// Simulate a burst of child-session events: each one mutates the
+	// last item (bumping its version, as SetNestedTools/Animate.Bump
+	// do) and then re-anchors to the bottom, as
+	// Chat.ScrollToBottomAndAnimate does on every such event while
+	// following. Between mutations we deliberately do NOT call
+	// l.Render(), because in production ScrollToBottom (inside Update)
+	// runs long before the next Draw — the cost we're measuring here
+	// is paid inside Update itself, not at Draw time.
+	const events = 50
+	for range events {
+		last.Bump()
+		l.ScrollToBottom()
+	}
+
+	t.Logf("last item: %d Render calls, %d EstimatedHeight calls for %d events",
+		last.renderHits, last.estimateHits, events)
+
+	// ScrollToBottom must use the cheap estimator instead of rendering
+	// the mutated item on every call. The one render from the initial
+	// l.Render() above is the only Render call expected; every
+	// ScrollToBottom call afterwards should hit the estimator.
+	require.Equal(t, 1, last.renderHits,
+		"ScrollToBottom must not re-render the mutated last item on "+
+			"every call; it should use its HeightEstimator instead — "+
+			"this is the expensive-per-event path that let Update fall "+
+			"behind under a burst of live sub-agent events")
+	require.Equal(t, events, last.estimateHits,
+		"every ScrollToBottom call after a mutation should consult the "+
+			"cheap estimator")
+}
+
 // TestList_SetSize_WidthChangeInvalidates covers the F6 invariant
 // that a width change drops every cached entry but a height-only
 // change leaves the cache intact.
