@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/chat"
@@ -857,6 +858,51 @@ func (m *Chat) ToggleExpandedSelectedItem() {
 			m.ScrollToBottom()
 		}
 	}
+}
+
+// ToggleAllDiffsExpanded expands every edit/write/multiedit diff in the
+// chat (including diffs nested inside sub-agent tool calls) if any is
+// currently collapsed, or collapses them all if every one is already
+// expanded, mirroring a "select all" toggle. Returns whether any diff
+// item was found so the caller can no-op when there's nothing to expand.
+func (m *Chat) ToggleAllDiffsExpanded() bool {
+	var setters []chat.ExpandStateSetter
+	allExpanded := true
+
+	var collect func(item chat.MessageItem)
+	collect = func(item chat.MessageItem) {
+		if tm, ok := item.(chat.ToolMessageItem); ok {
+			switch tm.ToolCall().Name {
+			case tools.EditToolName, tools.MultiEditToolName, tools.WriteToolName:
+				if setter, ok := item.(chat.ExpandStateSetter); ok {
+					setters = append(setters, setter)
+					if !setter.IsExpanded() {
+						allExpanded = false
+					}
+				}
+			}
+		}
+		if container, ok := item.(chat.NestedToolContainer); ok {
+			for _, nested := range container.NestedTools() {
+				collect(nested)
+			}
+		}
+	}
+
+	for i := range m.list.Len() {
+		if item, ok := m.list.ItemAt(i).(chat.MessageItem); ok {
+			collect(item)
+		}
+	}
+
+	if len(setters) == 0 {
+		return false
+	}
+	target := !allExpanded
+	for _, s := range setters {
+		s.SetExpanded(target)
+	}
+	return true
 }
 
 // IsSelectedShellItem returns true if the currently selected item is a

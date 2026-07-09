@@ -2720,6 +2720,14 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				}
 			case key.Matches(msg, m.keyMap.Chat.Expand):
 				activeChat.ToggleExpandedSelectedItem()
+			case key.Matches(msg, m.keyMap.Chat.ExpandAllDiffs):
+				if activeChat.ToggleAllDiffsExpanded() {
+					if activeChat.AtBottom() {
+						cmds = append(cmds, activeChat.ScrollToBottomAndAnimate())
+					}
+				} else {
+					cmds = append(cmds, util.ReportInfo("No diffs to expand."))
+				}
 			case key.Matches(msg, m.keyMap.Chat.Up):
 				if cmd := activeChat.ScrollByAndAnimate(-1); cmd != nil {
 					cmds = append(cmds, cmd)
@@ -3158,6 +3166,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 				[]key.Binding{
 					k.Chat.Copy,
 					k.Chat.ClearHighlight,
+					k.Chat.ExpandAllDiffs,
 				},
 			)
 			if m.pillsExpanded && hasIncompleteTodos(m.session.Todos) && m.promptQueue > 0 {

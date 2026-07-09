@@ -43,6 +43,18 @@ type Expandable interface {
 	ToggleExpanded() bool
 }
 
+// ExpandStateSetter is implemented by items whose expanded state can be
+// set directly (not just toggled), enabling bulk actions like "expand
+// all diffs". Distinct from [Expandable] because some expandable items
+// (e.g. thinking blocks) cycle through more than two states, where a
+// plain boolean set doesn't apply.
+type ExpandStateSetter interface {
+	// IsExpanded reports the item's current expanded state.
+	IsExpanded() bool
+	// SetExpanded sets the item's expanded state directly.
+	SetExpanded(expanded bool)
+}
+
 // KeyEventHandler is an interface for items that can handle key events.
 type KeyEventHandler interface {
 	HandleKeyEvent(key tea.KeyMsg) (bool, tea.Cmd)
