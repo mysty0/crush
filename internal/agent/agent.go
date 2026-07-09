@@ -178,6 +178,10 @@ type sessionAgent struct {
 	// It is called each turn so activated skills persist across turns and
 	// survive summarization. May be nil.
 	activeSkillsFor func(sessionID string) string
+	// recallMemories returns a block of long-term memories relevant to the
+	// given query (the current user prompt), or "" when memory is disabled or
+	// nothing matches. Called each turn so recall is automatic. May be nil.
+	recallMemories func(ctx context.Context, query string) string
 	// onSummarized is invoked after a successful summarization so callers
 	// can re-establish per-session context (e.g. re-inject active skills
 	// that the summary compacted away). May be nil.
@@ -240,6 +244,9 @@ type SessionAgentOptions struct {
 	// ActiveSkillsFor returns the injection block for a session's active
 	// skills so they persist across turns. May be nil.
 	ActiveSkillsFor func(sessionID string) string
+	// RecallMemories returns a block of long-term memories relevant to the
+	// current user prompt, injected automatically each turn. May be nil.
+	RecallMemories func(ctx context.Context, query string) string
 	// OnSummarized is invoked after a successful summarization. May be nil.
 	OnSummarized func(sessionID string)
 }
@@ -261,6 +268,7 @@ func NewSessionAgent(
 		notify:               opts.Notify,
 		runComplete:          opts.RunComplete,
 		activeSkillsFor:      opts.ActiveSkillsFor,
+		recallMemories:       opts.RecallMemories,
 		onSummarized:         opts.OnSummarized,
 		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
 		activeRequests:       csync.NewMap[string, context.CancelFunc](),
@@ -863,6 +871,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			// stays in effect without rewriting the base prompt.
 			if a.activeSkillsFor != nil {
 				if block := a.activeSkillsFor(call.SessionID); block != "" {
+					prepared.Messages = append(prepared.Messages, fantasy.NewSystemMessage(block))
+				}
+			}
+
+			// Inject long-term memories relevant to the current prompt, so the
+			// model recalls durable facts automatically without asking. Like
+			// skills, this is a trailing system message after the cached
+			// prefix, so per-turn variation does not churn the prompt cache.
+			if a.recallMemories != nil && call.Prompt != "" {
+				if block := a.recallMemories(callContext, call.Prompt); block != "" {
 					prepared.Messages = append(prepared.Messages, fantasy.NewSystemMessage(block))
 				}
 			}

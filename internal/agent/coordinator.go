@@ -707,6 +707,7 @@ func (c *coordinator) newTaskAgent(ctx context.Context, prompt *prompt.Prompt, a
 		Notify:               c.notify,
 		RunComplete:          c.runComplete,
 		ActiveSkillsFor:      c.activeSkillsInjection,
+		RecallMemories:       c.buildMemoryRecall(isSubAgent),
 		OnSummarized:         c.loadedSkills.Bump,
 	})
 
