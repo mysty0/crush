@@ -56,12 +56,12 @@ def category(name: str) -> str:
     return name.rsplit("-", 1)[0]
 
 
-def run_one(fx: dict, model: str, token: str, out_dir: Path) -> dict:
+def run_one(fx: dict, model: str, token: str, out_dir: Path, thinking: str = "off") -> dict:
     with tempfile.TemporaryDirectory(prefix="omp-eval-") as tmp:
         tmp = Path(tmp)
         (tmp / fx["file"]).write_text(fx["input"])
         cmd = [OMP, "-p", "--model", model, "--cwd", str(tmp),
-               "--auto-approve", "--no-session", "--no-lsp", "--mode=json", fx["prompt"]]
+               "--auto-approve", "--no-session", "--no-lsp", "--thinking", thinking, "--mode=json", fx["prompt"]]
         env = {**os.environ, "ANTHROPIC_OAUTH_TOKEN": token}
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=240, env=env)
@@ -102,6 +102,7 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--concurrency", type=int, default=6)
     ap.add_argument("--out", default="/tmp/omp_runs")
+    ap.add_argument("--thinking", default="off", help="omp thinking level (off/minimal/low/medium/high)")
     args = ap.parse_args()
 
     token = load_token()
@@ -127,7 +128,7 @@ def main() -> int:
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-        futs = [ex.submit(run_one, fx, args.model, token, out_dir) for fx in fixtures]
+        futs = [ex.submit(run_one, fx, args.model, token, out_dir, args.thinking) for fx in fixtures]
         for i, f in enumerate(concurrent.futures.as_completed(futs), 1):
             r = f.result()
             results.append(r)

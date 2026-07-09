@@ -43,10 +43,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const evalModelID = "claude-haiku-4-5-20251001"
+var evalModelID = envOr("CRUSH_EDIT_EVAL_MODEL", "claude-haiku-4-5-20251001")
 
-// haikuSubscriptionModel builds a Haiku language model that authenticates via
-// the local Claude Code subscription, mirroring coordinator.buildAnthropicProvider.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// haikuSubscriptionModel builds a subscription-authenticated model (Haiku by
+// default, or CRUSH_EDIT_EVAL_MODEL) via the Claude Code subscription,
+// mirroring coordinator.buildAnthropicProvider.
 func haikuSubscriptionModel(t *testing.T) fantasy.LanguageModel {
 	t.Helper()
 	base := &claudecode.AuthTransport{Base: http.DefaultTransport, Source: claudecode.DefaultSource()}
@@ -56,6 +64,20 @@ func haikuSubscriptionModel(t *testing.T) fantasy.LanguageModel {
 	m, err := prov.LanguageModel(t.Context(), evalModelID)
 	require.NoError(t, err)
 	return m
+}
+
+// evalThinkingOptions returns provider options with an anthropic thinking budget
+// from CRUSH_EDIT_EVAL_THINKING (token budget; 0/unset = thinking off).
+func evalThinkingOptions() fantasy.ProviderOptions {
+	budget := envInt("CRUSH_EDIT_EVAL_THINKING", 0)
+	if budget <= 0 {
+		return nil
+	}
+	return fantasy.ProviderOptions{
+		"anthropic": &anthropic.ProviderOptions{
+			Thinking: &anthropic.ThinkingProviderOption{BudgetTokens: int64(budget)},
+		},
+	}
 }
 
 type evalFixture struct {
@@ -175,11 +197,19 @@ func runEditTask(t *testing.T, model fantasy.LanguageModel, mode string, fx eval
 		SessionID:       session.ID,
 		MaxOutputTokens: 8000,
 		NonInteractive:  true,
+		ProviderOptions: evalThinkingOptions(),
 	})
 
 	out := evalResult{runErr: runErr}
 	if res != nil {
-		out.tokens = res.TotalUsage.InputTokens + res.TotalUsage.OutputTokens
+		u := res.TotalUsage
+		out.tokens = u.InputTokens + u.OutputTokens
+		// Haiku 4.5 pricing (per 1M): in $1, out $5, cache-write $1.25, cache-read $0.10.
+		cost := float64(u.InputTokens)*1e-6 + float64(u.OutputTokens)*5e-6 +
+			float64(u.CacheCreationTokens)*1.25e-6 + float64(u.CacheReadTokens)*0.10e-6
+		fmt.Printf("USAGE %s in=%d out=%d cacheW=%d cacheR=%d total=%d cost=%.5f\n",
+			fx.name, u.InputTokens, u.OutputTokens, u.CacheCreationTokens, u.CacheReadTokens,
+			u.InputTokens+u.OutputTokens+u.CacheCreationTokens+u.CacheReadTokens, cost)
 	}
 
 	got := readFile(t, filepath.Join(env.workingDir, fx.fileName))
