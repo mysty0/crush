@@ -4255,6 +4255,10 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openRewindDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.ReviewID:
+		if cmd := m.openReviewDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case dialog.QuitID:
 		if cmd := m.openQuitDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -4405,6 +4409,28 @@ func (m *UI) openScheduleCancelDialog(taskID string) tea.Cmd {
 		}
 	}
 	return util.ReportWarn(fmt.Sprintf("%s is no longer active.", taskID))
+}
+
+// openReviewDialog opens a fullscreen review of every file changed in
+// the current session, diffing each file's first recorded version
+// against its latest.
+func (m *UI) openReviewDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.ReviewID) {
+		m.dialog.BringToFront(dialog.ReviewID)
+		return nil
+	}
+	if m.session == nil {
+		return util.ReportWarn("No active session to review.")
+	}
+	reviewDialog, err := dialog.NewReview(m.com, m.session.ID)
+	if err != nil {
+		return util.ReportError(err)
+	}
+	if !reviewDialog.HasFiles() {
+		return util.ReportInfo("No changes to review in this session.")
+	}
+	m.dialog.OpenDialog(reviewDialog)
+	return nil
 }
 
 // openSessionsDialog opens the sessions dialog. If the dialog is already open,
