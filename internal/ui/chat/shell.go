@@ -98,34 +98,31 @@ func (s *ShellItem) Complete(output string, exitCode int) {
 	s.output = output
 	s.exitCode = exitCode
 	s.pending = false
-	s.Bump()
+	// Completing replaces the spinner with the command output, changing
+	// the rendered height.
+	s.BumpLayout()
 }
 
 // AppendOutput appends incremental output to a pending ShellItem.
 func (s *ShellItem) AppendOutput(chunk string) {
 	s.output += chunk
-	s.Bump()
+	// Streamed output adds lines, changing the rendered height.
+	s.BumpLayout()
 }
 
 func (s *ShellItem) ID() string          { return s.id }
 func (s *ShellItem) FilterValue() string { return s.command }
 func (s *ShellItem) Finished() bool      { return !s.pending }
 
-// StartAnimation starts the spinner animation for pending shell items.
-func (s *ShellItem) StartAnimation() tea.Cmd {
+// Advance progresses the spinner by one frame while the shell command
+// is still pending.
+func (s *ShellItem) Advance() bool {
 	if !s.pending {
-		return nil
-	}
-	return s.anim.Start()
-}
-
-// Animate advances the spinner animation for pending shell items.
-func (s *ShellItem) Animate(msg anim.StepMsg) tea.Cmd {
-	if !s.pending {
-		return nil
+		return false
 	}
 	s.Bump()
-	return s.anim.Animate(msg)
+	s.anim.Advance()
+	return true
 }
 
 func (s *ShellItem) Render(width int) string {
@@ -184,7 +181,8 @@ func (s *ShellItem) ScrollHorizontal(delta int) {
 // ToggleExpanded toggles the expanded state and invalidates the cache.
 func (s *ShellItem) ToggleExpanded() bool {
 	s.expandedContent = !s.expandedContent
-	s.Bump()
+	// Expanding/collapsing reveals or hides output lines.
+	s.BumpLayout()
 	return s.expandedContent
 }
 

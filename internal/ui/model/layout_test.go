@@ -19,11 +19,12 @@ type testMessageItem struct {
 	text string
 }
 
-func (m testMessageItem) ID() string           { return m.id }
-func (m testMessageItem) Render(int) string    { return m.text }
-func (m testMessageItem) RawRender(int) string { return m.text }
-func (m testMessageItem) Version() uint64      { return 0 }
-func (m testMessageItem) Finished() bool       { return true }
+func (m testMessageItem) ID() string            { return m.id }
+func (m testMessageItem) Render(int) string     { return m.text }
+func (m testMessageItem) RawRender(int) string  { return m.text }
+func (m testMessageItem) PaintVersion() uint64  { return 0 }
+func (m testMessageItem) LayoutVersion() uint64 { return 0 }
+func (m testMessageItem) Finished() bool        { return true }
 
 var _ chat.MessageItem = testMessageItem{}
 

@@ -11,7 +11,6 @@ import (
 
 	"github.com/zeebo/xxh3"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/lucasb-eyer/go-colorful"
 
@@ -87,9 +86,6 @@ func settingsHash(opts Settings) string {
 		opts.Size, opts.Label, opts.LabelColor, opts.GradColorA, opts.GradColorB, opts.CycleColors)
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
-
-// StepMsg is a message type used to trigger the next step in the animation.
-type StepMsg struct{ ID string }
 
 // Settings defines settings for the animation.
 type Settings struct {
@@ -360,17 +356,11 @@ func (a *Anim) Width() (w int) {
 	return w
 }
 
-// Start starts the animation.
-func (a *Anim) Start() tea.Cmd {
-	return a.Step()
-}
-
-// Animate advances the animation to the next step.
-func (a *Anim) Animate(msg StepMsg) tea.Cmd {
-	if msg.ID != a.id {
-		return nil
-	}
-
+// Advance advances the animation by one frame. It only mutates the
+// spinner's internal step counters; scheduling is owned entirely by
+// the UI's single animation clock (see internal/ui/model), so there
+// is deliberately no way for an Anim to request its own next tick.
+func (a *Anim) Advance() {
 	step := a.step.Add(1)
 	if int(step) >= len(a.cyclingFrames) {
 		a.step.Store(0)
@@ -386,7 +376,6 @@ func (a *Anim) Animate(msg StepMsg) tea.Cmd {
 	} else if !a.initialized.Load() && int(frames) >= maxBirthSteps {
 		a.initialized.Store(true)
 	}
-	return a.Step()
 }
 
 // Render renders the current state of the animation.
@@ -428,18 +417,9 @@ func (a *Anim) Render() string {
 	return b.String()
 }
 
-// Step is a command that triggers the next step in the animation.
-func (a *Anim) Step() tea.Cmd {
-	return tea.Tick(time.Second/time.Duration(fps), func(t time.Time) tea.Msg {
-		return StepMsg{ID: a.id}
-	})
-}
-
-// Interval is the fixed period between animation ticks. Exported so
-// callers that need to reason about tick timing outside the anim
-// package (e.g. throttling how often an animation chain is restarted)
-// use the same constant this package ticks at, instead of a
-// hand-picked duration that could drift out of sync.
+// Interval is the fixed period between animation frames. The UI's
+// single animation clock ticks at this rate and fans one Advance out
+// to every spinning item.
 func Interval() time.Duration {
 	return time.Second / time.Duration(fps)
 }

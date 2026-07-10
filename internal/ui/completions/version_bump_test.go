@@ -9,11 +9,13 @@ import (
 )
 
 // TestCompletionItem_MutatorsBumpVersion covers F6 §4.5 for the
-// completions popup: SetMatch and SetFocused must bump Version()
-// when the observable state changes, and dedupe (no bump) when the
-// supplied value is identical to the current state. Without
-// dedupe, the steady completions popup would invalidate the
-// list-level memo on every keystroke that produced the same match.
+// completions popup: SetMatch and SetFocused must bump the paint
+// version when the observable state changes, and dedupe (no bump)
+// when the supplied value is identical to the current state.
+// Completion rows are single-line, so both mutations are paint-only
+// and never touch the layout version. Without dedupe, the steady
+// completions popup would invalidate the list-level memo on every
+// keystroke that produced the same match.
 func TestCompletionItem_MutatorsBumpVersion(t *testing.T) {
 	t.Parallel()
 
@@ -32,18 +34,18 @@ func TestCompletionItem_MutatorsBumpVersion(t *testing.T) {
 		item := mkItem()
 
 		// First transition (false -> true) must bump.
-		before := item.Version()
+		before := item.PaintVersion()
 		item.SetFocused(true)
-		require.Greater(t, item.Version(), before, "SetFocused(true) must bump")
+		require.Greater(t, item.PaintVersion(), before, "SetFocused(true) must bump")
 
 		// Re-applying the same focus state must not bump.
-		stable := item.Version()
+		stable := item.PaintVersion()
 		item.SetFocused(true)
-		require.Equal(t, stable, item.Version(), "SetFocused with same value must not bump")
+		require.Equal(t, stable, item.PaintVersion(), "SetFocused with same value must not bump")
 
 		// Transition back must bump.
 		item.SetFocused(false)
-		require.Greater(t, item.Version(), stable, "SetFocused(false) must bump")
+		require.Greater(t, item.PaintVersion(), stable, "SetFocused(false) must bump")
 	})
 
 	t.Run("SetMatch", func(t *testing.T) {
@@ -56,13 +58,13 @@ func TestCompletionItem_MutatorsBumpVersion(t *testing.T) {
 			Score:          5,
 			MatchedIndexes: []int{0, 1, 2, 3},
 		}
-		before := item.Version()
+		before := item.PaintVersion()
 		item.SetMatch(match)
-		require.Greater(t, item.Version(), before, "SetMatch with new value must bump")
+		require.Greater(t, item.PaintVersion(), before, "SetMatch with new value must bump")
 
 		// Re-applying an equivalent match (same fields, equal slice
 		// contents) must not bump.
-		stable := item.Version()
+		stable := item.PaintVersion()
 		same := fuzzy.Match{
 			Str:            "user",
 			Index:          0,
@@ -70,7 +72,7 @@ func TestCompletionItem_MutatorsBumpVersion(t *testing.T) {
 			MatchedIndexes: []int{0, 1, 2, 3},
 		}
 		item.SetMatch(same)
-		require.Equal(t, stable, item.Version(), "SetMatch with equivalent value must not bump")
+		require.Equal(t, stable, item.PaintVersion(), "SetMatch with equivalent value must not bump")
 
 		// A different match (different MatchedIndexes) must bump.
 		different := fuzzy.Match{
@@ -80,6 +82,6 @@ func TestCompletionItem_MutatorsBumpVersion(t *testing.T) {
 			MatchedIndexes: []int{0, 2},
 		}
 		item.SetMatch(different)
-		require.Greater(t, item.Version(), stable, "SetMatch with different indexes must bump")
+		require.Greater(t, item.PaintVersion(), stable, "SetMatch with different indexes must bump")
 	})
 }

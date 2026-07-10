@@ -238,7 +238,7 @@ func (s *Session) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		t.Dialog.View.GetVerticalFrameSize()
 	s.input.SetWidth(max(0, innerWidth-t.Dialog.InputPrompt.GetHorizontalFrameSize()-1)) // (1) cursor padding
 	listHeight := height - heightOffset
-	listTotalHeight := s.list.TotalHeight()
+	listTotalHeight := s.list.TotalHeightApprox()
 	listWidth := max(0, innerWidth-3) // Reserve space for scrollbar.
 	s.list.SetSize(listWidth, listHeight)
 	s.help.SetWidth(innerWidth)
@@ -312,7 +312,7 @@ func (s *Session) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		rc.AddPart(inputView)
 	}
 	listView := t.Dialog.List.Height(s.list.Height()).Render(s.list.Render())
-	scrollbar := common.Scrollbar(t, listHeight, listTotalHeight, listHeight, s.list.Offset())
+	scrollbar := common.Scrollbar(t, listHeight, listTotalHeight, listHeight, s.list.OffsetApprox())
 	if scrollbar != "" {
 		listView = lipgloss.JoinHorizontal(lipgloss.Top, listView, scrollbar)
 	}

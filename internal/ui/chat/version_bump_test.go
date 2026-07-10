@@ -6,7 +6,6 @@ import (
 
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/attachments"
 	"github.com/charmbracelet/crush/internal/ui/list"
 	"github.com/charmbracelet/crush/internal/ui/styles"
@@ -15,22 +14,44 @@ import (
 
 // versionedItem is the cross-cutting interface every chat item type
 // must satisfy under F6: every documented mutator must bump the
-// shared version counter so the list-level memo invalidates.
+// shared paint version so the list-level memo invalidates, and
+// height-affecting mutators must also bump the layout version so the
+// list re-measures the item.
 type versionedItem interface {
 	list.Item
-	Version() uint64
+	PaintVersion() uint64
+	LayoutVersion() uint64
 }
 
-// requireBump asserts that the supplied mutator advances the item's
-// Version(). The mutator runs once; an absent bump is a regression
-// (a finished item would keep serving stale frozen output to the
-// list cache).
-func requireBump(t *testing.T, name string, item versionedItem, mutate func()) {
+// requirePaintBump asserts that the supplied mutator advances the
+// item's PaintVersion() WITHOUT advancing its LayoutVersion(): the
+// rendered bytes changed but the item's height did not, so the list
+// must keep its cached height across the mutation. The mutator runs
+// once.
+func requirePaintBump(t *testing.T, name string, item versionedItem, mutate func()) {
 	t.Helper()
-	before := item.Version()
+	beforePaint := item.PaintVersion()
+	beforeLayout := item.LayoutVersion()
 	mutate()
-	after := item.Version()
-	require.Greaterf(t, after, before, "%s must bump Version() (before=%d, after=%d)", name, before, after)
+	require.Greaterf(t, item.PaintVersion(), beforePaint,
+		"%s must bump PaintVersion() (before=%d, after=%d)", name, beforePaint, item.PaintVersion())
+	require.Equalf(t, beforeLayout, item.LayoutVersion(),
+		"%s is paint-only and must NOT bump LayoutVersion() (before=%d, after=%d)", name, beforeLayout, item.LayoutVersion())
+}
+
+// requireLayoutBump asserts that the supplied mutator advances BOTH
+// the paint and layout versions: the change may alter the item's
+// rendered height, so the list must invalidate both the cached
+// content and the cached height. The mutator runs once.
+func requireLayoutBump(t *testing.T, name string, item versionedItem, mutate func()) {
+	t.Helper()
+	beforePaint := item.PaintVersion()
+	beforeLayout := item.LayoutVersion()
+	mutate()
+	require.Greaterf(t, item.PaintVersion(), beforePaint,
+		"%s must bump PaintVersion() (before=%d, after=%d)", name, beforePaint, item.PaintVersion())
+	require.Greaterf(t, item.LayoutVersion(), beforeLayout,
+		"%s is height-affecting and must bump LayoutVersion() (before=%d, after=%d)", name, beforeLayout, item.LayoutVersion())
 }
 
 // TestAssistantMessageItem_MutatorsBumpVersion enumerates every
@@ -56,18 +77,20 @@ func TestAssistantMessageItem_MutatorsBumpVersion(t *testing.T) {
 
 	item := NewAssistantMessageItem(&sty, build("thinking", "content")).(*AssistantMessageItem)
 
-	requireBump(t, "SetMessage", item, func() {
+	requireLayoutBump(t, "SetMessage", item, func() {
 		item.SetMessage(build("thinking", "more content"))
 	})
-	requireBump(t, "SetFocused", item, func() {
+	requirePaintBump(t, "SetFocused", item, func() {
 		item.SetFocused(true)
 	})
-	requireBump(t, "SetHighlight", item, func() {
+	requirePaintBump(t, "SetHighlight", item, func() {
 		item.SetHighlight(0, 0, 0, 5)
 	})
 	// ToggleExpanded only mutates state when there is non-empty
-	// thinking text — which the build helper provides.
-	requireBump(t, "ToggleExpanded", item, func() {
+	// thinking text — which the build helper provides. Cycling the
+	// view mode reveals or hides thinking lines, so it is a layout
+	// change.
+	requireLayoutBump(t, "ToggleExpanded", item, func() {
 		item.ToggleExpanded()
 	})
 }
@@ -94,10 +117,10 @@ func TestUserMessageItem_MutatorsBumpVersion(t *testing.T) {
 	}
 	item := NewUserMessageItem(&sty, msg, r).(*UserMessageItem)
 
-	requireBump(t, "SetFocused", item, func() {
+	requirePaintBump(t, "SetFocused", item, func() {
 		item.SetFocused(true)
 	})
-	requireBump(t, "SetHighlight", item, func() {
+	requirePaintBump(t, "SetHighlight", item, func() {
 		item.SetHighlight(0, 0, 0, 3)
 	})
 }
@@ -119,8 +142,8 @@ func TestAssistantInfoItem_VersionedAndFinished(t *testing.T) {
 	item := NewAssistantInfoItem(&sty, msg, cfg, time.Unix(0, 0)).(*AssistantInfoItem)
 
 	require.True(t, item.Finished(), "AssistantInfoItem must be Finished()")
-	// Version() is callable and starts at zero.
-	require.Equal(t, uint64(0), item.Version())
+	// PaintVersion() is callable and starts at zero.
+	require.Equal(t, uint64(0), item.PaintVersion())
 }
 
 // TestBaseToolMessageItem_MutatorsBumpVersion enumerates the base
@@ -135,46 +158,46 @@ func TestBaseToolMessageItem_MutatorsBumpVersion(t *testing.T) {
 
 	v := item.(versionedItem)
 
-	requireBump(t, "SetFocused", v, func() {
+	requirePaintBump(t, "SetFocused", v, func() {
 		if f, ok := item.(list.Focusable); ok {
 			f.SetFocused(true)
 		}
 	})
-	requireBump(t, "SetHighlight", v, func() {
+	requirePaintBump(t, "SetHighlight", v, func() {
 		if h, ok := item.(list.Highlightable); ok {
 			h.SetHighlight(0, 0, 0, 3)
 		}
 	})
-	requireBump(t, "SetToolCall", v, func() {
+	requireLayoutBump(t, "SetToolCall", v, func() {
 		tc2 := tc
 		tc2.Input = `{"command":"echo"}`
 		item.SetToolCall(tc2)
 	})
-	requireBump(t, "SetResult", v, func() {
+	requireLayoutBump(t, "SetResult", v, func() {
 		item.SetResult(&message.ToolResult{ToolCallID: "tc1", Content: "ok"})
 	})
-	requireBump(t, "SetStatus", v, func() {
+	requireLayoutBump(t, "SetStatus", v, func() {
 		item.SetStatus(ToolStatusSuccess)
 	})
-	requireBump(t, "ToggleExpanded", v, func() {
+	requireLayoutBump(t, "ToggleExpanded", v, func() {
 		if e, ok := item.(Expandable); ok {
 			e.ToggleExpanded()
 		}
 	})
-	requireBump(t, "SetCompact", v, func() {
+	requireLayoutBump(t, "SetCompact", v, func() {
 		if c, ok := item.(Compactable); ok {
 			c.SetCompact(true)
 		}
 	})
 }
 
-// TestAssistantMessageItem_AnimateBumpsVersion covers the spinner
+// TestAssistantMessageItem_AdvanceBumpsVersion covers the spinner
 // regression: while the assistant message is spinning, every
-// anim.StepMsg fed through Animate must bump Version() so the
+// animation frame fed through Advance must bump Version() so the
 // list-level cache invalidates and the next draw re-renders the
 // advanced spinner frame. Without this bump the cached entry's
 // version stays put and the spinner appears frozen.
-func TestAssistantMessageItem_AnimateBumpsVersion(t *testing.T) {
+func TestAssistantMessageItem_AdvanceBumpsVersion(t *testing.T) {
 	t.Parallel()
 
 	sty := styles.CharmtonePantera()
@@ -187,11 +210,15 @@ func TestAssistantMessageItem_AnimateBumpsVersion(t *testing.T) {
 	}
 	item := NewAssistantMessageItem(&sty, streaming).(*AssistantMessageItem)
 
-	requireBump(t, "Animate", item, func() {
-		item.Animate(anim.StepMsg{})
+	// Advance is the spinner regression: it must bump paint (the frame
+	// changed) but NEVER bump layout, or a 20fps spinner would throw
+	// away cached heights on every frame — the entire point of the
+	// paint/layout split.
+	requirePaintBump(t, "Advance", item, func() {
+		require.True(t, item.Advance(), "a spinning item must report it is still animating")
 	})
 
-	// A non-spinning item must not bump on Animate: the bump only
+	// A non-spinning item must not bump on Advance: the bump only
 	// makes sense while the spinner is live, and a stray bump on a
 	// finished item would needlessly invalidate frozen entries.
 	finished := &message.Message{
@@ -204,9 +231,9 @@ func TestAssistantMessageItem_AnimateBumpsVersion(t *testing.T) {
 	}
 	item.SetMessage(finished)
 	require.True(t, item.Finished(), "item must report Finished() once the message finishes")
-	before := item.Version()
-	item.Animate(anim.StepMsg{})
-	require.Equal(t, before, item.Version(), "Animate must not bump Version() on a non-spinning item")
+	before := item.PaintVersion()
+	require.False(t, item.Advance(), "a finished item must report it stopped animating")
+	require.Equal(t, before, item.PaintVersion(), "Advance must not bump PaintVersion() on a non-spinning item")
 }
 
 // TestAssistantMessageItem_FinishedTransition covers §4.5.1: a
@@ -286,24 +313,28 @@ func TestAgentToolMessageItem_NestedToolMutatorsBumpVersion(t *testing.T) {
 		return NewToolMessageItem(&sty, "msg", tc, nil, false)
 	}
 
-	// AddNestedTool always bumps.
-	requireBump(t, "AddNestedTool", item, func() {
+	// AddNestedTool adds inline child lines: layout change.
+	requireLayoutBump(t, "AddNestedTool", item, func() {
 		item.AddNestedTool(mkChild("c1"))
 	})
 
-	// SetNestedTools always bumps, even with a pointer-equal slice.
+	// SetNestedTools always bumps layout, even with a pointer-equal
+	// slice (an over-eager layout bump is safe; children can mutate in
+	// place, see the T5 test).
 	current := append([]ToolMessageItem(nil), item.NestedTools()...)
-	requireBump(t, "SetNestedTools[pointer-equal]", item, func() {
+	requireLayoutBump(t, "SetNestedTools[pointer-equal]", item, func() {
 		item.SetNestedTools(current)
 	})
 
-	// SetNestedTools with a different slice (extra element) bumps.
-	requireBump(t, "SetNestedTools[different]", item, func() {
+	// SetNestedTools with a different slice (extra element) is a
+	// layout change.
+	requireLayoutBump(t, "SetNestedTools[different]", item, func() {
 		item.SetNestedTools(append(current, mkChild("c2")))
 	})
 
-	// SetNestedTools to an empty slice from a non-empty state bumps.
-	requireBump(t, "SetNestedTools[empty]", item, func() {
+	// SetNestedTools to an empty slice from a non-empty state removes
+	// inline lines: layout change.
+	requireLayoutBump(t, "SetNestedTools[empty]", item, func() {
 		item.SetNestedTools(nil)
 	})
 }
@@ -323,20 +354,20 @@ func TestAgenticFetchToolMessageItem_NestedToolMutatorsBumpVersion(t *testing.T)
 		return NewToolMessageItem(&sty, "msg", tc, nil, false)
 	}
 
-	requireBump(t, "AddNestedTool", item, func() {
+	requireLayoutBump(t, "AddNestedTool", item, func() {
 		item.AddNestedTool(mkChild("c1"))
 	})
 
 	current := append([]ToolMessageItem(nil), item.NestedTools()...)
-	requireBump(t, "SetNestedTools[pointer-equal]", item, func() {
+	requireLayoutBump(t, "SetNestedTools[pointer-equal]", item, func() {
 		item.SetNestedTools(current)
 	})
 
-	requireBump(t, "SetNestedTools[different]", item, func() {
+	requireLayoutBump(t, "SetNestedTools[different]", item, func() {
 		item.SetNestedTools(append(current, mkChild("c2")))
 	})
 
-	requireBump(t, "SetNestedTools[empty]", item, func() {
+	requireLayoutBump(t, "SetNestedTools[empty]", item, func() {
 		item.SetNestedTools(nil)
 	})
 }
@@ -360,19 +391,19 @@ func TestAgentToolMessageItem_NestedChildInPlaceMutationBumpsParent(t *testing.T
 	child := NewToolMessageItem(&sty, "msg", childTC, nil, false)
 	item.AddNestedTool(child)
 
-	v0 := item.Version()
-	childVersionBefore := child.(versionedItem).Version()
+	v0 := item.PaintVersion()
+	childVersionBefore := child.(versionedItem).PaintVersion()
 
 	// In-place mutate the existing child, exactly like the live
 	// flow in ui.go:1271-1278 does.
 	child.SetResult(&message.ToolResult{ToolCallID: "c1", Content: "ok"})
-	require.Greaterf(t, child.(versionedItem).Version(), childVersionBefore,
-		"child SetResult must bump child version")
+	require.Greaterf(t, child.(versionedItem).PaintVersion(), childVersionBefore,
+		"child SetResult must bump child paint version")
 
 	// Hand the same slice back to the parent (pointers unchanged).
 	same := item.NestedTools()
 	item.SetNestedTools(same)
-	require.Greaterf(t, item.Version(), v0,
+	require.Greaterf(t, item.PaintVersion(), v0,
 		"parent SetNestedTools must bump even when child pointers are unchanged (in-place child mutation invalidates parent's pre-rendered output)")
 }
 
@@ -389,40 +420,42 @@ func TestAgenticFetchToolMessageItem_NestedChildInPlaceMutationBumpsParent(t *te
 	child := NewToolMessageItem(&sty, "msg", childTC, nil, false)
 	item.AddNestedTool(child)
 
-	v0 := item.Version()
-	childVersionBefore := child.(versionedItem).Version()
+	v0 := item.PaintVersion()
+	childVersionBefore := child.(versionedItem).PaintVersion()
 
 	child.SetResult(&message.ToolResult{ToolCallID: "c1", Content: "ok"})
-	require.Greaterf(t, child.(versionedItem).Version(), childVersionBefore,
-		"child SetResult must bump child version")
+	require.Greaterf(t, child.(versionedItem).PaintVersion(), childVersionBefore,
+		"child SetResult must bump child paint version")
 
 	same := item.NestedTools()
 	item.SetNestedTools(same)
-	require.Greaterf(t, item.Version(), v0,
+	require.Greaterf(t, item.PaintVersion(), v0,
 		"parent SetNestedTools must bump even when child pointers are unchanged")
 }
 
-// requireNoBump asserts the supplied mutator leaves the item's
-// Version() unchanged. The mutator runs once; an unexpected bump
-// would force the F6 list memo to re-render an item whose output
-// did not change, churning the cache.
+// requireNoBump asserts the supplied mutator leaves BOTH the paint
+// and layout versions unchanged. The mutator runs once; an
+// unexpected bump would force the F6 list memo to re-render (or
+// re-measure) an item whose output did not change, churning the
+// cache.
 func requireNoBump(t *testing.T, name string, item versionedItem, mutate func()) {
 	t.Helper()
-	before := item.Version()
+	beforePaint := item.PaintVersion()
+	beforeLayout := item.LayoutVersion()
 	mutate()
-	after := item.Version()
-	require.Equalf(t, before, after,
-		"%s must not bump Version() (before=%d, after=%d)", name, before, after)
+	require.Equalf(t, beforePaint, item.PaintVersion(),
+		"%s must not bump PaintVersion() (before=%d, after=%d)", name, beforePaint, item.PaintVersion())
+	require.Equalf(t, beforeLayout, item.LayoutVersion(),
+		"%s must not bump LayoutVersion() (before=%d, after=%d)", name, beforeLayout, item.LayoutVersion())
 }
 
-// TestBaseToolMessageItem_AnimateBumpsVersion is the spinner
+// TestBaseToolMessageItem_AdvanceBumpsVersion is the spinner
 // regression test for non-agent tools: while the tool is spinning,
-// every anim.StepMsg whose ID matches the tool must bump Version()
-// so the list-level cache invalidates and the next draw re-renders
-// the advanced spinner frame. Foreign IDs must not bump (they would
-// churn the cache on every frame), and a finished tool must not
-// bump on any ID (the entry is frozen and stays frozen).
-func TestBaseToolMessageItem_AnimateBumpsVersion(t *testing.T) {
+// every Advance must bump Version() so the list-level cache
+// invalidates and the next draw re-renders the advanced spinner
+// frame. A finished tool must not bump (the entry is frozen and
+// stays frozen) and must report it stopped animating.
+func TestBaseToolMessageItem_AdvanceBumpsVersion(t *testing.T) {
 	t.Parallel()
 
 	sty := styles.CharmtonePantera()
@@ -432,42 +465,30 @@ func TestBaseToolMessageItem_AnimateBumpsVersion(t *testing.T) {
 	a, ok := item.(Animatable)
 	require.True(t, ok, "base tool message item must implement Animatable")
 
-	// Spinning + matching ID → bump.
-	requireBump(t, "Animate[spinning,own ID]", v, func() {
-		a.Animate(anim.StepMsg{ID: tc.ID})
+	// Spinning → bump.
+	requirePaintBump(t, "Advance[spinning]", v, func() {
+		require.True(t, a.Advance(), "a spinning tool must report it is still animating")
 	})
 
-	// Spinning + foreign ID → no bump. Routing this StepMsg here at
-	// all would mean a future chat.Animate refactor; the item must
-	// be defensive against it so we don't churn the list cache.
-	requireNoBump(t, "Animate[spinning,foreign ID]", v, func() {
-		a.Animate(anim.StepMsg{ID: "some-other-tool"})
-	})
-
-	// Finished → no bump on any ID. The entry is frozen; a stray
-	// bump would needlessly invalidate frozen entries.
+	// Finished → no bump. The entry is frozen; a stray bump would
+	// needlessly invalidate frozen entries.
 	tcFinished := tc
 	tcFinished.Finished = true
 	item.SetToolCall(tcFinished)
 	item.SetResult(&message.ToolResult{ToolCallID: tc.ID, Content: "ok"})
 	require.True(t, item.Finished(), "tool must report Finished() once the result lands")
 
-	requireNoBump(t, "Animate[finished,own ID]", v, func() {
-		a.Animate(anim.StepMsg{ID: tc.ID})
-	})
-	requireNoBump(t, "Animate[finished,foreign ID]", v, func() {
-		a.Animate(anim.StepMsg{ID: "some-other-tool"})
+	requireNoBump(t, "Advance[finished]", v, func() {
+		require.False(t, a.Advance(), "a finished tool must report it stopped animating")
 	})
 }
 
-// TestAgentToolMessageItem_AnimateBumpsVersion is the spinner
-// regression test for agent tools. The parent must bump on both
-// the parent-tick branch (msg.ID == parent.ID()) and the
-// nested-tick branch (msg.ID == nested.ID()) because the list
-// only checks the parent's version — nested tools are not list
-// entries of their own. Unrelated IDs must not bump, and a parent
-// with a result must not bump on any ID.
-func TestAgentToolMessageItem_AnimateBumpsVersion(t *testing.T) {
+// TestAgentToolMessageItem_AdvanceBumpsVersion is the spinner
+// regression test for agent tools. The parent must bump on Advance
+// and advance its nested tools too, because the list only checks the
+// parent's version — nested tools are not list entries of their own.
+// A parent with a result must not bump.
+func TestAgentToolMessageItem_AdvanceBumpsVersion(t *testing.T) {
 	t.Parallel()
 
 	sty := styles.CharmtonePantera()
@@ -478,41 +499,26 @@ func TestAgentToolMessageItem_AnimateBumpsVersion(t *testing.T) {
 	child := NewToolMessageItem(&sty, "msg", childTC, nil, false)
 	parent.AddNestedTool(child)
 
-	// Spinning + parent's own ID → parent bumps.
-	requireBump(t, "Animate[spinning,parent ID]", parent, func() {
-		parent.Animate(anim.StepMsg{ID: parentTC.ID})
+	// Spinning → parent bumps, and the nested child advances with it.
+	childBefore := child.(versionedItem).PaintVersion()
+	requirePaintBump(t, "Advance[spinning]", parent, func() {
+		require.True(t, parent.Advance(), "a running agent tool must report it is still animating")
 	})
+	require.Greater(t, child.(versionedItem).PaintVersion(), childBefore,
+		"advancing the parent must advance nested tools too")
 
-	// Spinning + nested child ID → parent bumps. The list only
-	// invalidates on the parent; without this the nested
-	// spinner's frame would never reach the screen even though
-	// the nested anim's step has advanced.
-	requireBump(t, "Animate[spinning,nested ID]", parent, func() {
-		parent.Animate(anim.StepMsg{ID: childTC.ID})
-	})
-
-	// Spinning + unrelated ID → no bump.
-	requireNoBump(t, "Animate[spinning,foreign ID]", parent, func() {
-		parent.Animate(anim.StepMsg{ID: "unrelated"})
-	})
-
-	// Once the parent has a result, neither branch bumps.
+	// Once the parent has a result, Advance neither bumps nor animates.
 	parent.SetResult(&message.ToolResult{ToolCallID: parentTC.ID, Content: "done"})
-	requireNoBump(t, "Animate[finished,parent ID]", parent, func() {
-		parent.Animate(anim.StepMsg{ID: parentTC.ID})
-	})
-	requireNoBump(t, "Animate[finished,nested ID]", parent, func() {
-		parent.Animate(anim.StepMsg{ID: childTC.ID})
+	requireNoBump(t, "Advance[finished]", parent, func() {
+		require.False(t, parent.Advance(), "a finished agent tool must report it stopped animating")
 	})
 }
 
-// TestAgenticFetchToolMessageItem_AnimateBumpsVersion is the
-// agentic-fetch counterpart of the agent-tool Animate bump test.
-// Without an explicit override the embedded base Animate would
-// drop nested-child StepMsgs at anim.Animate's ID check and never
-// bump the parent on its own ticks; this test locks in the
-// override.
-func TestAgenticFetchToolMessageItem_AnimateBumpsVersion(t *testing.T) {
+// TestAgenticFetchToolMessageItem_AdvanceBumpsVersion is the
+// agentic-fetch counterpart of the agent-tool Advance bump test.
+// Without an explicit override the embedded base Advance would
+// never advance nested tools; this test locks in the override.
+func TestAgenticFetchToolMessageItem_AdvanceBumpsVersion(t *testing.T) {
 	t.Parallel()
 
 	sty := styles.CharmtonePantera()
@@ -523,22 +529,16 @@ func TestAgenticFetchToolMessageItem_AnimateBumpsVersion(t *testing.T) {
 	child := NewToolMessageItem(&sty, "msg", childTC, nil, false)
 	parent.AddNestedTool(child)
 
-	requireBump(t, "Animate[spinning,parent ID]", parent, func() {
-		parent.Animate(anim.StepMsg{ID: parentTC.ID})
+	childBefore := child.(versionedItem).PaintVersion()
+	requirePaintBump(t, "Advance[spinning]", parent, func() {
+		require.True(t, parent.Advance(), "a running fetch must report it is still animating")
 	})
-	requireBump(t, "Animate[spinning,nested ID]", parent, func() {
-		parent.Animate(anim.StepMsg{ID: childTC.ID})
-	})
-	requireNoBump(t, "Animate[spinning,foreign ID]", parent, func() {
-		parent.Animate(anim.StepMsg{ID: "unrelated"})
-	})
+	require.Greater(t, child.(versionedItem).PaintVersion(), childBefore,
+		"advancing the parent must advance nested tools too")
 
 	parent.SetResult(&message.ToolResult{ToolCallID: parentTC.ID, Content: "done"})
-	requireNoBump(t, "Animate[finished,parent ID]", parent, func() {
-		parent.Animate(anim.StepMsg{ID: parentTC.ID})
-	})
-	requireNoBump(t, "Animate[finished,nested ID]", parent, func() {
-		parent.Animate(anim.StepMsg{ID: childTC.ID})
+	requireNoBump(t, "Advance[finished]", parent, func() {
+		require.False(t, parent.Advance(), "a finished fetch must report it stopped animating")
 	})
 }
 

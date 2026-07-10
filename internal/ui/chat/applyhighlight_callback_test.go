@@ -12,7 +12,7 @@ import (
 // renderCountingItem wraps a real chat item and counts Render calls
 // to expose the list-level cache behaviour to tests. The wrapper
 // forwards the list.Item methods exercised by this test — Render,
-// Version, Finished — plus the list.Highlightable surface
+// PaintVersion, LayoutVersion, Finished — plus the list.Highlightable
 // (SetHighlight / Highlight) used by the callback-driven scenario.
 // Focus is not exercised here, so list.Focusable is not forwarded;
 // add SetFocused/IsFocused if a future test needs to drive focus
@@ -32,8 +32,12 @@ func (r *renderCountingItem) Render(width int) string {
 	return r.inner.Render(width)
 }
 
-func (r *renderCountingItem) Version() uint64 {
-	return r.inner.(versionedItem).Version()
+func (r *renderCountingItem) PaintVersion() uint64 {
+	return r.inner.(versionedItem).PaintVersion()
+}
+
+func (r *renderCountingItem) LayoutVersion() uint64 {
+	return r.inner.(versionedItem).LayoutVersion()
 }
 
 func (r *renderCountingItem) Finished() bool {

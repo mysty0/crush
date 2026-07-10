@@ -190,73 +190,23 @@ func NewAssistantMessageItem(sty *styles.Styles, message *message.Message) Messa
 	return a
 }
 
-// StartAnimation starts the assistant message animation if it should be spinning.
-func (a *AssistantMessageItem) StartAnimation() tea.Cmd {
+// Advance progresses the assistant "thinking" spinner by one frame
+// while the message is still streaming.
+//
+// Bumps the F6 list-cache version so the next draw re-renders this
+// item; see baseToolMessageItem.Advance for the rationale.
+func (a *AssistantMessageItem) Advance() bool {
 	if !a.isSpinning() {
-		return nil
+		return false
 	}
-	return a.anim.Start()
-}
-
-// Animate progresses the assistant message animation if it should be spinning.
-func (a *AssistantMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
-	if !a.isSpinning() {
-		return nil
-	}
-	// Bump the F6 list-cache version so the next draw re-renders
-	// this item: a spinner tick mutates anim's internal frame
-	// counter, which changes the rendered output but is invisible
-	// to the per-section content hashes. Without the bump the
-	// list cache would serve the previously rendered frame
-	// indefinitely and the spinner would appear frozen.
 	a.Bump()
-	return a.anim.Animate(msg)
+	a.anim.Advance()
+	return true
 }
 
 // ID implements MessageItem.
 func (a *AssistantMessageItem) ID() string {
 	return a.message.ID
-}
-
-// EstimatedHeight implements list.HeightEstimator. It cheaply estimates
-// the rendered height (in lines) from the raw content and reasoning text
-// without running the expensive markdown renderer, so the list can size
-// its scrollbar without rendering every off-screen message. The estimate
-// is refined to the exact height as soon as the item is scrolled into
-// view and actually rendered.
-func (a *AssistantMessageItem) EstimatedHeight(width int) int {
-	w := cappedMessageWidth(width)
-	if w <= 0 {
-		w = 80
-	}
-	content := a.message.Content().Text
-	thinking := a.message.ReasoningContent().Thinking
-	return estimateWrappedLines(content, w) + estimateWrappedLines(thinking, w) + 1
-}
-
-// estimateWrappedLines approximates how many terminal rows a block of
-// text occupies at the given width by counting newlines and adding wrap
-// rows for lines longer than the width. It intentionally trades accuracy
-// for speed.
-func estimateWrappedLines(text string, width int) int {
-	if text == "" {
-		return 0
-	}
-	if width <= 0 {
-		width = 80
-	}
-	lines := 0
-	for _, ln := range strings.Split(text, "\n") {
-		// Use rune count as a cheap width proxy; good enough for a
-		// scrollbar estimate that gets corrected on render.
-		n := len([]rune(ln))
-		if n <= width {
-			lines++
-		} else {
-			lines += (n + width - 1) / width
-		}
-	}
-	return lines
 }
 
 // RawRender implements [MessageItem].
@@ -633,24 +583,24 @@ func (a *AssistantMessageItem) HasNoOutput() bool {
 // sub-section caches whose source text or extras changed are
 // invalidated; the others survive and serve cache hits on the next
 // RawRender.
-func (a *AssistantMessageItem) SetMessage(msg *message.Message) tea.Cmd {
-	wasSpinning := a.isSpinning()
+func (a *AssistantMessageItem) SetMessage(msg *message.Message) {
 	a.message = msg
 	// Bump the F6 version even if the underlying *message.Message
 	// pointer is identical: callers may have mutated the message in
 	// place (delta append) and we cannot tell from here. The
 	// per-section caches dedupe identical content via FNV-64 hashes,
 	// so a redundant bump only costs one list-cache repopulation.
-	a.Bump()
+	// Streaming text grows the message, changing its rendered height, so
+	// bump the layout version to force a re-measure.
+	a.BumpLayout()
 	// The prefix cache is keyed by a fingerprint that includes every
 	// section's source hash, so an unchanged section keeps its prefix
 	// cache valid while a changed section forces a miss naturally.
 	// Section caches themselves are content-keyed, so they do not
-	// need an explicit drop here either.
-	if !wasSpinning && a.isSpinning() {
-		return a.StartAnimation()
-	}
-	return nil
+	// need an explicit drop here either. If this update transitions
+	// the item into a spinning state, the UI's animation clock (which
+	// the model restarts on every message event) picks it up on the
+	// next frame.
 }
 
 // Finished implements list.Item. The assistant message is freezable
@@ -712,7 +662,9 @@ func (a *AssistantMessageItem) ToggleExpanded() bool {
 	// not byte-identical to monolithic ones. Drop the prefix cache
 	// so the next render is clean.
 	a.streamingThinking.Reset()
-	a.Bump()
+	// Cycling the thinking view mode reveals or hides thinking lines,
+	// changing the rendered height.
+	a.BumpLayout()
 	return a.thinkingViewMode != thinkingCollapsed
 }
 
