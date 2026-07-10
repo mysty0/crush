@@ -318,6 +318,10 @@ func (w *ClientWorkspace) AgentRegenerateTitle(ctx context.Context, sessionID st
 	return w.client.AgentRegenerateTitle(ctx, w.workspaceID(), sessionID)
 }
 
+func (w *ClientWorkspace) AgentReconcileStuckSession(ctx context.Context, sessionID string) (int, error) {
+	return w.client.AgentReconcileStuckSession(ctx, w.workspaceID(), sessionID)
+}
+
 func (w *ClientWorkspace) UpdateAgentModel(ctx context.Context) error {
 	return w.client.UpdateAgent(ctx, w.workspaceID())
 }

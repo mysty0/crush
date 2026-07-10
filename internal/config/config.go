@@ -860,6 +860,8 @@ func allToolNames() []string {
 		"ScheduleWakeup",
 		"ScheduleList",
 		"ScheduleCancel",
+		"AgentList",
+		"AgentProgress",
 		"Glob",
 		"Grep",
 		"ls",
@@ -893,11 +895,11 @@ func resolveReadOnlyTools(tools []string) []string {
 // ScheduleCron, ScheduleWakeup). agentic_fetch is kept — its internal
 // agent has a fixed, non-recursive tool set — so a write sub-agent can
 // still research the web while remaining unable to nest task agents or
-// schedule background work of its own. ScheduleList/ScheduleCancel are
-// left out too, since they only make sense alongside the ability to
-// create tasks in the first place.
+// schedule background work of its own. ScheduleList/ScheduleCancel and
+// AgentList/AgentProgress are left out too, since they only make sense
+// alongside the ability to create tasks in the first place.
 func resolveWritableSubagentTools(tools []string) []string {
-	recursiveTools := []string{"agent", "Workflow", "ScheduleCron", "ScheduleWakeup", "ScheduleList", "ScheduleCancel"}
+	recursiveTools := []string{"agent", "Workflow", "ScheduleCron", "ScheduleWakeup", "ScheduleList", "ScheduleCancel", "AgentList", "AgentProgress"}
 	return filterSlice(tools, recursiveTools, false)
 }
 

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -10,9 +11,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/diff"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/history"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/rewind"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/tmux"
@@ -109,7 +112,75 @@ func (m *UI) loadSession(sessionID string) tea.Cmd {
 			readFiles: readFiles,
 		}
 	}
-	return tea.Batch(load, m.reportCurrentSession(sessionID))
+	return tea.Batch(load, m.reportCurrentSession(sessionID), m.reconcileStuckSession(sessionID))
+}
+
+// lastSessionModel returns the provider/model of the most recent
+// assistant message in msgs that recorded one, so a session can be
+// reopened using the same model it was last using instead of whatever
+// model happens to be globally selected right now. ok is false if no
+// assistant message in the session recorded a model (e.g. an empty or
+// not-yet-responded-to session).
+func lastSessionModel(msgs []message.Message) (provider, model string, ok bool) {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg := msgs[i]
+		if msg.Role != message.Assistant || msg.Model == "" || msg.Provider == "" {
+			continue
+		}
+		return msg.Provider, msg.Model, true
+	}
+	return "", "", false
+}
+
+// restoreSessionModel switches the active large model to whichever
+// model most recently produced output in this session, if different
+// from the currently active model and still usable — provider
+// configured with credentials and model still known to it. This makes
+// reopening a session pick up right where it left off instead of
+// silently continuing with whatever model happens to be globally
+// selected. Best-effort and silent otherwise: a session whose model
+// is no longer available (e.g. removed from config) simply keeps
+// using the current one, and this never prompts for
+// re-authentication on what is otherwise a silent session switch.
+func (m *UI) restoreSessionModel(msgs []message.Message) tea.Cmd {
+	if !m.com.Workspace.AgentIsReady() {
+		return nil
+	}
+	provider, model, ok := lastSessionModel(msgs)
+	if !ok {
+		return nil
+	}
+
+	current := m.com.Workspace.AgentModel()
+	if current.ModelCfg.Provider == provider && current.ModelCfg.Model == model {
+		return nil
+	}
+
+	cfg := m.com.Config()
+	if cfg == nil {
+		return nil
+	}
+	if _, configured := cfg.Providers.Get(provider); !configured {
+		return nil
+	}
+	catwalkModel := cfg.GetModel(provider, model)
+	if catwalkModel == nil {
+		return nil
+	}
+
+	selected := config.SelectedModel{Model: model, Provider: provider}
+	if err := m.com.Workspace.UpdatePreferredModel(config.ScopeGlobal, config.SelectedModelTypeLarge, selected); err != nil {
+		return util.ReportError(err)
+	}
+	m.applyThemeForProvider(provider)
+
+	modelName := cmp.Or(catwalkModel.Name, model)
+	return func() tea.Msg {
+		if err := m.com.Workspace.UpdateAgentModel(context.Background()); err != nil {
+			return util.ReportError(err)
+		}
+		return util.NewInfoMsg(fmt.Sprintf("Restored session model: %s", modelName))
+	}
 }
 
 // reportCurrentSession returns a fire-and-forget tea.Cmd that
@@ -121,6 +192,22 @@ func (m *UI) reportCurrentSession(sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		if err := m.com.Workspace.SetCurrentSession(context.Background(), sessionID); err != nil {
 			slog.Debug("Failed to report current session", "session_id", sessionID, "error", err)
+		}
+		return nil
+	}
+}
+
+// reconcileStuckSession asynchronously reconciles any tool calls left
+// unfinished by an interrupted run (e.g. a sub-agent or workflow
+// still "running" because the app was closed or crashed mid-turn) in
+// sessionID and its descendant sessions. It is fire-and-forget: the
+// coordinator's writes flow back through the same pubsub events a
+// live run would emit, so the chat updates on its own once each
+// write lands, matching how a live cancellation is reflected today.
+func (m *UI) reconcileStuckSession(sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := m.com.Workspace.AgentReconcileStuckSession(context.Background(), sessionID); err != nil {
+			slog.Debug("Failed to reconcile stuck sub-agent/workflow tool calls", "session_id", sessionID, "error", err)
 		}
 		return nil
 	}

@@ -123,12 +123,8 @@ func (m *UI) handleSubAgentMessagesLoaded(msg subAgentMessagesLoadedMsg) tea.Cmd
 	}
 	var cmds []tea.Cmd
 	items := m.buildSubAgentMessageItems(msg.messages)
-	for _, item := range items {
-		if animatable, ok := item.(chat.Animatable); ok {
-			if cmd := animatable.StartAnimation(); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
+	if cmd := m.startAnimClock(); cmd != nil {
+		cmds = append(cmds, cmd)
 	}
 	if cmd := m.subAgentChat.SetMessages(items...); cmd != nil {
 		cmds = append(cmds, cmd)
@@ -154,12 +150,8 @@ func (m *UI) appendSubAgentMessage(msg message.Message) tea.Cmd {
 			return nil
 		}
 		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil)
-		for _, item := range items {
-			if animatable, ok := item.(chat.Animatable); ok {
-				if cmd := animatable.StartAnimation(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
+		if cmd := m.startAnimClock(); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 		m.subAgentChat.AppendMessages(items...)
 	case message.Tool:
@@ -171,7 +163,7 @@ func (m *UI) appendSubAgentMessage(msg message.Message) tea.Cmd {
 	}
 
 	if m.subAgentChat.Follow() {
-		if cmd := m.subAgentChat.ScrollToBottomAndAnimate(); cmd != nil {
+		if cmd := m.subAgentChat.ScrollToBottom(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -213,16 +205,12 @@ func (m *UI) updateSubAgentMessage(msg message.Message) tea.Cmd {
 			items = append(items, chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false))
 		}
 	}
-	for _, item := range items {
-		if animatable, ok := item.(chat.Animatable); ok {
-			if cmd := animatable.StartAnimation(); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
+	if cmd := m.startAnimClock(); cmd != nil {
+		cmds = append(cmds, cmd)
 	}
 	m.subAgentChat.AppendMessages(items...)
 	if m.subAgentChat.Follow() {
-		if cmd := m.subAgentChat.ScrollToBottomAndAnimate(); cmd != nil {
+		if cmd := m.subAgentChat.ScrollToBottom(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -338,8 +326,16 @@ func (m *UI) runningSubAgents() []subAgentEntry {
 		tc := toolItem.ToolCall()
 		var params agent.AgentParams
 		_ = json.Unmarshal([]byte(tc.Input), &params)
+		// A resumed call reuses an existing session (see
+		// AgentParams.ResumeSessionID) rather than the one derived from
+		// this tool call's own message/tool-call ID, which would be
+		// empty since no agent() dispatch created it.
+		sessionID := params.ResumeSessionID
+		if sessionID == "" {
+			sessionID = m.com.Workspace.CreateAgentToolSessionID(toolItem.MessageID(), tc.ID)
+		}
 		entries = append(entries, subAgentEntry{
-			SessionID:  m.com.Workspace.CreateAgentToolSessionID(toolItem.MessageID(), tc.ID),
+			SessionID:  sessionID,
 			ToolCallID: tc.ID,
 			Prompt:     params.Prompt,
 		})

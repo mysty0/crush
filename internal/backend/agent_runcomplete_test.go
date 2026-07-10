@@ -61,6 +61,9 @@ func (c *errorCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool) {
 func (c *errorCoordinator) CancelWorkflow(string)                         {}
 func (c *errorCoordinator) RunningSchedules() []agent.ScheduledTaskStatus { return nil }
 func (c *errorCoordinator) CancelSchedule(string)                         {}
+func (c *errorCoordinator) ReconcileStuckSession(context.Context, string) (int, error) {
+	return 0, nil
+}
 
 // insertRunCompleteWorkspace installs a workspace backed by a real
 // app.App (so the runCompletions broker exists) with the given

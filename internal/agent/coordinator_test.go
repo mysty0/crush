@@ -11,6 +11,7 @@ import (
 	"charm.land/fantasy/providers/bedrock"
 	"charm.land/fantasy/providers/openaicompat"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,6 +21,11 @@ type mockSessionAgent struct {
 	model     Model
 	runFunc   func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error)
 	cancelled []string
+	// busySessionID, when non-empty, makes IsSessionBusy report true for
+	// that one session ID (used to test resume-while-busy rejection).
+	busySessionID string
+	// cancelAllCalled records whether CancelAll was invoked.
+	cancelAllCalled bool
 }
 
 func (m *mockSessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
@@ -41,8 +47,10 @@ func (m *mockSessionAgent) Cancel(sessionID string) {
 func (m *mockSessionAgent) CancelKeepQueue(sessionID string) {
 	m.cancelled = append(m.cancelled, sessionID)
 }
-func (m *mockSessionAgent) CancelAll()                                  {}
-func (m *mockSessionAgent) IsSessionBusy(sessionID string) bool         { return false }
+func (m *mockSessionAgent) CancelAll() { m.cancelAllCalled = true }
+func (m *mockSessionAgent) IsSessionBusy(sessionID string) bool {
+	return m.busySessionID != "" && m.busySessionID == sessionID
+}
 func (m *mockSessionAgent) IsBusy() bool                                { return false }
 func (m *mockSessionAgent) QueuedPrompts(sessionID string) int          { return 0 }
 func (m *mockSessionAgent) QueuedPromptsList(sessionID string) []string { return nil }
@@ -58,9 +66,10 @@ func newTestCoordinator(t *testing.T, env fakeEnv, providerID string, providerCf
 	require.NoError(t, err)
 	cfg.Config().Providers.Set(providerID, providerCfg)
 	return &coordinator{
-		cfg:      cfg,
-		sessions: env.sessions,
-		messages: env.messages,
+		cfg:       cfg,
+		sessions:  env.sessions,
+		messages:  env.messages,
+		subAgents: newSubAgentRegistry(),
 	}
 }
 
@@ -316,7 +325,11 @@ func TestRunSubAgent(t *testing.T) {
 		// runSubAgent returns (errorResponse, nil) when agent.Run fails — not a Go error.
 		require.NoError(t, err)
 		assert.True(t, resp.IsError)
-		assert.Equal(t, "Failed to generate response: provider request failed", resp.Content)
+		// The error now also carries the session ID and a resume hint so
+		// the caller can continue instead of starting over (see
+		// TestRunSubAgent_Resume).
+		assert.Contains(t, resp.Content, "Failed to generate response: provider request failed")
+		assert.Contains(t, resp.Content, `resume_session_id="msg-1$$call-1"`)
 	})
 
 	t.Run("session setup callback is invoked", func(t *testing.T) {
@@ -380,6 +393,127 @@ func TestRunSubAgent(t *testing.T) {
 		updated, err := env.sessions.Get(t.Context(), parentSession.ID)
 		require.NoError(t, err)
 		assert.InDelta(t, 0.05, updated.Cost, 1e-9)
+	})
+}
+
+func TestRunSubAgent_Resume(t *testing.T) {
+	const providerID = "test-provider"
+	providerCfg := config.ProviderConfig{ID: providerID}
+
+	t.Run("continues an existing session", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+		coord.taskAgents = csync.NewMap[string, SessionAgent]()
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+		childSession, err := env.sessions.CreateTaskSession(t.Context(), "existing-child", parentSession.ID, "Original Task")
+		require.NoError(t, err)
+
+		var sawSessionID string
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			sawSessionID = call.SessionID
+			assert.Equal(t, "keep going", call.Prompt)
+			return agentResultWithText("continued"), nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:           agent,
+			SessionID:       parentSession.ID,
+			AgentMessageID:  "msg-2",
+			ToolCallID:      "call-2",
+			Prompt:          "keep going",
+			SessionTitle:    "Ignored On Resume",
+			ResumeSessionID: childSession.ID,
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Equal(t, "continued", resp.Content)
+		// The run continued the existing session, not a new one derived
+		// from AgentMessageID/ToolCallID.
+		assert.Equal(t, childSession.ID, sawSessionID)
+	})
+
+	t.Run("rejects an unknown session", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+		coord.taskAgents = csync.NewMap[string, SessionAgent]()
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			t.Fatal("should not run: resume target does not exist")
+			return nil, nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:           agent,
+			SessionID:       parentSession.ID,
+			Prompt:          "keep going",
+			ResumeSessionID: "does-not-exist",
+		})
+		require.NoError(t, err)
+		assert.True(t, resp.IsError)
+		assert.Contains(t, resp.Content, "not found")
+	})
+
+	t.Run("rejects a session from another conversation", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+		coord.taskAgents = csync.NewMap[string, SessionAgent]()
+
+		ownerSession, err := env.sessions.Create(t.Context(), "Owner")
+		require.NoError(t, err)
+		otherSession, err := env.sessions.Create(t.Context(), "Unrelated")
+		require.NoError(t, err)
+		childOfOther, err := env.sessions.CreateTaskSession(t.Context(), "child-of-other", otherSession.ID, "Task")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			t.Fatal("should not run: resume target belongs to a different conversation")
+			return nil, nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:           agent,
+			SessionID:       ownerSession.ID,
+			Prompt:          "keep going",
+			ResumeSessionID: childOfOther.ID,
+		})
+		require.NoError(t, err)
+		assert.True(t, resp.IsError)
+		assert.Contains(t, resp.Content, "does not belong")
+	})
+
+	t.Run("rejects a session that is still running", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+		childSession, err := env.sessions.CreateTaskSession(t.Context(), "busy-child", parentSession.ID, "Task")
+		require.NoError(t, err)
+
+		busyAgent := newMockAgent(providerID, 4096, nil)
+		busyAgent.busySessionID = childSession.ID
+		coord.taskAgents = csync.NewMap[string, SessionAgent]()
+		coord.taskAgents.Set("busy-key", busyAgent)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			t.Fatal("should not run: resume target is still busy")
+			return nil, nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:           agent,
+			SessionID:       parentSession.ID,
+			Prompt:          "keep going",
+			ResumeSessionID: childSession.ID,
+		})
+		require.NoError(t, err)
+		assert.True(t, resp.IsError)
+		assert.Contains(t, resp.Content, "still running")
 	})
 }
 

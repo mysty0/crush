@@ -938,6 +938,30 @@ func (c *controllerV1) handlePostWorkspaceAgentSessionRegenerateTitle(w http.Res
 	w.WriteHeader(http.StatusOK)
 }
 
+// handlePostWorkspaceAgentSessionReconcileStuck reconciles tool calls
+// left unfinished by an interrupted run in a session and its
+// descendant sub-agent/workflow sessions.
+//
+//	@Summary		Reconcile stuck sub-agent/workflow tool calls
+//	@Tags			agent
+//	@Produce		json
+//	@Param			id	path		string	true	"Workspace ID"
+//	@Param			sid	path		string	true	"Session ID"
+//	@Success		200	{object}	object
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/agent/sessions/{sid}/reconcile-stuck [post]
+func (c *controllerV1) handlePostWorkspaceAgentSessionReconcileStuck(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	fixed, err := c.backend.ReconcileStuckSession(r.Context(), id, sid)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	jsonEncode(w, fixed)
+}
+
 // handlePostWorkspaceAgentSessionShell runs a shell command in the workspace.
 //
 //	@Summary		Run shell command

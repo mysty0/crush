@@ -239,6 +239,9 @@ func (c *scriptedCoordinator) WorkflowStatus(string) (agent.WorkflowStatus, bool
 func (c *scriptedCoordinator) CancelWorkflow(string)                         {}
 func (c *scriptedCoordinator) RunningSchedules() []agent.ScheduledTaskStatus { return nil }
 func (c *scriptedCoordinator) CancelSchedule(string)                         {}
+func (c *scriptedCoordinator) ReconcileStuckSession(context.Context, string) (int, error) {
+	return 0, nil
+}
 
 // agentE2EHarness extends the SSE harness with a scripted coordinator
 // wired into the workspace's embedded app.App, so POST /agent drives a

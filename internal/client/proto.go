@@ -514,6 +514,25 @@ func (c *Client) AgentRegenerateTitle(ctx context.Context, id string, sessionID 
 	return nil
 }
 
+// AgentReconcileStuckSession reconciles tool calls left unfinished by
+// an interrupted run in a session and its descendant sub-agent or
+// workflow sessions, returning how many were reconciled.
+func (c *Client) AgentReconcileStuckSession(ctx context.Context, id string, sessionID string) (int, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/sessions/%s/reconcile-stuck", id, sessionID), nil, nil, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to reconcile stuck session: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("failed to reconcile stuck session: status code %d", rsp.StatusCode)
+	}
+	var fixed int
+	if err := json.NewDecoder(rsp.Body).Decode(&fixed); err != nil {
+		return 0, fmt.Errorf("failed to decode reconcile stuck session response: %w", err)
+	}
+	return fixed, nil
+}
+
 // InitiateAgentProcessing triggers agent initialization on the server.
 func (c *Client) InitiateAgentProcessing(ctx context.Context, id string) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/init", id), nil, nil, nil)

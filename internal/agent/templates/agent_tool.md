@@ -5,3 +5,5 @@ The sub-agent runs in its own session and reports back only its final text outpu
 The `mode` parameter controls what the sub-agent can do:
 - `read` (default): a read-only agent with Glob, Grep, ls, Read, sourcegraph, and web fetch. Use it to search for a keyword or file, gather context, or answer a question when you are not confident you will find the right match on the first try.
 - `write`: an agent that can additionally edit files and run shell commands to carry out a self-contained task end to end. Use it only when the task requires making changes. It cannot launch further sub-agents.
+
+If a sub-agent call fails or is interrupted (e.g. a canceled tool call), the error message includes that session's ID. Retry the same task with `resume_session_id` set to that ID to continue from where it left off — with the full prior message history and progress intact — instead of starting over from scratch.

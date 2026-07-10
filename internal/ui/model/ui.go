@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -27,6 +28,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
@@ -353,6 +355,12 @@ type UI struct {
 	// Todo spinner
 	todoSpinner    spinner.Model
 	todoIsSpinning bool
+
+	// Animation clock state. The UI owns a single, self-terminating
+	// tick chain that drives every spinner in every chat; see
+	// startAnimClock.
+	animClockRunning bool
+	animClockSeq     uint64
 
 	// mouse highlighting related state
 	lastClickTime time.Time
@@ -703,6 +711,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, util.ReportError(err))
 			break
 		}
+		if cmd := m.restoreSessionModel(msgs); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		if cmd := m.setSessionMessages(msgs); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -939,7 +950,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.updateLayoutAndSize()
 		if m.state == uiChat && m.chat.Follow() {
-			if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+			if cmd := m.chat.ScrollToBottom(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 		}
@@ -998,22 +1009,22 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			activeChat := m.activeChat()
 			if activeChat.Dragging() {
 				if msg.Y <= 0 {
-					if cmd := activeChat.ScrollByAndAnimate(-1); cmd != nil {
+					if cmd := activeChat.ScrollBy(-1); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 					if !activeChat.SelectedItemInView() {
 						activeChat.SelectPrev()
-						if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
+						if cmd := activeChat.ScrollToSelected(); cmd != nil {
 							cmds = append(cmds, cmd)
 						}
 					}
 				} else if msg.Y >= activeChat.Height()-1 {
-					if cmd := activeChat.ScrollByAndAnimate(1); cmd != nil {
+					if cmd := activeChat.ScrollBy(1); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 					if !activeChat.SelectedItemInView() {
 						activeChat.SelectNext()
-						if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
+						if cmd := activeChat.ScrollToSelected(); cmd != nil {
 							cmds = append(cmds, cmd)
 						}
 					}
@@ -1070,7 +1081,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if lines == 0 {
 				break
 			}
-			if cmd := activeChat.ScrollByAndAnimate(lines); cmd != nil {
+			if cmd := activeChat.ScrollBy(lines); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 			if !activeChat.SelectedItemInView() {
@@ -1081,26 +1092,14 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					activeChat.SelectNext()
 				}
-				if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
+				if cmd := activeChat.ScrollToSelected(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			}
 		}
-	case anim.StepMsg:
-		if m.state == uiChat {
-			if cmd := m.chat.Animate(msg); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			if m.subAgentChat != nil {
-				if cmd := m.subAgentChat.Animate(msg); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
-			if m.activeChat().Follow() {
-				if cmd := m.activeChat().ScrollToBottomAndAnimate(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
+	case animFrameMsg:
+		if cmd := m.advanceAnimFrame(msg); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 	case scrollbarHideMsg:
 		if m.state == uiChat {
@@ -1144,7 +1143,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// bottom; otherwise keep their scroll position so they can
 				// read earlier output while the command runs.
 				if m.chat.Follow() {
-					if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+					if cmd := m.chat.ScrollToBottom(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 				}
@@ -1154,7 +1153,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if item := m.chat.MessageItem(msg.Payload.ToolCallID); item != nil {
 			if streamer, ok := item.(chat.PartialOutputSetter); ok {
 				streamer.SetPartialOutput(msg.Payload.Output)
-				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+				if cmd := m.chat.ScrollToBottom(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			}
@@ -1177,7 +1176,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if shellItem, ok := item.(*chat.ShellItem); ok {
 				shellItem.AppendOutput(msg.Chunk)
 				if m.chat.Follow() {
-					if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+					if cmd := m.chat.ScrollToBottom(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 				}
@@ -1207,7 +1206,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if item := m.chat.MessageItem(msg.PendingID); item != nil {
 				if shellItem, ok := item.(*chat.ShellItem); ok {
 					shellItem.Complete(msg.Output, msg.ExitCode)
-					if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+					if cmd := m.chat.ScrollToBottom(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 					completed = true
@@ -1217,7 +1216,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !completed {
 			item := chat.NewShellItem(m.com.Styles, msg.Command, msg.Output, msg.ExitCode)
 			m.chat.AppendMessages(item)
-			if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+			if cmd := m.chat.ScrollToBottom(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 		}
@@ -1293,6 +1292,68 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// animFrameMsg is one frame of the UI's single animation clock. seq
+// identifies the clock generation it belongs to: a frame whose seq no
+// longer matches the UI's current generation is a leftover from an
+// abandoned chain and is dropped, so at most one chain is ever live.
+type animFrameMsg struct {
+	seq uint64
+}
+
+// animFrameCmd schedules the next animation frame for the given clock
+// generation.
+func animFrameCmd(seq uint64) tea.Cmd {
+	return tea.Tick(anim.Interval(), func(time.Time) tea.Msg {
+		return animFrameMsg{seq: seq}
+	})
+}
+
+// startAnimClock starts the UI's animation clock if it isn't already
+// running, returning the command for its first frame. The clock is
+// the ONLY place animation frames are ever scheduled: items advance
+// their spinners synchronously when a frame arrives (see
+// advanceAnimFrame) and never schedule ticks of their own, so the
+// feedback loop that once let concurrent tick chains multiply (one
+// StepMsg fanning out to the same tool call rendered in two chats,
+// each returning a new tick) is structurally impossible — no handler
+// of a frame can produce more than the one follow-up frame the clock
+// itself schedules.
+//
+// Call it (appending the possibly-nil command) from any event that
+// may cause an item to start spinning: it is cheap, idempotent while
+// the clock runs, and the clock stops itself on the first frame where
+// nothing is animating anymore.
+func (m *UI) startAnimClock() tea.Cmd {
+	if m.animClockRunning {
+		return nil
+	}
+	m.animClockRunning = true
+	m.animClockSeq++
+	return animFrameCmd(m.animClockSeq)
+}
+
+// advanceAnimFrame handles one animation clock frame: it advances
+// every spinning item in both chats by exactly one step and schedules
+// the next frame, or stops the clock when nothing is animating. The
+// sub-agent chat mirrors tool calls that also appear nested inside
+// the main chat; advancing both here is harmless duplication of a few
+// atomic increments, not a second tick chain.
+func (m *UI) advanceAnimFrame(msg animFrameMsg) tea.Cmd {
+	if msg.seq != m.animClockSeq {
+		// Stale frame from an abandoned clock generation.
+		return nil
+	}
+	active := m.chat.AdvanceAnimations()
+	if m.subAgentChat != nil {
+		active = m.subAgentChat.AdvanceAnimations() || active
+	}
+	if !active {
+		m.animClockRunning = false
+		return nil
+	}
+	return animFrameCmd(msg.seq)
+}
+
 // setSessionMessages sets the messages for the current session in the chat
 func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 	var cmds []tea.Cmd
@@ -1327,20 +1388,13 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 	// Load nested tool calls for agent/agentic_fetch tools.
 	m.loadNestedToolCalls(items)
 
-	// If the user switches between sessions while the agent is working we want
-	// to make sure the animations are shown.
-	for _, item := range items {
-		if animatable, ok := item.(chat.Animatable); ok {
-			if cmd := animatable.StartAnimation(); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
-	}
-
 	if cmd := m.chat.SetMessages(items...); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
-	if cmd := m.chat.RestartPausedVisibleAnimations(); cmd != nil {
+	// If the user switches between sessions while the agent is working
+	// the loaded items may still be spinning; make sure the animation
+	// clock is running so they animate.
+	if cmd := m.startAnimClock(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
 	m.chat.SelectLast()
@@ -1362,8 +1416,20 @@ func (m *UI) loadNestedToolCalls(items []chat.MessageItem) {
 		tc := toolItem.ToolCall()
 		messageID := toolItem.MessageID()
 
-		// Get the agent tool session ID.
-		agentSessionID := m.com.Workspace.CreateAgentToolSessionID(messageID, tc.ID)
+		// Get the agent tool session ID. A resumed "agent" call reuses
+		// an existing session (see agent.AgentParams.ResumeSessionID)
+		// rather than the one derived from this tool call's own
+		// message/tool-call ID, which would be empty since no agent()
+		// dispatch created it.
+		agentSessionID := ""
+		if tc.Name == agent.AgentToolName {
+			var params agent.AgentParams
+			_ = json.Unmarshal([]byte(tc.Input), &params)
+			agentSessionID = params.ResumeSessionID
+		}
+		if agentSessionID == "" {
+			agentSessionID = m.com.Workspace.CreateAgentToolSessionID(messageID, tc.ID)
+		}
 
 		// Fetch nested messages.
 		nestedMsgs, err := m.com.Workspace.ListMessages(context.Background(), agentSessionID)
@@ -1448,15 +1514,11 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 		}
 		m.lastUserMessageTime = msg.CreatedAt
 		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil)
-		for _, item := range items {
-			if animatable, ok := item.(chat.Animatable); ok {
-				if cmd := animatable.StartAnimation(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
+		if cmd := m.startAnimClock(); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 		m.chat.AppendMessages(items...)
-		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+		if cmd := m.chat.ScrollToBottom(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	case message.Assistant:
@@ -1467,16 +1529,12 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 		// before this CreatedEvent; re-adding them here would leave an
 		// orphaned duplicate (e.g. a bash item stuck on its spinner).
 		items = m.dropExistingItems(items)
-		for _, item := range items {
-			if animatable, ok := item.(chat.Animatable); ok {
-				if cmd := animatable.StartAnimation(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
+		if cmd := m.startAnimClock(); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 		m.chat.AppendMessages(items...)
 		if m.chat.Follow() {
-			if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+			if cmd := m.chat.ScrollToBottom(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 		}
@@ -1484,7 +1542,7 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 			infoItem := chat.NewAssistantInfoItem(m.com.Styles, &msg, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
 			m.chat.AppendMessages(infoItem)
 			if m.chat.Follow() {
-				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+				if cmd := m.chat.ScrollToBottom(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			}
@@ -1506,7 +1564,7 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 			if toolMsgItem, ok := toolItem.(chat.ToolMessageItem); ok {
 				toolMsgItem.SetResult(&tr)
 				if m.chat.Follow() {
-					if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+					if cmd := m.chat.ScrollToBottom(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 				}
@@ -1595,27 +1653,92 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 			}
 		}
 		if existingToolItem == nil {
-			items = append(items, chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false))
+			newItem := chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false)
+			if tc.Name == agent.AgentToolName {
+				m.seedResumedAgentTools(newItem, tc)
+			}
+			items = append(items, newItem)
 		}
 	}
 
-	for _, item := range items {
-		if animatable, ok := item.(chat.Animatable); ok {
-			if cmd := animatable.StartAnimation(); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
+	if cmd := m.startAnimClock(); cmd != nil {
+		cmds = append(cmds, cmd)
 	}
 
 	m.chat.AppendMessages(items...)
 	if m.chat.Follow() {
-		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+		if cmd := m.chat.ScrollToBottom(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 		m.chat.SelectLast()
 	}
 
 	return tea.Sequence(cmds...)
+}
+
+// seedResumedAgentTools pre-populates a freshly created "agent" tool
+// item that resumes a previous session (see agent.AgentParams.ResumeSessionID)
+// with the nested tool history already accumulated by whichever chat item
+// most recently owned that session. Without this, a resumed call's Task
+// bubble would start visually empty even though the underlying session's
+// prior progress is fully intact on disk -- easy to mistake for "nothing
+// is happening" when in fact only the display, not the data, would be
+// starting from scratch. A no-op if tc isn't a resume, or if no prior
+// owner can be found (e.g. it scrolled out of a reloaded session's
+// in-memory chat).
+func (m *UI) seedResumedAgentTools(item chat.MessageItem, tc message.ToolCall) {
+	container, ok := item.(chat.NestedToolContainer)
+	if !ok {
+		return
+	}
+	var params agent.AgentParams
+	if err := json.Unmarshal([]byte(tc.Input), &params); err != nil || params.ResumeSessionID == "" {
+		return
+	}
+	priorToolCallID, ok := m.resolveAgentToolCallID(params.ResumeSessionID)
+	if !ok {
+		return
+	}
+	priorContainer, ok := m.chat.MessageItem(priorToolCallID).(chat.NestedToolContainer)
+	if !ok {
+		return
+	}
+	// Clone, not alias: handleChildSessionMessage appends to a
+	// container's nested-tools slice in place, and sharing the backing
+	// array with the prior item risks one item's append silently
+	// corrupting the other's (in)visible tail.
+	container.SetNestedTools(slices.Clone(priorContainer.NestedTools()))
+}
+
+// resolveAgentToolCallID finds the tool-call ID of the "agent" tool call
+// that owns childSessionID -- the child session a nested message event
+// just arrived for. Normally this is derived directly from the session
+// ID (see session.Service.CreateAgentToolSessionID / ParseAgentToolSessionID),
+// which works because a fresh dispatch's session ID always encodes its own
+// tool-call ID. A resumed call (see agent.AgentParams.ResumeSessionID)
+// breaks that: it reuses an older session, so the encoded tool-call ID
+// belongs to whichever call first created that session -- typically a
+// finished (canceled/errored) one -- not the call currently running
+// against it. Search running tool calls for one whose resume target
+// matches first; only fall back to the naive parse if none does, so a
+// resume's live updates land on the active card instead of the stale one.
+func (m *UI) resolveAgentToolCallID(childSessionID string) (toolCallID string, ok bool) {
+	for _, item := range m.chat.Items() {
+		toolItem, isToolItem := item.(chat.ToolMessageItem)
+		if !isToolItem || toolItem.Status() != chat.ToolStatusRunning {
+			continue
+		}
+		tc := toolItem.ToolCall()
+		if tc.Name != agent.AgentToolName {
+			continue
+		}
+		var params agent.AgentParams
+		if err := json.Unmarshal([]byte(tc.Input), &params); err == nil && params.ResumeSessionID == childSessionID {
+			return tc.ID, true
+		}
+	}
+	_, parsedToolCallID, parsedOK := m.com.Workspace.ParseAgentToolSessionID(childSessionID)
+	return parsedToolCallID, parsedOK
 }
 
 // handleChildSessionMessage handles messages from child sessions (agent tools).
@@ -1627,7 +1750,7 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 	// text-only sub-agent turns (no nested tool calls), so the model
 	// label appears as soon as the sub-agent produces its first message.
 	childSessionID := event.Payload.SessionID
-	_, toolCallID, ok := m.com.Workspace.ParseAgentToolSessionID(childSessionID)
+	toolCallID, ok := m.resolveAgentToolCallID(childSessionID)
 	if !ok {
 		return nil
 	}
@@ -1677,10 +1800,8 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 			if simplifiable, ok := nestedItem.(chat.Compactable); ok {
 				simplifiable.SetCompact(true)
 			}
-			if animatable, ok := nestedItem.(chat.Animatable); ok {
-				if cmd := animatable.StartAnimation(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
+			if cmd := m.startAnimClock(); cmd != nil {
+				cmds = append(cmds, cmd)
 			}
 			nestedTools = append(nestedTools, nestedItem)
 		}
@@ -1703,7 +1824,7 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 	m.chat.UpdateNestedToolIDs(toolCallID)
 
 	if m.chat.Follow() {
-		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+		if cmd := m.chat.ScrollToBottom(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 		m.chat.SelectLast()
@@ -2723,18 +2844,18 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			case key.Matches(msg, m.keyMap.Chat.ExpandAllDiffs):
 				if activeChat.ToggleAllDiffsExpanded() {
 					if activeChat.AtBottom() {
-						cmds = append(cmds, activeChat.ScrollToBottomAndAnimate())
+						cmds = append(cmds, activeChat.ScrollToBottom())
 					}
 				} else {
 					cmds = append(cmds, util.ReportInfo("No diffs to expand."))
 				}
 			case key.Matches(msg, m.keyMap.Chat.Up):
-				if cmd := activeChat.ScrollByAndAnimate(-1); cmd != nil {
+				if cmd := activeChat.ScrollBy(-1); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 				if !activeChat.SelectedItemInView() {
 					activeChat.SelectPrev()
-					if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
+					if cmd := activeChat.ScrollToSelected(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 				}
@@ -2743,52 +2864,52 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 					m.enterAgentList()
 					break
 				}
-				if cmd := activeChat.ScrollByAndAnimate(1); cmd != nil {
+				if cmd := activeChat.ScrollBy(1); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 				if !activeChat.SelectedItemInView() {
 					activeChat.SelectNext()
-					if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
+					if cmd := activeChat.ScrollToSelected(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 				}
 			case key.Matches(msg, m.keyMap.Chat.UpOneItem):
 				activeChat.SelectPrev()
-				if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
+				if cmd := activeChat.ScrollToSelected(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			case key.Matches(msg, m.keyMap.Chat.DownOneItem):
 				activeChat.SelectNext()
-				if cmd := activeChat.ScrollToSelectedAndAnimate(); cmd != nil {
+				if cmd := activeChat.ScrollToSelected(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			case key.Matches(msg, m.keyMap.Chat.HalfPageUp):
-				if cmd := activeChat.ScrollByAndAnimate(-activeChat.Height() / 2); cmd != nil {
+				if cmd := activeChat.ScrollBy(-activeChat.Height() / 2); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 				activeChat.SelectFirstInView()
 			case key.Matches(msg, m.keyMap.Chat.HalfPageDown):
-				if cmd := activeChat.ScrollByAndAnimate(activeChat.Height() / 2); cmd != nil {
+				if cmd := activeChat.ScrollBy(activeChat.Height() / 2); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 				activeChat.SelectLastInView()
 			case key.Matches(msg, m.keyMap.Chat.PageUp):
-				if cmd := activeChat.ScrollByAndAnimate(-activeChat.Height()); cmd != nil {
+				if cmd := activeChat.ScrollBy(-activeChat.Height()); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 				activeChat.SelectFirstInView()
 			case key.Matches(msg, m.keyMap.Chat.PageDown):
-				if cmd := activeChat.ScrollByAndAnimate(activeChat.Height()); cmd != nil {
+				if cmd := activeChat.ScrollBy(activeChat.Height()); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 				activeChat.SelectLastInView()
 			case key.Matches(msg, m.keyMap.Chat.Home):
-				if cmd := activeChat.ScrollToTopAndAnimate(); cmd != nil {
+				if cmd := activeChat.ScrollToTop(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 				activeChat.SelectFirst()
 			case key.Matches(msg, m.keyMap.Chat.End):
-				if cmd := activeChat.ScrollToBottomAndAnimate(); cmd != nil {
+				if cmd := activeChat.ScrollToBottom(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 				activeChat.SelectLast()
@@ -3281,7 +3402,7 @@ func (m *UI) handleTextareaHeightChange(prevHeight int) tea.Cmd {
 	}
 	m.updateLayoutAndSize()
 	if m.state == uiChat && m.chat.Follow() {
-		return m.chat.ScrollToBottomAndAnimate()
+		return m.chat.ScrollToBottom()
 	}
 	return nil
 }
@@ -3997,10 +4118,10 @@ func (m *UI) runShellCommandInternal(command string, isFirstMessage bool) tea.Cm
 	// Append a pending shell item immediately so the user sees feedback.
 	pendingItem := chat.NewPendingShellItem(m.com.Styles, command)
 	m.chat.AppendMessages(pendingItem)
-	if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+	if cmd := m.chat.ScrollToBottom(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
-	if cmd := pendingItem.StartAnimation(); cmd != nil {
+	if cmd := m.startAnimClock(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
 
