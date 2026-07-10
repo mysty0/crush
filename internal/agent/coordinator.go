@@ -36,7 +36,9 @@ import (
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/oauth/codex"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
+	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
@@ -1196,6 +1198,60 @@ func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, optio
 	return google.New(opts...)
 }
 
+// buildCodexProvider builds the OpenAI Codex (ChatGPT subscription)
+// provider. It talks the OpenAI Responses API against the ChatGPT backend
+// and injects the subscription bearer, chatgpt-account-id, and Codex beta
+// headers on every request via codex.AuthTransport.
+func (c *coordinator) buildCodexProvider(baseURL, apiKey string, headers map[string]string) (fantasy.Provider, error) {
+	if baseURL == "" {
+		baseURL = codex.BaseURL
+	}
+	var base http.RoundTripper = http.DefaultTransport
+	if c.cfg.Config().Options.Debug {
+		base = log.NewHTTPClient().Transport
+	}
+	httpClient := &http.Client{Transport: codex.NewAuthTransport(base, apiKey)}
+	opts := []openai.Option{
+		openai.WithBaseURL(baseURL),
+		openai.WithUseResponsesAPI(),
+		openai.WithAPIKey(apiKey),
+		openai.WithHTTPClient(httpClient),
+	}
+	if len(headers) > 0 {
+		opts = append(opts, openai.WithHeaders(headers))
+	}
+	return openai.New(opts...)
+}
+
+// buildGeminiCliProvider builds the Gemini CLI (Cloud Code Assist)
+// provider. Requests are driven through the standard fantasy google
+// provider but rewritten onto the Code Assist wire format (and signed with
+// the subscription bearer + discovered project id) by geminicli.WireTransport.
+func (c *coordinator) buildGeminiCliProvider(apiKey string, headers, oauthExtra map[string]string) (fantasy.Provider, error) {
+	projectID := ""
+	if oauthExtra != nil {
+		projectID = oauthExtra["project_id"]
+	}
+	var base http.RoundTripper = http.DefaultTransport
+	if c.cfg.Config().Options.Debug {
+		base = log.NewHTTPClient().Transport
+	}
+	httpClient := &http.Client{Transport: &geminicli.WireTransport{
+		Base:        base,
+		AccessToken: apiKey,
+		ProjectID:   projectID,
+	}}
+	opts := []google.Option{
+		google.WithBaseURL(geminicli.BaseURL),
+		google.WithSkipAuth(true),
+		google.WithHTTPClient(httpClient),
+	}
+	if len(headers) > 0 {
+		opts = append(opts, google.WithHeaders(headers))
+	}
+	return google.New(opts...)
+}
+
 func (c *coordinator) isAnthropicThinking(model config.SelectedModel) bool {
 	if model.Think {
 		return true
@@ -1228,6 +1284,10 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 			baseURL = strings.TrimSuffix(baseURL, "/v1")
 			return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID)
 		}
+	case codex.ProviderID:
+		return c.buildCodexProvider(baseURL, apiKey, headers)
+	case geminicli.ProviderID:
+		return c.buildGeminiCliProvider(apiKey, headers, providerCfg.OAuthExtra)
 	}
 
 	switch providerCfg.Type {

@@ -12,7 +12,9 @@ import (
 	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/oauth"
+	"github.com/charmbracelet/crush/internal/oauth/codex"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
+	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 	"github.com/charmbracelet/crush/internal/oauth/hyper"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/pkg/browser"
@@ -25,13 +27,22 @@ var loginCmd = &cobra.Command{
 	Short:   "Login Crush to a platform",
 	Long: `Login Crush to a specified platform.
 The platform should be provided as an argument.
-Available platforms are: hyper, copilot.`,
+Available platforms are: hyper, copilot, codex, gemini.`,
 	Example: `
 # Authenticate with Charm Hyper
 crush login
 
 # Authenticate with GitHub Copilot
 crush login copilot
+
+# Authenticate with OpenAI Codex (ChatGPT subscription)
+crush login codex
+
+# Authenticate with OpenAI Codex using the device-code flow (headless)
+crush login codex --device
+
+# Authenticate with Gemini CLI (Cloud Code Assist)
+crush login gemini
 
 # Force re-authentication even if already logged in
 crush login -f copilot
@@ -41,6 +52,8 @@ crush login -f copilot
 		"copilot",
 		"github",
 		"github-copilot",
+		"codex",
+		"gemini",
 	},
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -61,19 +74,25 @@ crush login -f copilot
 			provider = args[0]
 		}
 		force, _ := cmd.Flags().GetBool("force")
+		device, _ := cmd.Flags().GetBool("device")
 		switch provider {
 		case "hyper":
 			return loginHyper(c, ws.ID, force)
 		case "copilot", "github", "github-copilot":
 			return loginCopilot(c, ws.ID, force)
+		case "codex", "openai-codex", "chatgpt":
+			return loginCodex(c, ws.ID, force, device)
+		case "gemini", "gemini-cli", "google-gemini-cli":
+			return loginGemini(c, ws.ID, force)
 		default:
-			return fmt.Errorf("unknown platform: %s", args[0])
+			return fmt.Errorf("unknown platform: %s", provider)
 		}
 	},
 }
 
 func init() {
 	loginCmd.Flags().BoolP("force", "f", false, "Force re-authentication even if already logged in")
+	loginCmd.Flags().Bool("device", false, "Use the device-code flow (Codex only; for headless environments)")
 }
 
 func loginHyper(c *client.Client, wsID string, force bool) error {
@@ -211,6 +230,82 @@ func loginCopilot(c *client.Client, wsID string, force bool) error {
 
 	fmt.Println()
 	fmt.Println("You're now authenticated with GitHub Copilot!")
+	return nil
+}
+
+func loginCodex(c *client.Client, wsID string, force, device bool) error {
+	ctx := getLoginContext()
+
+	if !force {
+		cfg, err := c.GetConfig(ctx, wsID)
+		if err == nil && cfg != nil {
+			if pc, ok := cfg.Providers.Get(codex.ProviderID); ok && pc.OAuthToken != nil {
+				fmt.Println("You are already logged in to OpenAI Codex.")
+				fmt.Println("Use --force to re-authenticate.")
+				return nil
+			}
+		}
+	}
+
+	var (
+		token *oauth.Token
+		err   error
+	)
+	if device {
+		token, err = codex.LoginDevice(ctx)
+	} else {
+		token, err = codex.LoginBrowser(ctx)
+	}
+	if err != nil {
+		return err
+	}
+
+	if err := cmp.Or(
+		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+codex.ProviderID+".api_key", token.AccessToken),
+		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+codex.ProviderID+".oauth", token),
+	); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Println("You're now authenticated with OpenAI Codex!")
+	return nil
+}
+
+func loginGemini(c *client.Client, wsID string, force bool) error {
+	ctx := getLoginContext()
+
+	if !force {
+		cfg, err := c.GetConfig(ctx, wsID)
+		if err == nil && cfg != nil {
+			if pc, ok := cfg.Providers.Get(geminicli.ProviderID); ok && pc.OAuthToken != nil {
+				fmt.Println("You are already logged in to Gemini CLI.")
+				fmt.Println("Use --force to re-authenticate.")
+				return nil
+			}
+		}
+	}
+
+	token, projectID, email, err := geminicli.LoginBrowser(ctx)
+	if err != nil {
+		return err
+	}
+
+	extra := map[string]string{"project_id": projectID}
+	if email != "" {
+		extra["email"] = email
+	}
+
+	if err := cmp.Or(
+		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+geminicli.ProviderID+".api_key", token.AccessToken),
+		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+geminicli.ProviderID+".oauth", token),
+		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+geminicli.ProviderID+".oauth_extra", extra),
+	); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Println("You're now authenticated with Gemini CLI!")
 	return nil
 }
 

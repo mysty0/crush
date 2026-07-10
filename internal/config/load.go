@@ -374,6 +374,11 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 		c.Providers.Set(claudecode.ProviderID, pc)
 	}
 
+	// Seed the OAuth-only providers (Codex, Gemini CLI) whose fixed wire
+	// configuration is not persisted, so they are treated as fully
+	// configured and skip custom-provider discovery below.
+	c.seedOAuthProviders(ctx)
+
 	// Discover models concurrently for custom providers that need it.
 	// A provider needs discovery when discover_models is explicitly true,
 	// or when the models list is empty (auto-trigger, unless opted out).
@@ -520,7 +525,7 @@ func (c *Config) setDefaults(workingDir, dataDir string) {
 		c.Options.TUI = &TUIOptions{}
 	}
 	if c.Options.EditMode == "" {
-		c.Options.EditMode = EditModeString
+		c.Options.EditMode = EditModeHashline
 	}
 	if len(c.Options.GlobalContextPaths) == 0 {
 		crushConfigDir := filepath.Dir(GlobalConfig())

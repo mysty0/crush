@@ -17,6 +17,8 @@ import (
 	"github.com/charmbracelet/crush/internal/lock"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
+	"github.com/charmbracelet/crush/internal/oauth/codex"
+	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 	"github.com/charmbracelet/crush/internal/oauth/hyper"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -642,6 +644,14 @@ func (s *ConfigStore) exchange(ctx context.Context, providerID, refreshToken str
 		return copilot.RefreshToken(ctx, refreshToken)
 	case hyperp.Name:
 		return hyper.ExchangeToken(ctx, refreshToken)
+	case codex.ProviderID:
+		return codex.RefreshToken(ctx, refreshToken)
+	case geminicli.ProviderID:
+		projectID := ""
+		if pc, ok := s.Config().Providers.Get(providerID); ok && pc.OAuthExtra != nil {
+			projectID = pc.OAuthExtra["project_id"]
+		}
+		return geminicli.RefreshToken(ctx, refreshToken, projectID)
 	default:
 		return nil, fmt.Errorf("OAuth refresh not supported for provider %s", providerID)
 	}

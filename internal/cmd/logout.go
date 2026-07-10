@@ -10,6 +10,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/oauth/codex"
+	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 )
@@ -27,19 +29,27 @@ var logoutCmd = &cobra.Command{
 	Long: `Logout Crush from a specified platform, removing stored credentials.
 The platform should be provided as an argument.
 If no argument is given, a list of logged-in platforms will be shown.
-Available platforms are: hyper, copilot.`,
+Available platforms are: hyper, copilot, codex, gemini.`,
 	Example: `
 # Sign out from Charm Hyper
 crush logout hyper
 
 # Sign out from GitHub Copilot
 crush logout copilot
+
+# Sign out from OpenAI Codex
+crush logout codex
+
+# Sign out from Gemini CLI
+crush logout gemini
   `,
 	ValidArgs: []cobra.Completion{
 		"hyper",
 		"copilot",
 		"github",
 		"github-copilot",
+		"codex",
+		"gemini",
 	},
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -84,6 +94,10 @@ crush logout copilot
 			return logoutHyper(c, ws.ID)
 		case "copilot", "github", "github-copilot":
 			return logoutCopilot(c, ws.ID)
+		case "codex", "openai-codex", "chatgpt":
+			return logoutProvider(c, ws.ID, codex.ProviderID, "OpenAI Codex")
+		case "gemini", "gemini-cli", "google-gemini-cli":
+			return logoutProvider(c, ws.ID, geminicli.ProviderID, "Gemini CLI")
 		default:
 			return fmt.Errorf("unknown platform: %s", provider)
 		}
@@ -115,6 +129,23 @@ func logoutCopilot(c *client.Client, wsID string) error {
 	}
 
 	fmt.Println(logoutHeaderStyle.Render("Successfully logged out of GitHub Copilot."))
+	return nil
+}
+
+// logoutProvider removes stored credentials for an OAuth provider
+// identified by providerID, reporting success under the display name.
+func logoutProvider(c *client.Client, wsID, providerID, displayName string) error {
+	ctx := getLogoutContext()
+
+	if err := cmp.Or(
+		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers."+providerID+".api_key"),
+		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers."+providerID+".oauth"),
+		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers."+providerID+".oauth_extra"),
+	); err != nil {
+		return err
+	}
+
+	fmt.Println(logoutHeaderStyle.Render("Successfully logged out of " + displayName + "."))
 	return nil
 }
 
