@@ -28,7 +28,7 @@ func (c *coordinator) buildMemoryRecall(isSubAgent bool) func(context.Context, s
 	}
 }
 
-// renderMemoryBlock formats recalled memories as a system-message block. It is
+// renderMemoryBlock formats recalled memories as an injected context block. It is
 // framed as advisory so the model never trusts a stale memory over live code.
 func renderMemoryBlock(hits []memory.Hit) string {
 	var b strings.Builder

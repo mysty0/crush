@@ -875,13 +875,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				}
 			}
 
-			// Inject long-term memories relevant to the current prompt, so the
-			// model recalls durable facts automatically without asking. Like
-			// skills, this is a trailing system message after the cached
-			// prefix, so per-turn variation does not churn the prompt cache.
+			// Inject long-term memories relevant to the current prompt so the
+			// model recalls durable facts automatically without asking. It is a
+			// trailing user message, not a system one: the Anthropic provider
+			// drops system messages that follow the conversation, and a trailing
+			// message still sits after the cached prefix so per-turn variation
+			// does not churn the prompt cache.
 			if a.recallMemories != nil && call.Prompt != "" {
 				if block := a.recallMemories(callContext, call.Prompt); block != "" {
-					prepared.Messages = append(prepared.Messages, fantasy.NewSystemMessage(block))
+					prepared.Messages = append(prepared.Messages, fantasy.NewUserMessage(block))
 				}
 			}
 
