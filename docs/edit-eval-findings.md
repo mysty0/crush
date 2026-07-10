@@ -20,15 +20,39 @@ Two ways to run the same fixtures, both env-gated (no API cost unless enabled):
 
 Scoring is exact-match of the final file vs the fixture's `expected/`.
 
-## Reference (oh-my-pi, published, same fixtures)
-oh-my-pi's own `all_models_results.json`, `--edit-variant auto` (its default is
-`edit.mode: hashline`): **Claude Haiku 4.5 = 90.0%**.
+## Reference (oh-my-pi, published) — and why it doesn't hold up
+oh-my-pi's own `all_models_results.json` reports **Claude Haiku 4.5 = 90.0%**.
+But that number was produced serving Haiku via **OpenRouter**. Re-run on the
+**same Claude subscription** we use for Crush, oh-my-pi scores **70.0%**
+(56/80) — the 90% is a serving-path artifact, not a property of oh-my-pi's
+editing.
 
-## Crush results (Haiku, full 80)
+## Head-to-head, same subscription, same fixtures
+| agent (Haiku 4.5, full 80) | pass% |
+| --- | --- |
+| Crush (hashline) | **71.2%** (57/80) |
+| oh-my-pi | **70.0%** (56/80) |
+
+- **Parity.** Per-fixture: 50 both pass, 17 both fail, 6 oh-my-pi-only, 7
+  Crush-only. The disagreements split ~evenly — that's run-to-run noise, not a
+  capability gap.
+- **Sonnet 5, thinking synced off, 20-fixture spread:** oh-my-pi 85% (17/20)
+  vs Crush 80% (16/20) — still parity; both jump vs Haiku, so the bottleneck is
+  the model, not the harness.
+
+## Efficiency — the one clear, non-noise win (Crush)
+oh-my-pi writes the whole file into a **1-hour ephemeral prompt cache** on
+nearly every message. For isolated one-shot edits (no cache reuse across tasks)
+that cache-write dominates cost: measured **~$0.10/task** on Haiku (min $0.07,
+max $0.30), overwhelmingly cache-write. Crush uses standard 5-minute caching
+and far fewer tool round-trips (~792 non-cache tokens/task on Haiku; ~$0.012/
+task measured on Sonnet 5). Same answers, a fraction of the spend.
+
+## Crush results by edit mode (Haiku, full 80)
 | config | pass% | tool-errors/task | tokens/task |
 | --- | --- | --- | --- |
 | string edit | ~80% | 0.64 | 845 |
-| hashline edit | ~76% | **0.35** | **801** |
+| hashline edit | ~71–76% | **0.35** | **792** |
 
 - **Efficiency is a real, consistent hashline win**: ~half the tool errors and
   fewer tokens. This is the universal benefit on a strong model.
@@ -62,11 +86,14 @@ oh-my-pi's own `all_models_results.json`, `--edit-variant auto` (its default is
    - Methodological lesson: always measure prompt changes on the **full** set,
      never a hand-picked hard subset.
 
-## Conclusion — where the gap actually is
-Not the edit format, and not the system-prompt prose. The failing fixtures are
-**finding/reasoning-limited**: vague prompts ("there is a subtle bug, find it")
-+ subtle bugs (a dropped `!`, one of four identical lines) in ~500-line files.
-The likely levers, in order:
+## Conclusion — there was no gap
+The published 90-vs-76 "gap" was a **serving-path illusion**: on the same
+subscription the two agents are at parity (71% vs 70% on Haiku). So neither the
+edit format nor the system-prompt prose is a deficiency to close. What's left
+are genuinely **finding/reasoning-limited** fixtures: vague prompts ("there is a
+subtle bug, find it") + subtle bugs (a dropped `!`, one of four identical lines)
+in ~500-line files. If we want to push absolute pass-rate above the model's
+ceiling, the likely levers, in order:
 
 1. **The read/find tooling.** Crush's `Read` never summarizes — a 500-line file
    is 3 raw 200-line pages. oh-my-pi's `read` returns a tree-sitter **structural
@@ -77,9 +104,9 @@ The likely levers, in order:
 2. **Structural editing** (`ast_grep`/`ast_edit`) — targets the wrong-occurrence
    failure by matching shape instead of line number. See
    [`astgrep-design.md`](./astgrep-design.md).
-3. **Serving-path confound** (not portable): oh-my-pi measured Haiku via
-   OpenRouter; we used the subscription with Claude Code identity injection +
-   Crush's full coder prompt. Same weights, possibly different behavior.
+3. **Efficiency, already won.** Crush is markedly cheaper per task (standard
+   caching + fewer round-trips vs oh-my-pi's 1-hour cache writes), at equal
+   quality — the durable, portable advantage.
 
 ## Appendix — summarizing-read port (design summary)
 Add a structural-summary branch to `internal/agent/tools/view.go`, gated by a new

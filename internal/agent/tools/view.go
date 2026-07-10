@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/hashline"
+	"github.com/charmbracelet/crush/internal/hashline/tsblock"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/skills"
@@ -102,6 +103,9 @@ func NewViewTool(
 	loadedSkills *skills.LoadedStore,
 	editMode string,
 	store *hashline.Store,
+	summarize bool,
+	summarizeMinLines int,
+	summarizeBudget int,
 	workingDir string,
 	skillsPaths ...string,
 ) fantasy.AgentTool {
@@ -201,6 +205,10 @@ func NewViewTool(
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("Path is a directory, not a file: %s", filePath)), nil
 			}
 
+			// Whether the model asked for a specific window (offset/limit) or a
+			// whole-file read. Structural summaries only apply to whole-file reads.
+			wholeFileRead := params.Offset == 0 && params.Limit <= 0
+
 			// Set default limit if not provided (no limit for SKILL.md files)
 			if params.Limit <= 0 {
 				if isSkillFile {
@@ -253,6 +261,22 @@ func NewViewTool(
 			}
 			if !utf8.ValidString(content) {
 				return fantasy.NewTextErrorResponse("File content is not valid UTF-8"), nil
+			}
+
+			// Structural summary: for a whole-file read of a large parseable
+			// file, show declaration signatures with bodies elided and a footer
+			// pointing at the ranges to re-read. Falls through to the raw window
+			// when it does not apply.
+			if summarize && wholeFileRead && !isSkillFile {
+				if out, sok := summarizeViewOutput(filePath, editMode, store, sessionID, absFilePath, relPath, isOutsideWorkDir, summarizeMinLines, summarizeBudget); sok {
+					openInLSPs(ctx, lspManager, filePath)
+					waitForLSPDiagnostics(ctx, lspManager, filePath, 300*time.Millisecond)
+					filetracker.RecordRead(ctx, sessionID, filePath)
+					return fantasy.WithResponseMetadata(
+						fantasy.NewTextResponse(out+getDiagnostics(filePath, lspManager)),
+						ViewResponseMetadata{FilePath: filePath, Content: content},
+					), nil
+				}
 			}
 
 			openInLSPs(ctx, lspManager, filePath)
@@ -347,6 +371,81 @@ func hashlineViewOutput(
 		output += fmt.Sprintf("\n\n(File has more lines. Use 'offset' to read beyond line %d)", offset+len(winLines))
 	}
 	return output + "\n", nil
+}
+
+// summarizeViewOutput renders a structural summary of filePath: kept declaration
+// lines verbatim, elided body spans as a single "N-M: …" line, and a footer
+// naming the ranges to re-read. It returns ok=false when the file is not
+// summarizable (unknown language, syntax error, too small/large, or nothing to
+// elide), so the caller falls back to a raw window.
+//
+// In hashline mode it records a whole-file snapshot (seen = the kept lines) and
+// emits a [path#TAG] header so a later Edit can validate anchors and the model
+// can re-read elided ranges.
+func summarizeViewOutput(
+	filePath, editMode string,
+	store *hashline.Store,
+	sessionID, absFilePath, relPath string,
+	isOutsideWorkDir bool,
+	minLines, budget int,
+) (string, bool) {
+	raw, err := os.ReadFile(filePath)
+	if err != nil || len(raw) > MaxViewSize {
+		return "", false
+	}
+	lfText, _ := fsext.ToUnixLineEndings(string(raw))
+	if !utf8.ValidString(lfText) {
+		return "", false
+	}
+
+	sum, ok := tsblock.Summarize(lfText, filePath, tsblock.Options{MinTotalLines: minLines, UnfoldUntil: budget})
+	if !ok {
+		return "", false
+	}
+
+	lines := strings.Split(strings.TrimSuffix(lfText, "\n"), "\n")
+	hashlineMode := editMode == config.EditModeHashline && store != nil
+
+	displayPath := relPath
+	if isOutsideWorkDir {
+		displayPath = absFilePath
+	}
+
+	var b strings.Builder
+	var elidedRanges []string
+	var seen []int
+	for _, seg := range sum.Segments {
+		if seg.Kind == tsblock.Elided {
+			fmt.Fprintf(&b, "%d-%d: …\n", seg.Start, seg.End)
+			elidedRanges = append(elidedRanges, fmt.Sprintf("%s:%d-%d", displayPath, seg.Start, seg.End))
+			continue
+		}
+		for ln := seg.Start; ln <= seg.End && ln <= len(lines); ln++ {
+			seen = append(seen, ln)
+			if hashlineMode {
+				b.WriteString(hashline.FormatNumberedLine(ln, lines[ln-1]))
+			} else {
+				fmt.Fprintf(&b, "%6d|%s", ln, lines[ln-1])
+			}
+			b.WriteByte('\n')
+		}
+	}
+
+	footer := ""
+	if len(elidedRanges) > 0 {
+		footerRanges := elidedRanges
+		if len(footerRanges) > 3 {
+			footerRanges = footerRanges[:3]
+		}
+		footer = fmt.Sprintf("\n[…%d lines elided; re-read the ranges you need, e.g. %s]\n",
+			sum.ElidedLines, strings.Join(footerRanges, ", "))
+	}
+
+	if hashlineMode {
+		tag := store.Record(sessionID, absFilePath, lfText, seen)
+		return hashline.FormatHeader(displayPath, tag) + "\n" + b.String() + footer, true
+	}
+	return "<file>\n" + b.String() + footer + "</file>\n", true
 }
 
 func addLineNumbers(content string, startLine int) string {

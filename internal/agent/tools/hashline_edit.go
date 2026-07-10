@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/hashline"
+	"github.com/charmbracelet/crush/internal/hashline/tsblock"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/permission"
@@ -75,6 +76,7 @@ func NewHashlineEditTool(
 	store *hashline.Store,
 	resolver hashline.BlockResolver,
 	workingDir string,
+	validateSyntax bool,
 ) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		EditToolName,
@@ -106,6 +108,22 @@ func NewHashlineEditTool(
 				}
 				warnings = append(warnings, warns...)
 				plans = append(plans, plan)
+			}
+			// Syntax gate: reject a batch whose edits would turn a cleanly
+			// parsing file into one with a syntax error, so a bad anchor or
+			// range never lands broken code. Skipped for unknown languages and
+			// files that were already unparseable.
+			if validateSyntax {
+				for _, plan := range plans {
+					if plan.remove || plan.newLF == "" {
+						continue
+					}
+					if tsblock.IntroducesSyntaxError(plan.oldLF, plan.newLF, plan.path) {
+						return fantasy.NewTextErrorResponse(fmt.Sprintf(
+							"edit rejected: applying it to %s would introduce a syntax error (unbalanced brackets or a malformed statement). Re-read the file and adjust the edit; nothing was written.",
+							plan.displayed)), nil
+					}
+				}
 			}
 
 			// Request permission for every file first, so a denial aborts

@@ -807,7 +807,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	if editMode == config.EditModeHashline {
 		allTools = append(
 			allTools,
-			tools.NewHashlineEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.snapshots, tsblock.New(), c.cfg.WorkingDir()),
+			tools.NewHashlineEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.snapshots, tsblock.New(), c.cfg.WorkingDir(), c.cfg.Config().Options.ValidateEditSyntax()),
 		)
 	} else {
 		allTools = append(
@@ -822,6 +822,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewFetchTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewGlobTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Glob),
 		tools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
+		tools.NewAstGrepTool(c.cfg.WorkingDir()),
 		tools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
 		tools.NewSourcegraphTool(nil),
 		c.scheduleCronTool(),
@@ -831,7 +832,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		c.agentListTool(),
 		c.agentProgressTool(),
 		tools.NewTodosTool(c.sessions),
-		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.skillTracker, c.loadedSkills, editMode, c.snapshots, c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
+		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.skillTracker, c.loadedSkills, editMode, c.snapshots, c.cfg.Config().Options.SummarizeReads(), c.cfg.Config().Options.SummarizeMinLines(), c.cfg.Config().Options.SummarizeBudget(), c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewSkillTool(c.activeSkills, c.loadedSkills),
 	)
@@ -1772,7 +1773,7 @@ func (c *coordinator) activateSkillAttachments(sessionID string, attachments []m
 }
 
 // deactivateSkillsFromPrompt turns off active skills when the user asks
-// (e.g. "stop caveman", "normal mode"). This is the counterpart to
+// (e.g. "stop <skill-name>", "normal mode"). This is the counterpart to
 // activation and runs before the turn so a deactivated skill is not
 // re-injected on the same turn.
 func (c *coordinator) deactivateSkillsFromPrompt(sessionID, prompt string) {
