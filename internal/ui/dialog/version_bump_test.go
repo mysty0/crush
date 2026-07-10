@@ -13,33 +13,35 @@ import (
 
 // versionedItem is the cross-cutting interface every dialog list
 // item must satisfy under F6: every documented mutator must bump
-// the shared version counter so the list-level memo invalidates
-// frozen entries.
+// the shared paint version so the list-level memo invalidates
+// frozen entries. Dialog rows are single-line, so their mutators
+// (focus, fuzzy-match highlight) are all paint-only and never touch
+// the layout version.
 type versionedItem interface {
 	list.Item
-	Version() uint64
+	PaintVersion() uint64
 }
 
 // requireBump asserts that running mutate() advances the item's
-// Version().
+// PaintVersion().
 func requireBump(t *testing.T, name string, item versionedItem, mutate func()) {
 	t.Helper()
-	before := item.Version()
+	before := item.PaintVersion()
 	mutate()
-	after := item.Version()
-	require.Greaterf(t, after, before, "%s must bump Version() (before=%d, after=%d)", name, before, after)
+	after := item.PaintVersion()
+	require.Greaterf(t, after, before, "%s must bump PaintVersion() (before=%d, after=%d)", name, before, after)
 }
 
 // requireNoBump asserts that running mutate() leaves the item's
-// Version() unchanged. Used to lock in the dedupe contract: a
+// PaintVersion() unchanged. Used to lock in the dedupe contract: a
 // mutator called with a value identical to the current state must
 // not gratuitously invalidate the list cache.
 func requireNoBump(t *testing.T, name string, item versionedItem, mutate func()) {
 	t.Helper()
-	before := item.Version()
+	before := item.PaintVersion()
 	mutate()
-	after := item.Version()
-	require.Equalf(t, before, after, "%s must NOT bump Version() when state is unchanged (before=%d, after=%d)", name, before, after)
+	after := item.PaintVersion()
+	require.Equalf(t, before, after, "%s must NOT bump PaintVersion() when state is unchanged (before=%d, after=%d)", name, before, after)
 }
 
 // equivMatch returns a fuzzy.Match whose fields and indexes are

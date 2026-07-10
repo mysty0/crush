@@ -11,7 +11,6 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/attachments"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/list"
@@ -30,10 +29,16 @@ type Identifiable interface {
 	ID() string
 }
 
-// Animatable is an interface for items that support animation.
+// Animatable is an interface for items that support animation. All
+// scheduling is owned by the UI's single animation clock (see
+// internal/ui/model): items never schedule their own ticks, they are
+// advanced in lockstep, one frame at a time.
 type Animatable interface {
-	StartAnimation() tea.Cmd
-	Animate(msg anim.StepMsg) tea.Cmd
+	// Advance advances the item's animation by one frame if it is
+	// currently animating, and reports whether the item still wants
+	// further frames. A false return lets the clock stop once no
+	// item is animating anymore.
+	Advance() bool
 }
 
 // Expandable is an interface for items that can be expanded or collapsed.
@@ -166,17 +171,18 @@ type cacheClearable interface {
 	clearCache()
 }
 
-// ClearItemCaches drops any cached rendered output on each item so the
 // next render uses the current styles. It also bumps each item's
-// version so the F6 list-level memo invalidates frozen entries on
-// the next render.
+// layout version so the F6 list-level memo invalidates both the frozen
+// content and the cached height: a theme swap can change padding,
+// borders, and therefore wrapped line counts, so cached heights must
+// be discarded too.
 func ClearItemCaches(items []MessageItem) {
 	for _, item := range items {
 		if cc, ok := item.(cacheClearable); ok {
 			cc.clearCache()
 		}
-		if v, ok := item.(interface{ Bump() }); ok {
-			v.Bump()
+		if v, ok := item.(interface{ BumpLayout() }); ok {
+			v.BumpLayout()
 		}
 	}
 }

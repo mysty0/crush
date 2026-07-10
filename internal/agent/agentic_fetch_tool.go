@@ -200,6 +200,8 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				SessionSetup: func(sessionID string) {
 					c.permissions.AutoApproveSession(sessionID)
 				},
+				ToolName: tools.AgenticFetchToolName,
+				Label:    description,
 			})
 		},
 	), nil

@@ -6,6 +6,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/history"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/stretchr/testify/require"
 )
@@ -139,4 +140,51 @@ func stripANSI(s string) string {
 		b.WriteByte(s[i])
 	}
 	return b.String()
+}
+
+func TestLastSessionModel(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no messages", func(t *testing.T) {
+		t.Parallel()
+		_, _, ok := lastSessionModel(nil)
+		require.False(t, ok)
+	})
+
+	t.Run("no assistant message recorded a model", func(t *testing.T) {
+		t.Parallel()
+		msgs := []message.Message{
+			{Role: message.User},
+			{Role: message.Assistant},
+		}
+		_, _, ok := lastSessionModel(msgs)
+		require.False(t, ok)
+	})
+
+	t.Run("returns the most recent assistant model", func(t *testing.T) {
+		t.Parallel()
+		msgs := []message.Message{
+			{Role: message.Assistant, Provider: "anthropic", Model: "claude-1"},
+			{Role: message.User},
+			{Role: message.Assistant, Provider: "openai", Model: "gpt-5"},
+		}
+		provider, model, ok := lastSessionModel(msgs)
+		require.True(t, ok)
+		require.Equal(t, "openai", provider)
+		require.Equal(t, "gpt-5", model)
+	})
+
+	t.Run("skips a trailing assistant message with no model recorded", func(t *testing.T) {
+		t.Parallel()
+		msgs := []message.Message{
+			{Role: message.Assistant, Provider: "anthropic", Model: "claude-1"},
+			// A still-empty/spinning assistant message from an in-flight
+			// turn has no model yet.
+			{Role: message.Assistant},
+		}
+		provider, model, ok := lastSessionModel(msgs)
+		require.True(t, ok)
+		require.Equal(t, "anthropic", provider)
+		require.Equal(t, "claude-1", model)
+	})
 }

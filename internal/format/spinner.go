@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/ui/anim"
@@ -17,12 +18,21 @@ type Spinner struct {
 	prog *tea.Program
 }
 
+// frameMsg drives this standalone spinner's animation. This program
+// owns exactly one Anim, so a single self-rescheduling tick chain is
+// safe here.
+type frameMsg struct{}
+
+func frameCmd() tea.Cmd {
+	return tea.Tick(anim.Interval(), func(time.Time) tea.Msg { return frameMsg{} })
+}
+
 type model struct {
 	cancel context.CancelFunc
 	anim   *anim.Anim
 }
 
-func (m model) Init() tea.Cmd  { return m.anim.Start() }
+func (m model) Init() tea.Cmd  { return frameCmd() }
 func (m model) View() tea.View { return tea.NewView(m.anim.Render()) }
 
 // Update implements tea.Model.
@@ -34,9 +44,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			return m, tea.Quit
 		}
-	case anim.StepMsg:
-		cmd := m.anim.Animate(msg)
-		return m, cmd
+	case frameMsg:
+		m.anim.Advance()
+		return m, frameCmd()
 	}
 	return m, nil
 }

@@ -541,6 +541,8 @@ func (r *workflowRunner) RunAgent(ctx context.Context, req workflow.AgentRequest
 		ToolCallID:     fmt.Sprintf("agent-%d", req.Seq),
 		Prompt:         req.Prompt,
 		SessionTitle:   cmp.Or(req.Label, "Workflow Agent"),
+		ToolName:       WorkflowToolName,
+		Label:          req.Label,
 	})
 
 	r.c.workflows.markAgentDone(r.workflowSessionID, agentSessionID)

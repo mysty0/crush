@@ -271,7 +271,7 @@ func (m *Models) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	listHeight := height - heightOffset
 	listWidth := max(0, innerWidth-3) // Reserve space for scrollbar.
 	m.list.SetSize(listWidth, listHeight)
-	listTotalHeight := m.list.TotalHeight()
+	listTotalHeight := m.list.TotalHeightApprox()
 
 	rc := NewRenderContext(t, width)
 	rc.Title = "Switch Model"
@@ -286,7 +286,7 @@ func (m *Models) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	rc.AddPart(inputView)
 
 	listView := t.Dialog.List.Height(m.list.Height()).Render(m.list.Render())
-	scrollbar := common.Scrollbar(t, listHeight, listTotalHeight, listHeight+1, m.list.Offset())
+	scrollbar := common.Scrollbar(t, listHeight, listTotalHeight, listHeight+1, m.list.OffsetApprox())
 	if scrollbar != "" {
 		listView = lipgloss.JoinHorizontal(lipgloss.Top, listView, scrollbar)
 	}

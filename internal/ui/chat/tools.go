@@ -290,7 +290,9 @@ func (t *baseToolMessageItem) SetCompact(compact bool) {
 	}
 	t.isCompact = compact
 	t.clearCache()
-	t.Bump()
+	// Compact mode collapses the tool to a single-line header, so the
+	// rendered height changes.
+	t.BumpLayout()
 }
 
 // ID returns the unique identifier for this tool message item.
@@ -307,55 +309,25 @@ func (t *baseToolMessageItem) SetPartialOutput(output string) {
 	}
 	t.partialOutput = output
 	t.clearCache()
-	t.Bump()
+	// Streamed output adds lines as it arrives, changing the height.
+	t.BumpLayout()
 }
 
-// StartAnimation starts the assistant message animation if it should be spinning.
-func (t *baseToolMessageItem) StartAnimation() tea.Cmd {
-	if !t.isSpinning() {
-		return nil
-	}
-	return t.anim.Start()
-}
-
-// Animate progresses the assistant message animation if it should be spinning.
+// Advance progresses the tool spinner by one frame while the tool is
+// still running.
 //
 // Bumps the F6 list-cache version so the next draw re-renders this
-// item: a spinner tick mutates anim's internal frame counter, which
+// item: a spinner frame mutates anim's internal step counter, which
 // changes the rendered output but is invisible to the per-item
 // caches. Without the bump the list cache would serve the previously
 // rendered frame indefinitely and the spinner would appear frozen.
-// The ID gate keeps unrelated ticks (routed here by a future change
-// to chat.Animate's dispatch) from churning the cache.
-func (t *baseToolMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
+func (t *baseToolMessageItem) Advance() bool {
 	if !t.isSpinning() {
-		return nil
-	}
-	if msg.ID != t.toolCall.ID {
-		return nil
+		return false
 	}
 	t.Bump()
-	return t.anim.Animate(msg)
-}
-
-// EstimatedHeight implements list.HeightEstimator. It cheaply estimates
-// the tool item's rendered height without invoking the (potentially
-// expensive) tool renderer, so the list can size its scrollbar without
-// rendering every off-screen tool call. Collapsed tool output is capped
-// at responseContextHeight lines, so the estimate is bounded and refined
-// to the exact height once the item is scrolled into view.
-func (t *baseToolMessageItem) EstimatedHeight(width int) int {
-	// Header line(s) plus, if there is a result, a bounded number of
-	// body lines (collapsed output is capped at responseContextHeight).
-	const headerLines = 1
-	if t.result == nil || t.result.Content == "" {
-		return headerLines + 1
-	}
-	bodyLines := strings.Count(t.result.Content, "\n") + 1
-	if bodyLines > responseContextHeight {
-		bodyLines = responseContextHeight + 1 // + truncation notice
-	}
-	return headerLines + bodyLines + 1
+	t.anim.Advance()
+	return true
 }
 
 // RawRender implements [MessageItem].
@@ -442,14 +414,18 @@ func (t *baseToolMessageItem) ToolCall() message.ToolCall {
 func (t *baseToolMessageItem) SetToolCall(tc message.ToolCall) {
 	t.toolCall = tc
 	t.clearCache()
-	t.Bump()
+	// The rendered params (and finished state) change with the tool
+	// call, which can change the line count.
+	t.BumpLayout()
 }
 
 // SetResult sets the tool result associated with this message item.
 func (t *baseToolMessageItem) SetResult(res *message.ToolResult) {
 	t.result = res
 	t.clearCache()
-	t.Bump()
+	// A result replaces the spinner/partial output with the final body,
+	// changing the height.
+	t.BumpLayout()
 }
 
 // MessageID returns the ID of the message containing this tool call.
@@ -471,7 +447,9 @@ func (t *baseToolMessageItem) SetStatus(status ToolStatus) {
 	}
 	t.status = status
 	t.clearCache()
-	t.Bump()
+	// A status change can add or remove lines (e.g. error details or a
+	// canceled notice), so treat it as a height change.
+	t.BumpLayout()
 }
 
 // Status returns the current tool status.
@@ -511,7 +489,8 @@ func (t *baseToolMessageItem) SetSpinningFunc(fn SpinningFunc) {
 func (t *baseToolMessageItem) ToggleExpanded() bool {
 	t.expandedContent = !t.expandedContent
 	t.clearCache()
-	t.Bump()
+	// Expanding/collapsing reveals or hides body lines.
+	t.BumpLayout()
 	return t.expandedContent
 }
 
@@ -529,7 +508,8 @@ func (t *baseToolMessageItem) SetExpanded(expanded bool) {
 	}
 	t.expandedContent = expanded
 	t.clearCache()
-	t.Bump()
+	// Expanding/collapsing reveals or hides body lines.
+	t.BumpLayout()
 }
 
 // Finished implements list.Item. A tool call is freezable once the

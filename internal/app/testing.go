@@ -6,8 +6,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/session"
 )
 
 // NewForTest constructs a minimal [App] suitable for in-process tests
@@ -54,6 +57,31 @@ func NewForTest(ctx context.Context) *App {
 		return nil
 	})
 	return app
+}
+
+// NewForTestWithSessions extends [NewForTest] with real session and
+// message services wired into the events broker exactly as
+// production's setupEvents does, plus the bash/workflow progress
+// brokers. Use this when a test needs a [tea.Program] subscribed via
+// [App.Subscribe] to observe real session, message, and tool-progress
+// events — e.g. reproducing UI behavior driven by a live streaming
+// session — without booting a full config, LSP, MCP, or agent
+// coordinator.
+//
+// The caller supplies sessions and messages (typically backed by a
+// real, temporary SQLite DB — see internal/db.Connect) since both are
+// stateful services with their own persistence and debounce behavior
+// that this helper does not construct.
+func NewForTestWithSessions(ctx context.Context, sessions session.Service, messages message.Service) *App {
+	a := NewForTest(ctx)
+	a.Sessions = sessions
+	a.Messages = messages
+	setupSubscriber(a.eventsCtx, a.serviceEventsWG, "sessions", sessions.Subscribe, a.events)
+	setupSubscriber(a.eventsCtx, a.serviceEventsWG, "messages", messages.Subscribe, a.events)
+	setupSubscriber(a.eventsCtx, a.serviceEventsWG, "bash-progress", agenttools.SubscribeBashProgress, a.events)
+	setupSubscriber(a.eventsCtx, a.serviceEventsWG, "workflow-progress", agenttools.SubscribeWorkflowProgress, a.events)
+	setupSubscriber(a.eventsCtx, a.serviceEventsWG, "workflow-status", agenttools.SubscribeWorkflowStatus, a.events)
+	return a
 }
 
 // ShutdownForTest tears down the App's event broker and fan-in

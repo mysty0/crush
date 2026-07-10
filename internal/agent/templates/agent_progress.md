@@ -1,0 +1,1 @@
+Get detailed live progress for one sub-agent by its session ID (from AgentList or an agent tool call's own response): how long it's been running, how many tool calls it has made, the most recent tool call, and a snippet of its latest output. Use this to check on a specific in-flight sub-agent instead of just seeing that it's "running".

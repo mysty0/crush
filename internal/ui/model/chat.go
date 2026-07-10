@@ -9,7 +9,6 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/chat"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/list"
@@ -51,31 +50,6 @@ type Chat struct {
 	com      *common.Common
 	list     *list.List
 	idInxMap map[string]int // Map of message IDs to their indices in the list
-
-	// Animation visibility optimization: track animations paused due to items
-	// being scrolled out of view. When items become visible again, their
-	// animations are restarted.
-	pausedAnimations map[string]struct{}
-
-	// restartedAt throttles how often RestartPausedVisibleAnimations may
-	// spin up a new animation chain for a given item ID. Without this,
-	// an item that repeatedly flickers in and out of the visible range
-	// (e.g. a neighbor pushed out of view by a fast-growing streamed
-	// message below it) gets a brand-new tea.Tick chain — a new
-	// goroutine and timer — on every single flicker, with no cap on
-	// the rate. Since bubbletea has no way to cancel an
-	// already-scheduled Cmd, a burst of flickers faster than the
-	// animation's own frame rate leaves every stale chain alive; if
-	// that rate ever outpaces the single event-loop goroutine's
-	// ability to drain them, the backlog is self-sustaining and grows
-	// without bound (see the regression test in
-	// freeze_repro_test.go, which reproduces the exact stuck state
-	// recovered from a live frozen session). Capping restarts to at
-	// most one per animation frame interval (anim.Interval) bounds the
-	// goroutine creation rate to the animation's own intended cadence
-	// regardless of how often the underlying event stream flickers
-	// visibility.
-	restartedAt map[string]time.Time
 
 	// Mouse state
 	mouseDown     bool
@@ -132,10 +106,6 @@ type Chat struct {
 	// Pending single click action (delayed to detect double-click)
 	pendingClickID int // Incremented on each click to invalidate old pending clicks
 
-	// follow is a flag to indicate whether the view should auto-scroll to
-	// bottom on new messages.
-	follow bool
-
 	// drawCache memoizes the decoded form of the last list.Render output so
 	// repeat frames with byte-identical content skip the per-cell ANSI
 	// reparse that uv.StyledString.Draw performs every call. See F9
@@ -175,11 +145,9 @@ type chatDrawCache struct {
 // messages.
 func NewChat(com *common.Common, scrollbarMode string) *Chat {
 	c := &Chat{
-		com:              com,
-		idInxMap:         make(map[string]int),
-		pausedAnimations: make(map[string]struct{}),
-		restartedAt:      make(map[string]time.Time),
-		scrollbarMode:    scrollbarMode,
+		com:           com,
+		idInxMap:      make(map[string]int),
+		scrollbarMode: scrollbarMode,
 	}
 	l := list.NewList()
 	l.SetGap(1)
@@ -207,7 +175,7 @@ func (m *Chat) Height() int {
 func (m *Chat) Draw(scr uv.Screen, area uv.Rectangle) {
 	// Check if scrollbar should be visible.
 	listHeight := m.list.Height() - 1
-	listTotalHeight := m.list.TotalHeight() - 1
+	listTotalHeight := m.list.TotalHeightApprox() - 1
 	needsScrollbar := listTotalHeight > listHeight
 
 	// Determine visibility based on scrollbar mode.
@@ -251,7 +219,7 @@ func (m *Chat) Draw(scr uv.Screen, area uv.Rectangle) {
 
 	// Draw scrollbar if visible and needed.
 	if scrollbarWidth > 0 {
-		scrollbar := common.Scrollbar(m.com.Styles, listHeight, listTotalHeight, listHeight, m.list.Offset())
+		scrollbar := common.Scrollbar(m.com.Styles, listHeight, listTotalHeight, listHeight, m.list.OffsetApprox())
 		if scrollbar != "" {
 			scrollbarArea := image.Rectangle{
 				Min: image.Point{X: area.Max.X - scrollbarWidth, Y: area.Min.Y},
@@ -342,7 +310,12 @@ func (m *Chat) SetSize(width, height int) {
 	//     width. This only re-renders in the cheap, small-content case.
 	narrowWidth := max(0, width-1)
 	m.list.SetSize(narrowWidth, height)
-	if m.list.TotalHeight() <= height {
+	// The approximate total only gates whether we reserve a scrollbar
+	// column (i.e. which width to render at); it never informs a
+	// positioning decision, so an approximate height that converges as
+	// items render is acceptable here. Draw recomputes scrollbar
+	// visibility from the exact render on the next frame.
+	if m.list.TotalHeightApprox() <= height {
 		m.list.SetSize(width, height)
 	}
 	// Anchor to bottom if we were at the bottom.
@@ -383,8 +356,6 @@ func (m *Chat) Items() []chat.MessageItem {
 // SetMessages sets the chat messages to the provided list of message items.
 func (m *Chat) SetMessages(msgs ...chat.MessageItem) tea.Cmd {
 	m.idInxMap = make(map[string]int)
-	m.pausedAnimations = make(map[string]struct{})
-	m.restartedAt = make(map[string]time.Time)
 	m.scrollbarVisible = false // Reset scrollbar visibility on new session load
 
 	items := make([]list.Item, len(msgs))
@@ -421,7 +392,8 @@ func (m *Chat) AppendMessages(msgs ...chat.MessageItem) {
 }
 
 // UpdateNestedToolIDs updates the ID map for nested tools within a container.
-// Call this after modifying nested tools to ensure animations work correctly.
+// Call this after modifying nested tools so lookups by nested tool-call ID
+// (e.g. routing bash progress events) resolve to the containing item.
 func (m *Chat) UpdateNestedToolIDs(containerID string) {
 	idx, ok := m.idInxMap[containerID]
 	if !ok {
@@ -444,88 +416,27 @@ func (m *Chat) UpdateNestedToolIDs(containerID string) {
 	}
 }
 
-// Animate animates items in the chat list. Only propagates animation messages
-// to visible items to save CPU. When items are not visible, their animation ID
-// is tracked so it can be restarted when they become visible again.
-func (m *Chat) Animate(msg anim.StepMsg) tea.Cmd {
-	idx, ok := m.idInxMap[msg.ID]
-	if !ok {
-		return nil
-	}
-
-	animatable, ok := m.list.ItemAt(idx).(chat.Animatable)
-	if !ok {
-		return nil
-	}
-
-	// Check if item is currently visible.
-	startIdx, endIdx := m.list.VisibleItemIndices()
-	isVisible := idx >= startIdx && idx <= endIdx
-
-	if !isVisible {
-		// Item not visible - pause animation by not propagating.
-		// Track it so we can restart when it becomes visible.
-		m.pausedAnimations[msg.ID] = struct{}{}
-		return nil
-	}
-
-	// Item is visible - remove from paused set and animate.
-	delete(m.pausedAnimations, msg.ID)
-	return animatable.Animate(msg)
-}
-
-// RestartPausedVisibleAnimations restarts animations for items that were
-// paused due to being scrolled out of view but are now visible again.
+// AdvanceAnimations advances every animating item one frame and
+// reports whether any item is still animating. It is driven solely by
+// the UI's single animation clock (see internal/ui/model/ui.go);
+// items never schedule ticks of their own, so the number of pending
+// timers is invariant to how many items (or how many chats showing
+// the same items) are animating.
 //
-// Restarts are throttled per ID to at most one per anim.Interval (see
-// the restartedAt field doc): an item whose visibility flickers faster
-// than that — e.g. repeatedly pushed in and out of view by a
-// fast-growing streamed message below it — stays in pausedAnimations
-// across the skipped calls and is retried on the next call once the
-// interval has elapsed, instead of spinning up an unbounded number of
-// concurrent tea.Tick chains for the same ID.
-func (m *Chat) RestartPausedVisibleAnimations() tea.Cmd {
-	if len(m.pausedAnimations) == 0 {
-		return nil
-	}
-
-	startIdx, endIdx := m.list.VisibleItemIndices()
-	var cmds []tea.Cmd
-	now := time.Now()
-
-	for id := range m.pausedAnimations {
-		idx, ok := m.idInxMap[id]
-		if !ok {
-			// Item no longer exists.
-			delete(m.pausedAnimations, id)
-			delete(m.restartedAt, id)
-			continue
-		}
-
-		if idx < startIdx || idx > endIdx {
-			continue
-		}
-
-		if last, ok := m.restartedAt[id]; ok && now.Sub(last) < anim.Interval() {
-			// Restarted too recently — leave it paused and retry on
-			// a later call once the interval has elapsed.
-			continue
-		}
-
-		// Item is now visible - restart its animation.
-		if animatable, ok := m.list.ItemAt(idx).(chat.Animatable); ok {
-			if cmd := animatable.StartAnimation(); cmd != nil {
-				cmds = append(cmds, cmd)
+// Off-screen items are advanced too: an advance is just a few atomic
+// increments and a version bump (re-rendering only happens for
+// visible items), and it keeps every spinner coherent without any
+// pause/restart bookkeeping when items scroll in and out of view.
+func (m *Chat) AdvanceAnimations() bool {
+	active := false
+	for i := range m.list.Len() {
+		if a, ok := m.list.ItemAt(i).(chat.Animatable); ok {
+			if a.Advance() {
+				active = true
 			}
 		}
-		m.restartedAt[id] = now
-		delete(m.pausedAnimations, id)
 	}
-
-	if len(cmds) == 0 {
-		return nil
-	}
-	return tea.Batch(cmds...)
+	return active
 }
 
 // Focus sets the focus state of the chat component.
@@ -552,42 +463,47 @@ func (m *Chat) Dragging() bool {
 // Follow returns whether the chat view is in follow mode (auto-scroll to
 // bottom on new messages).
 func (m *Chat) Follow() bool {
-	return m.follow
+	// Follow is now derived from the list's anchor-aware, exact
+	// AtBottom(): while the list is bottom-anchored (or the content
+	// fits) it keeps itself glued to the end, so "am I following new
+	// content?" is exactly "am I at the bottom?".
+	return m.list.AtBottom()
 }
 
-// ScrollToBottom scrolls the chat view to the bottom.
-// Does not trigger scrollbar visibility (auto-scroll to show new content).
+// ScrollToBottom scrolls the chat view to the bottom and engages the
+// list's bottom-anchored follow. Does not trigger scrollbar visibility
+// (auto-scroll to show new content).
 func (m *Chat) ScrollToBottom() tea.Cmd {
 	m.list.ScrollToBottom()
-	m.follow = true
 	return nil
 }
 
-// ScrollToTop scrolls the chat view to the top.
+// ScrollToTop scrolls the chat view to the top. The list detaches from
+// its bottom anchor, so Follow() reports false afterwards.
 func (m *Chat) ScrollToTop() tea.Cmd {
 	m.list.ScrollToTop()
-	m.follow = false // Disable follow mode when user scrolls up
 	return m.showScrollbar()
 }
 
 // ScrollBy scrolls the chat view by the given number of line deltas.
+// Scrolling up detaches the list's anchor; scrolling down re-anchors
+// once it reaches the bottom, so Follow() tracks the anchor state.
 func (m *Chat) ScrollBy(lines int) tea.Cmd {
 	m.list.ScrollBy(lines)
-	m.follow = lines > 0 && m.AtBottom() // Disable follow mode if user scrolls up
 	return m.showScrollbar()
 }
 
-// ScrollToSelected scrolls the chat view to the selected item.
+// ScrollToSelected scrolls the chat view to the selected item. The list
+// detaches from its bottom anchor, so Follow() reports false unless the
+// selected item happens to sit at the bottom.
 func (m *Chat) ScrollToSelected() tea.Cmd {
 	m.list.ScrollToSelected()
-	m.follow = m.AtBottom() // Disable follow mode if user scrolls up
 	return m.showScrollbar()
 }
 
 // ScrollToIndex scrolls the chat view to the item at the given index.
 func (m *Chat) ScrollToIndex(index int) tea.Cmd {
 	m.list.ScrollToIndex(index)
-	m.follow = m.AtBottom() // Disable follow mode if user scrolls up
 	return m.showScrollbar()
 }
 
@@ -611,30 +527,6 @@ func (m *Chat) HideScrollbar(seq int) {
 	if seq == m.scrollbarHideSeq {
 		m.scrollbarVisible = false
 	}
-}
-
-// ScrollToTopAndAnimate scrolls the chat view to the top and returns a command to restart
-// any paused animations that are now visible.
-func (m *Chat) ScrollToTopAndAnimate() tea.Cmd {
-	return tea.Batch(m.ScrollToTop(), m.RestartPausedVisibleAnimations())
-}
-
-// ScrollToBottomAndAnimate scrolls the chat view to the bottom and returns a command to
-// restart any paused animations that are now visible.
-func (m *Chat) ScrollToBottomAndAnimate() tea.Cmd {
-	return tea.Batch(m.ScrollToBottom(), m.RestartPausedVisibleAnimations())
-}
-
-// ScrollByAndAnimate scrolls the chat view by the given number of line deltas and returns
-// a command to restart any paused animations that are now visible.
-func (m *Chat) ScrollByAndAnimate(lines int) tea.Cmd {
-	return tea.Batch(m.ScrollBy(lines), m.RestartPausedVisibleAnimations())
-}
-
-// ScrollToSelectedAndAnimate scrolls the chat view to the selected item and returns a
-// command to restart any paused animations that are now visible.
-func (m *Chat) ScrollToSelectedAndAnimate() tea.Cmd {
-	return tea.Batch(m.ScrollToSelected(), m.RestartPausedVisibleAnimations())
 }
 
 // SelectedItemInView returns whether the selected item is currently in view.
@@ -762,8 +654,6 @@ func (m *Chat) SelectLastInView() {
 // ClearMessages removes all messages from the chat list.
 func (m *Chat) ClearMessages() {
 	m.idInxMap = make(map[string]int)
-	m.pausedAnimations = make(map[string]struct{})
-	m.restartedAt = make(map[string]time.Time)
 	m.scrollbarVisible = false
 	m.list.SetItems()
 	m.ClearMouse()
@@ -788,10 +678,6 @@ func (m *Chat) RemoveMessage(id string) {
 			m.idInxMap[item.ID()] = i
 		}
 	}
-
-	// Clean up any paused animations for this message
-	delete(m.pausedAnimations, id)
-	delete(m.restartedAt, id)
 }
 
 // MessageItem returns the message item with the given ID, or nil if not found.

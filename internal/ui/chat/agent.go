@@ -5,12 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/tree"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 )
 
@@ -61,34 +59,26 @@ func NewAgentToolMessageItem(
 	return t
 }
 
-// Animate progresses the message animation if it should be spinning.
+// Advance progresses this item's own spinner and every nested tool's
+// spinner by one frame while the agent tool call is still running.
 //
-// Bumps the parent's F6 list-cache version on both the parent-tick and
-// nested-tick branches. Nested tools are not list entries of their
-// own — their IDs map to this parent's index in idInxMap
-// (internal/ui/model/chat.go:240-246) and their renders are embedded
-// inline in this parent's output — so the list only checks the
-// parent's version. Without the bump, the list cache would serve the
-// previously rendered frame indefinitely and the spinner would appear
-// frozen.
-func (a *AgentToolMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
+// Bumps the parent's F6 list-cache version: nested tools are not list
+// entries of their own — their renders are embedded inline in this
+// parent's output — so the list only checks the parent's version.
+// Without the bump, the list cache would serve the previously
+// rendered frame indefinitely and the spinners would appear frozen.
+func (a *AgentToolMessageItem) Advance() bool {
 	if a.result != nil || a.Status() == ToolStatusCanceled {
-		return nil
+		return false
 	}
-	if msg.ID == a.ID() {
-		a.Bump()
-		return a.anim.Animate(msg)
-	}
+	a.Bump()
+	a.anim.Advance()
 	for _, nestedTool := range a.nestedTools {
-		if msg.ID != nestedTool.ID() {
-			continue
-		}
 		if s, ok := nestedTool.(Animatable); ok {
-			a.Bump()
-			return s.Animate(msg)
+			s.Advance()
 		}
 	}
-	return nil
+	return true
 }
 
 // NestedTools returns the nested tools.
@@ -113,7 +103,9 @@ func (a *AgentToolMessageItem) NestedTools() []ToolMessageItem {
 func (a *AgentToolMessageItem) SetNestedTools(tools []ToolMessageItem) {
 	a.nestedTools = tools
 	a.clearCache()
-	a.Bump()
+	// Nested tools render inline in this parent's output, so replacing
+	// them changes the rendered height.
+	a.BumpLayout()
 }
 
 // AddNestedTool adds a nested tool.
@@ -124,7 +116,8 @@ func (a *AgentToolMessageItem) AddNestedTool(tool ToolMessageItem) {
 	}
 	a.nestedTools = append(a.nestedTools, tool)
 	a.clearCache()
-	a.Bump()
+	// A new nested tool adds inline lines to this parent's render.
+	a.BumpLayout()
 }
 
 // SetSubagentModel records the model the delegated sub-agent used so it
@@ -135,6 +128,8 @@ func (a *AgentToolMessageItem) SetSubagentModel(name string) {
 	}
 	a.subagentModel = name
 	a.clearCache()
+	// appendSubagentModel annotates the existing header line in place
+	// without adding lines, so this is a paint-only change.
 	a.Bump()
 }
 
@@ -245,31 +240,21 @@ func NewAgenticFetchToolMessageItem(
 	return t
 }
 
-// Animate progresses the message animation if it should be spinning.
-// See [AgentToolMessageItem.Animate] for the parent-bump rationale —
-// without an override, the embedded base.Animate would (a) drop
-// StepMsgs whose ID matches a nested child instead of the parent
-// (anim.Animate's ID check at internal/ui/anim/anim.go:326-329
-// silently returns nil), and (b) never invalidate the parent's
-// list-cache entry on a parent tick.
-func (a *AgenticFetchToolMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
+// Advance progresses this item's own spinner and every nested tool's
+// spinner by one frame while the fetch is still running. See
+// [AgentToolMessageItem.Advance] for the parent-bump rationale.
+func (a *AgenticFetchToolMessageItem) Advance() bool {
 	if a.result != nil || a.Status() == ToolStatusCanceled {
-		return nil
+		return false
 	}
-	if msg.ID == a.ID() {
-		a.Bump()
-		return a.anim.Animate(msg)
-	}
+	a.Bump()
+	a.anim.Advance()
 	for _, nestedTool := range a.nestedTools {
-		if msg.ID != nestedTool.ID() {
-			continue
-		}
 		if s, ok := nestedTool.(Animatable); ok {
-			a.Bump()
-			return s.Animate(msg)
+			s.Advance()
 		}
 	}
-	return nil
+	return true
 }
 
 // NestedTools returns the nested tools.
@@ -282,7 +267,9 @@ func (a *AgenticFetchToolMessageItem) NestedTools() []ToolMessageItem {
 func (a *AgenticFetchToolMessageItem) SetNestedTools(tools []ToolMessageItem) {
 	a.nestedTools = tools
 	a.clearCache()
-	a.Bump()
+	// Nested tools render inline in this parent's output, so replacing
+	// them changes the rendered height.
+	a.BumpLayout()
 }
 
 // AddNestedTool adds a nested tool.
@@ -293,7 +280,8 @@ func (a *AgenticFetchToolMessageItem) AddNestedTool(tool ToolMessageItem) {
 	}
 	a.nestedTools = append(a.nestedTools, tool)
 	a.clearCache()
-	a.Bump()
+	// A new nested tool adds inline lines to this parent's render.
+	a.BumpLayout()
 }
 
 // SetSubagentModel records the model the delegated sub-agent used so it
@@ -304,6 +292,8 @@ func (a *AgenticFetchToolMessageItem) SetSubagentModel(name string) {
 	}
 	a.subagentModel = name
 	a.clearCache()
+	// appendSubagentModel annotates the existing header line in place
+	// without adding lines, so this is a paint-only change.
 	a.Bump()
 }
 

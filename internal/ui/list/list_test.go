@@ -84,102 +84,112 @@ func TestList_RenderMemo_PointerKey(t *testing.T) {
 	require.Contains(t, first, "alpha")
 }
 
-// estimatingTrackedItem extends trackedItem with a cheap HeightEstimator,
-// mirroring how a real chat item (e.g. AssistantMessageItem,
-// baseToolMessageItem) both estimates and renders. estimateHits counts
-// calls separately from renderHits so a test can prove which path the
-// list actually took.
-type estimatingTrackedItem struct {
-	*trackedItem
-	estimatedHeight int
-	estimateHits    int
+// growableItem is a test helper whose rendered height it controls
+// directly. body renders as `height` identical lines so a test can
+// grow it and observe the new height. renderHits counts renders as in
+// trackedItem. Callers grow it via Grow, which BumpLayouts (height
+// changed); a plain Bump (via the embedded Versioned) simulates a
+// paint-only spinner frame that leaves the height untouched.
+type growableItem struct {
+	*Versioned
+	id         string
+	height     int
+	finished   bool
+	renderHits int
 }
 
-func newEstimatingTrackedItem(id, body string, finished bool, estimatedHeight int) *estimatingTrackedItem {
-	return &estimatingTrackedItem{
-		trackedItem:     newTrackedItem(id, body, finished),
-		estimatedHeight: estimatedHeight,
+func newGrowableItem(id string, height int, finished bool) *growableItem {
+	return &growableItem{
+		Versioned: NewVersioned(),
+		id:        id,
+		height:    height,
+		finished:  finished,
 	}
 }
 
-func (e *estimatingTrackedItem) EstimatedHeight(int) int {
-	e.estimateHits++
-	return e.estimatedHeight
+func (g *growableItem) Render(int) string {
+	g.renderHits++
+	if g.height <= 0 {
+		return ""
+	}
+	parts := make([]string, g.height)
+	for i := range g.height {
+		parts[i] = g.id + ":" + strconv.Itoa(i)
+	}
+	return strings.Join(parts, "\n")
 }
 
-var _ HeightEstimator = (*estimatingTrackedItem)(nil)
+func (g *growableItem) Finished() bool { return g.finished }
 
-// TestList_ScrollToBottom_UsesEstimatorNotRender guards against a
-// regression of a real freeze: repeatedly mutating the last item in a
-// list (as handleChildSessionMessage does on every event from a live
-// sub-agent, and as an animation tick does via Bump) and then calling
-// ScrollToBottom — exactly the internal/ui/model.Chat.ScrollToBottomAndAnimate
-// path taken on every such event while in follow mode — must not force
-// a full, expensive Render of that item purely to compute the new
-// scroll offset.
-//
-// TotalHeight/Offset already avoid this: itemHeightForSum (list.go)
-// uses the item's cheap HeightEstimator, falling back to Render only
-// for items that don't implement it, specifically so that "opening a
-// long conversation does not have to render every off-screen item"
-// (see its doc comment). lastOffsetItem and VisibleItemIndices — which
-// ScrollToBottom and the animation-tick visibility check call,
-// respectively — now share that same fallback instead of
-// unconditionally calling getItem (a full Render) on every item they
-// walk over, even ones with a stale cache entry from a version bump
-// one line ago.
-//
-// This test is deterministic (a call count, not a timing threshold) so
-// it holds regardless of hardware speed. Before the fix, a burst of
-// events against a large or slow-to-render item (a long prompt with
-// several nested tool calls, as produced by a real live sub-agent
-// transcript) rendered on every single event; that Render-instead-of-
-// estimate cost is what let Update fall behind and triggered the
-// unbounded goroutine pileup recovered from a real frozen session (see
-// internal/ui/model/freeze_repro_test.go for the animation-restart
-// half of that reproduction).
-func TestList_ScrollToBottom_UsesEstimatorNotRender(t *testing.T) {
+// Grow increases the item's rendered height and BumpLayouts, the
+// contract a real item follows when a mutation changes its line count.
+func (g *growableItem) Grow(by int) {
+	g.height += by
+	g.BumpLayout()
+}
+
+// TestList_PaintBumpDoesNotReRenderForPositioning is the successor to
+// the deleted estimator test. It guards the core promise of the
+// paint/layout version split: a paint-only bump (Bump) — a spinner
+// frame at 20fps, the exact thing that used to invalidate off-screen
+// heights — must never force a re-render in the positioning paths
+// (ScrollToBottom / AtBottom / ScrollBy). A BumpLayout, by contrast,
+// must force exactly one re-render on the next positioning query and
+// the recomputed anchor must reflect the item's NEW height. That last
+// clause is the direct regression guard for the "can't scroll to the
+// bottom / kicked up" bug: the healing render has to actually happen
+// and the anchor has to move to the true last line.
+func TestList_PaintBumpDoesNotReRenderForPositioning(t *testing.T) {
 	t.Parallel()
 
-	a := newEstimatingTrackedItem("a", "alpha", true, 1)
-	// last is unfinished (still "spinning"), matching a live in-progress
-	// tool call — the exact item type that keeps getting mutated by
-	// incoming sub-agent events.
-	last := newEstimatingTrackedItem("last", "the active item", false, 1)
-	l := NewList(a, last)
+	// A tall first item plus a short, still-spinning last item so the
+	// content overflows the viewport and the bottom is a real,
+	// computed position rather than "everything fits".
+	head := newGrowableItem("head", 30, true)
+	last := newGrowableItem("last", 3, false)
+	l := NewList(head, last)
 	l.SetSize(40, 10)
-	_ = l.Render() // populate the cache for both items.
-	require.Equal(t, 1, last.renderHits)
 
-	// Simulate a burst of child-session events: each one mutates the
-	// last item (bumping its version, as SetNestedTools/Animate.Bump
-	// do) and then re-anchors to the bottom, as
-	// Chat.ScrollToBottomAndAnimate does on every such event while
-	// following. Between mutations we deliberately do NOT call
-	// l.Render(), because in production ScrollToBottom (inside Update)
-	// runs long before the next Draw — the cost we're measuring here
-	// is paid inside Update itself, not at Draw time.
-	const events = 50
-	for range events {
+	// Anchor to the bottom and render once so the last item is in the
+	// cache with a valid layout version. This is the "after an initial
+	// render" baseline.
+	l.ScrollToBottom()
+	_ = l.Render()
+	require.Equal(t, 1, last.renderHits, "initial render populates the cache once")
+
+	// A burst of paint-only bumps interleaved with the positioning
+	// queries a follow-mode consumer runs on every event. None of them
+	// may re-render: the layout version is untouched, so the cached
+	// height survives.
+	const frames = 50
+	for range frames {
 		last.Bump()
 		l.ScrollToBottom()
+		_ = l.AtBottom()
+		l.ScrollBy(3)
+		l.ScrollBy(-3)
 	}
-
-	t.Logf("last item: %d Render calls, %d EstimatedHeight calls for %d events",
-		last.renderHits, last.estimateHits, events)
-
-	// ScrollToBottom must use the cheap estimator instead of rendering
-	// the mutated item on every call. The one render from the initial
-	// l.Render() above is the only Render call expected; every
-	// ScrollToBottom call afterwards should hit the estimator.
 	require.Equal(t, 1, last.renderHits,
-		"ScrollToBottom must not re-render the mutated last item on "+
-			"every call; it should use its HeightEstimator instead — "+
-			"this is the expensive-per-event path that let Update fall "+
-			"behind under a burst of live sub-agent events")
-	require.Equal(t, events, last.estimateHits,
-		"every ScrollToBottom call after a mutation should consult the "+
-			"cheap estimator")
+		"paint-only bumps must not re-render the item in positioning "+
+			"paths; the cached height survives via the layout version")
+
+	// A layout change must heal the cache. The next positioning query
+	// renders the item exactly once and the anchor reflects the new
+	// height.
+	last.Grow(4) // 3 -> 7 lines, BumpLayout.
+	l.ScrollToBottom()
+	require.Equal(t, 2, last.renderHits,
+		"a BumpLayout must force exactly one re-render on the next "+
+			"positioning query")
+
+	// The healed anchor plus a Render must actually show the item's
+	// true last line — the thing that was previously unreachable.
+	out := l.Render()
+	require.Equal(t, 2, last.renderHits, "Render reuses the just-healed cache entry")
+	require.Contains(t, out, "last:6",
+		"ScrollToBottom + Render must reveal the grown item's true "+
+			"last line (regression: user could not reach the bottom)")
+	require.True(t, l.AtBottom())
 }
 
 // TestList_SetSize_WidthChangeInvalidates covers the F6 invariant
@@ -508,18 +518,29 @@ func TestList_SetItems_AllNewDropsEveryEntry(t *testing.T) {
 	require.Equal(t, 2, c.renderHits, "previously-dropped item must re-render")
 }
 
-// TestVersioned_BumpMonotonic covers the basic Versioned contract:
-// Version() starts at zero and Bump() advances it monotonically.
-func TestVersioned_BumpMonotonic(t *testing.T) {
+// TestVersioned_BumpAndBumpLayout covers the two-counter Versioned
+// contract: Bump advances only the paint counter, while BumpLayout
+// advances both. This is the core invariant the height oracle relies
+// on — a paint bump must never move the layout counter.
+func TestVersioned_BumpAndBumpLayout(t *testing.T) {
 	t.Parallel()
 
 	v := NewVersioned()
-	require.Equal(t, uint64(0), v.Version())
+	require.Equal(t, uint64(0), v.PaintVersion())
+	require.Equal(t, uint64(0), v.LayoutVersion())
+
 	v.Bump()
-	require.Equal(t, uint64(1), v.Version())
+	require.Equal(t, uint64(1), v.PaintVersion(), "Bump advances paint")
+	require.Equal(t, uint64(0), v.LayoutVersion(), "Bump must not touch layout")
+
 	v.Bump()
 	v.Bump()
-	require.Equal(t, uint64(3), v.Version())
+	require.Equal(t, uint64(3), v.PaintVersion())
+	require.Equal(t, uint64(0), v.LayoutVersion())
+
+	v.BumpLayout()
+	require.Equal(t, uint64(4), v.PaintVersion(), "BumpLayout advances paint too")
+	require.Equal(t, uint64(1), v.LayoutVersion(), "BumpLayout advances layout")
 }
 
 // multiLineItem is a test helper whose Render returns a fixed
@@ -889,4 +910,71 @@ func TestList_F7_ViewportZeroOrNegative(t *testing.T) {
 			require.Equal(t, 0, l.height, "render must normalize height to zero")
 		})
 	}
+}
+
+// TestList_EndAnchoredFollow covers the follow-mode lifecycle: once
+// anchored, appends and layout growth keep the viewport glued to the
+// end (AtBottom stays true, Render shows the end) with no explicit
+// re-scroll; scrolling up detaches; a large downward scroll re-anchors
+// via the clamp.
+func TestList_EndAnchoredFollow(t *testing.T) {
+	t.Parallel()
+
+	head := newGrowableItem("head", 30, true)
+	last := newGrowableItem("last", 3, false)
+	l := NewList(head, last)
+	l.SetSize(40, 10)
+
+	l.ScrollToBottom()
+	require.True(t, l.AtBottom())
+	require.Contains(t, l.Render(), "last:2", "shows the current end")
+
+	// Grow the anchored last item: no explicit re-scroll, yet the new
+	// last line must be on screen and AtBottom stays true.
+	last.Grow(5) // 3 -> 8 lines.
+	require.True(t, l.AtBottom(), "follow keeps us at bottom across layout growth")
+	require.Contains(t, l.Render(), "last:7", "the grown end is visible without re-scroll")
+
+	// Append a fresh item while following: the viewport follows to it.
+	tail := newGrowableItem("tail", 2, true)
+	l.AppendItems(tail)
+	require.True(t, l.AtBottom(), "follow tracks appended content")
+	require.Contains(t, l.Render(), "tail:1", "the appended end is visible without re-scroll")
+
+	// Scroll up one line: this detaches from follow.
+	l.ScrollBy(-1)
+	require.False(t, l.AtBottom(), "scrolling up detaches from follow")
+
+	// A large downward scroll reaches the true bottom and re-anchors.
+	l.ScrollBy(1000)
+	require.True(t, l.AtBottom(), "a large downward scroll re-anchors at the bottom")
+	require.Contains(t, l.Render(), "tail:1", "re-anchored viewport shows the end")
+}
+
+// TestList_TotalHeightApproxConverges covers the scrollbar-only
+// approximation contract: before any render, unrendered items each
+// contribute the constant 1; after a full render the approximation
+// equals the true total height. It must never render on its own.
+func TestList_TotalHeightApproxConverges(t *testing.T) {
+	t.Parallel()
+
+	a := newGrowableItem("a", 4, true)
+	b := newGrowableItem("b", 6, true)
+	c := newGrowableItem("c", 5, true)
+	l := NewList(a, b, c)
+	l.SetSize(40, 100) // tall enough to render everything at once.
+
+	// Nothing rendered yet: every item contributes the constant 1 and
+	// the approximation must not have rendered anything.
+	require.Equal(t, 3, l.TotalHeightApprox(),
+		"unrendered items each contribute the approximate constant 1")
+	require.Equal(t, 0, a.renderHits, "TotalHeightApprox must never render")
+	require.Equal(t, 0, b.renderHits)
+	require.Equal(t, 0, c.renderHits)
+
+	// After a full render the approximation converges to the true
+	// total (4 + 6 + 5 = 15).
+	_ = l.Render()
+	require.Equal(t, 15, l.TotalHeightApprox(),
+		"after rendering, the approximation equals the true total height")
 }

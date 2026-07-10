@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
@@ -146,6 +147,17 @@ type Coordinator interface {
 	// CancelSchedule stops a scheduled task by its task ID. It is a
 	// no-op if the task is unknown or already stopped.
 	CancelSchedule(taskID string)
+	// ReconcileStuckSession scans sessionID and every descendant
+	// session (sub-agent and workflow sessions reachable through the
+	// session tree) for tool calls left unfinished by a run that
+	// never got to persist its terminal state -- e.g. the app was
+	// closed or crashed mid-turn. It writes the same synthetic-
+	// cancellation records a live run's own error path would have
+	// written, so the UI stops rendering them as perpetually running.
+	// A session with a genuinely live run (or any live ancestor) is
+	// left untouched, along with its descendants. Returns the number
+	// of tool calls that were reconciled.
+	ReconcileStuckSession(ctx context.Context, sessionID string) (int, error)
 }
 
 type coordinator struct {
@@ -188,6 +200,11 @@ type coordinator struct {
 	// ScheduleCron/ScheduleWakeup tools) so they can be listed and
 	// canceled while they run.
 	schedules *scheduleRegistry
+
+	// subAgents tracks every sub-agent invocation dispatched via the
+	// agent, agentic_fetch, and Workflow tools, so AgentList and
+	// AgentProgress can report on them while they run.
+	subAgents *subAgentRegistry
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -248,6 +265,7 @@ func NewCoordinator(
 		defaultTaskAgentKey: csync.NewValue[string](""),
 		workflows:           newWorkflowRegistry(),
 		schedules:           newScheduleRegistry(),
+		subAgents:           newSubAgentRegistry(),
 		allSkills:           allSkills,
 		activeSkills:        activeSkills,
 		skillTracker:        skillTracker,
@@ -794,11 +812,13 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// under the "Edit" name so the model always calls the same tool. Kept in
 	// the original list position so string-mode requests are unchanged.
 	if editMode == config.EditModeHashline {
-		allTools = append(allTools,
+		allTools = append(
+			allTools,
 			tools.NewHashlineEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.snapshots, tsblock.New(), c.cfg.WorkingDir(), c.cfg.Config().Options.ValidateEditSyntax()),
 		)
 	} else {
-		allTools = append(allTools,
+		allTools = append(
+			allTools,
 			tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 			tools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		)
@@ -826,6 +846,8 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		c.scheduleWakeupTool(),
 		c.scheduleListTool(),
 		c.scheduleCancelTool(),
+		c.agentListTool(),
+		c.agentProgressTool(),
 		tools.NewTodosTool(c.sessions),
 		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.skillTracker, c.loadedSkills, editMode, c.snapshots, c.cfg.Config().Options.SummarizeReads(), c.cfg.Config().Options.SummarizeMinLines(), c.cfg.Config().Options.SummarizeBudget(), c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
@@ -1357,8 +1379,28 @@ func (c *coordinator) CancelKeepQueue(sessionID string) {
 	c.currentAgent.CancelKeepQueue(sessionID)
 }
 
+// CancelAll stops every run the coordinator knows about: the main
+// coder agent, every task/sub-agent instance dispatched via the
+// "agent" tool (each mode/model combination runs on its own
+// [SessionAgent], separate from currentAgent), every background
+// workflow, and every scheduled task. Called on app shutdown so
+// nothing is left running headless after the process exits — without
+// this, an in-flight sub-agent, workflow, or scheduled task is simply
+// abandoned, leaving its session with an unfinished tool call that
+// the UI then displays as perpetually running on the next resume.
 func (c *coordinator) CancelAll() {
 	c.currentAgent.CancelAll()
+	for taskAgent := range c.taskAgents.Seq() {
+		if taskAgent != nil {
+			taskAgent.CancelAll()
+		}
+	}
+	for _, wf := range c.workflows.list() {
+		c.workflows.cancel(wf.SessionID)
+	}
+	for _, sched := range c.schedules.listAll() {
+		c.schedules.stop(sched.ID, "canceled")
+	}
 }
 
 func (c *coordinator) ClearQueue(sessionID string) {
@@ -1601,22 +1643,43 @@ type subAgentParams struct {
 	// SessionSetup is an optional callback invoked after session creation
 	// but before agent execution, for custom session configuration.
 	SessionSetup func(sessionID string)
+	// ResumeSessionID, when set, continues an existing agent-tool
+	// session instead of creating a new one (see resumeAgentToolSession
+	// for the validation this goes through). SessionSetup and
+	// SessionTitle are ignored on resume: the session already exists
+	// and was set up on its first run.
+	ResumeSessionID string
+	// ToolName identifies the dispatching tool ("agent",
+	// "agentic_fetch", or "Workflow") for the subAgentRegistry entry.
+	ToolName string
+	// Label is a short human-readable description of the task,
+	// recorded in the subAgentRegistry entry for AgentList/
+	// AgentProgress. Defaults to a truncated Prompt if empty.
+	Label string
 }
 
 // runSubAgent runs a sub-agent and handles session management and cost accumulation.
-// It creates a sub-session, runs the agent with the given prompt, and propagates
-// the cost to the parent session.
+// It creates a sub-session (or continues an existing one, see
+// subAgentParams.ResumeSessionID), runs the agent with the given prompt, and
+// propagates the cost to the parent session.
 func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
-	// Create sub-session
-	agentToolSessionID := c.sessions.CreateAgentToolSessionID(params.AgentMessageID, params.ToolCallID)
-	session, err := c.sessions.CreateTaskSession(ctx, agentToolSessionID, params.SessionID, params.SessionTitle)
-	if err != nil {
-		return fantasy.ToolResponse{}, fmt.Errorf("create session: %w", err)
-	}
-
-	// Call session setup function if provided
-	if params.SessionSetup != nil {
-		params.SessionSetup(session.ID)
+	var subSession session.Session
+	var err error
+	if params.ResumeSessionID != "" {
+		subSession, err = c.resumeAgentToolSession(ctx, params.ResumeSessionID, params.SessionID)
+		if err != nil {
+			return fantasy.NewTextErrorResponse(err.Error()), nil
+		}
+	} else {
+		agentToolSessionID := c.sessions.CreateAgentToolSessionID(params.AgentMessageID, params.ToolCallID)
+		subSession, err = c.sessions.CreateTaskSession(ctx, agentToolSessionID, params.SessionID, params.SessionTitle)
+		if err != nil {
+			return fantasy.ToolResponse{}, fmt.Errorf("create session: %w", err)
+		}
+		// Call session setup function if provided
+		if params.SessionSetup != nil {
+			params.SessionSetup(subSession.ID)
+		}
 	}
 
 	// Get model configuration
@@ -1631,10 +1694,29 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		return fantasy.ToolResponse{}, errModelProviderNotConfigured
 	}
 
+	label := cmp.Or(params.Label, truncateForList(params.Prompt, 80))
+	c.subAgents.register(SubAgentStatus{
+		SessionID:       subSession.ID,
+		ParentSessionID: params.SessionID,
+		ToolCallID:      params.ToolCallID,
+		ToolName:        params.ToolName,
+		Label:           label,
+		Provider:        model.ModelCfg.Provider,
+		Model:           model.ModelCfg.Model,
+		StartedAt:       time.Now(),
+		State:           SubAgentRunning,
+	})
+	defer func() {
+		go func() {
+			time.Sleep(subAgentLingerAfterFinish)
+			c.subAgents.remove(subSession.ID)
+		}()
+	}()
+
 	// Run the agent
 	run := func() (*fantasy.AgentResult, error) {
 		return params.Agent.Run(ctx, SessionAgentCall{
-			SessionID:        session.ID,
+			SessionID:        subSession.ID,
 			Prompt:           params.Prompt,
 			MaxOutputTokens:  maxTokens,
 			ProviderOptions:  getProviderOptions(model, providerCfg),
@@ -1660,25 +1742,57 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		})
 	}
 	if err != nil {
-		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to generate response: %s", err)), nil
+		c.subAgents.finish(subSession.ID, SubAgentFailed, err.Error())
+		return fantasy.NewTextErrorResponse(fmt.Sprintf(
+			"Failed to generate response: %s\n\nThe sub-agent's progress up to this point is preserved in session %q. Retry the agent tool with resume_session_id=%q to continue from where it left off instead of starting over.",
+			err, subSession.ID, subSession.ID,
+		)), nil
 	}
 
 	// Update parent session cost on a best-effort basis. A failure here must
 	// not discard the sub-agent output that was already produced.
-	if err := c.updateParentSessionCost(ctx, session.ID, params.SessionID); err != nil {
+	if err := c.updateParentSessionCost(ctx, subSession.ID, params.SessionID); err != nil {
 		slog.Warn(
 			"Failed to update parent session cost",
-			"child_session", session.ID,
+			"child_session", subSession.ID,
 			"parent_session", params.SessionID,
 			"error", err,
 		)
 	}
 
+	c.subAgents.finish(subSession.ID, SubAgentDone, "")
 	output := subAgentOutput(result)
 	if output == "" {
 		return fantasy.NewTextErrorResponse("Sub-agent completed but produced no text output."), nil
 	}
 	return fantasy.NewTextResponse(output), nil
+}
+
+// subAgentLingerAfterFinish is how long a finished sub-agent remains
+// in the registry (and thus AgentList) before being cleared,
+// mirroring workflowLingerAfterFinish.
+const subAgentLingerAfterFinish = 5 * time.Second
+
+// resumeAgentToolSession validates and loads an existing agent-tool
+// session for a resumed "agent" tool call. The session must be a child
+// of parentSessionID (the current coder session), so a resume request
+// cannot reach into an unrelated conversation, and must not currently
+// be busy on another task-agent instance, so two resumes of the same
+// session cannot race each other.
+func (c *coordinator) resumeAgentToolSession(ctx context.Context, resumeSessionID, parentSessionID string) (session.Session, error) {
+	sess, err := c.sessions.Get(ctx, resumeSessionID)
+	if err != nil {
+		return session.Session{}, fmt.Errorf("resume_session_id %q not found: %w", resumeSessionID, err)
+	}
+	if sess.ParentSessionID != parentSessionID {
+		return session.Session{}, fmt.Errorf("resume_session_id %q does not belong to this conversation", resumeSessionID)
+	}
+	for taskAgent := range c.taskAgents.Seq() {
+		if taskAgent != nil && taskAgent.IsSessionBusy(resumeSessionID) {
+			return session.Session{}, fmt.Errorf("session %q is still running; wait for it to finish before resuming", resumeSessionID)
+		}
+	}
+	return sess, nil
 }
 
 func subAgentOutput(result *fantasy.AgentResult) string {

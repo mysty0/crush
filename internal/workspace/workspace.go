@@ -130,6 +130,12 @@ type Workspace interface {
 	// AgentCancelSchedule stops a scheduled task by its task ID. It is
 	// a no-op if the task is unknown or already stopped.
 	AgentCancelSchedule(taskID string)
+	// AgentReconcileStuckSession scans a session and its descendant
+	// sub-agent/workflow sessions for tool calls left unfinished by an
+	// interrupted run (e.g. the app was closed or crashed mid-turn)
+	// and marks them canceled. Returns the number of tool calls that
+	// were reconciled.
+	AgentReconcileStuckSession(ctx context.Context, sessionID string) (int, error)
 
 	// RewindListPoints returns the user messages a session can be rewound
 	// to, newest first.

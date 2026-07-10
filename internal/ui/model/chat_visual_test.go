@@ -26,10 +26,11 @@ func newVisualTestItem(id string, lines ...string) *visualTestItem {
 	return &visualTestItem{id: id, lines: lines, startLine: -1, startCol: -1, endLine: -1, endCol: -1}
 }
 
-func (v *visualTestItem) ID() string      { return v.id }
-func (v *visualTestItem) Version() uint64 { return 0 }
-func (v *visualTestItem) Finished() bool  { return true }
-func (v *visualTestItem) SetFocused(bool) {}
+func (v *visualTestItem) ID() string            { return v.id }
+func (v *visualTestItem) PaintVersion() uint64  { return 0 }
+func (v *visualTestItem) LayoutVersion() uint64 { return 0 }
+func (v *visualTestItem) Finished() bool        { return true }
+func (v *visualTestItem) SetFocused(bool)       {}
 
 func (v *visualTestItem) RawRender(int) string {
 	return strings.Join(v.lines, "\n")

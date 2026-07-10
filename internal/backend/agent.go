@@ -223,6 +223,25 @@ func (b *Backend) QueuedPrompts(workspaceID, sessionID string) (int, error) {
 	return ws.AgentCoordinator.QueuedPrompts(sessionID), nil
 }
 
+// ReconcileStuckSession scans a session and its descendant sub-agent
+// or workflow sessions for tool calls left unfinished by a run that
+// never got to persist its terminal state (e.g. the app was closed
+// or crashed mid-turn), and marks them canceled so they stop
+// rendering as perpetually running. It returns the number of tool
+// calls that were reconciled.
+func (b *Backend) ReconcileStuckSession(ctx context.Context, workspaceID, sessionID string) (int, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return 0, err
+	}
+
+	if ws.AgentCoordinator == nil {
+		return 0, nil
+	}
+
+	return ws.AgentCoordinator.ReconcileStuckSession(ctx, sessionID)
+}
+
 // ClearQueue clears the prompt queue for the session.
 func (b *Backend) ClearQueue(workspaceID, sessionID string) error {
 	ws, err := b.GetWorkspace(workspaceID)
