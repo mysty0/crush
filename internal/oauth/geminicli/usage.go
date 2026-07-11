@@ -14,8 +14,10 @@ import (
 // Assist retrieveUserQuotaSummary RPC, e.g. "Gemini 2.5 Pro" over a "24h"
 // window.
 type UsageBucket struct {
-	// Label is the bucket's (or, if the bucket has none, its group's)
-	// display name, e.g. "Gemini 2.5 Pro".
+	// Label disambiguates the bucket by combining its group's display
+	// name with its own, e.g. "Gemini 2.5 Pro — 5h" and "Gemini 2.5
+	// Flash — 5h" rather than two indistinguishable "5h" entries. See
+	// combineLabel for the exact rule.
 	Label string
 	// Window is the human-readable window the bucket covers, e.g. "24h".
 	// It is empty when the server does not report one.
@@ -150,10 +152,6 @@ func fetchQuotaBuckets(ctx context.Context, accessToken, projectID string, id Id
 	var buckets []UsageBucket
 	for _, g := range parsed.Groups {
 		for _, b := range g.Buckets {
-			label := b.DisplayName
-			if label == "" {
-				label = g.DisplayName
-			}
 			frac := -1.0
 			if b.RemainingFraction != nil {
 				frac = clampFraction(*b.RemainingFraction)
@@ -165,7 +163,7 @@ func fetchQuotaBuckets(ctx context.Context, accessToken, projectID string, id Id
 				}
 			}
 			buckets = append(buckets, UsageBucket{
-				Label:             label,
+				Label:             combineLabel(g.DisplayName, b.DisplayName),
 				Window:            b.Window,
 				RemainingFraction: frac,
 				ResetsAt:          resetsAt,
@@ -174,6 +172,23 @@ func fetchQuotaBuckets(ctx context.Context, accessToken, projectID string, id Id
 		}
 	}
 	return buckets, nil
+}
+
+// combineLabel joins a quota group's display name with its bucket's own
+// display name so that buckets sharing a generic name across different
+// groups (e.g. every group having its own "5h" and "Weekly" bucket)
+// don't collapse into indistinguishable duplicate labels once flattened.
+// Falls back to whichever of the two is non-empty when they match or one
+// is missing.
+func combineLabel(groupName, bucketName string) string {
+	switch {
+	case groupName == "":
+		return bucketName
+	case bucketName == "" || bucketName == groupName:
+		return groupName
+	default:
+		return groupName + " — " + bucketName
+	}
 }
 
 // clampFraction constrains a quota fraction to the closed range 0..1.

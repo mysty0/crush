@@ -13,7 +13,7 @@ import (
 // TestFetchUsageSuccess covers the happy path where both loadCodeAssist and
 // retrieveUserQuotaSummary succeed, verifying the required "project" field
 // (not "cloudaicompanionProject") is sent and buckets are flattened out of
-// their groups.
+// their groups with a group-qualified label.
 func TestFetchUsageSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "Bearer tok", r.Header.Get("Authorization"))
@@ -50,13 +50,58 @@ func TestFetchUsageSuccess(t *testing.T) {
 	require.Len(t, usage.Buckets, 2)
 
 	b := usage.Buckets[0]
-	require.Equal(t, "Gemini 2.5 Pro", b.Label)
+	require.Equal(t, "Gemini — Gemini 2.5 Pro", b.Label)
 	require.Equal(t, "24h", b.Window)
 	require.InDelta(t, 0.75, b.RemainingFraction, 1e-9)
 	require.False(t, b.ResetsAt.IsZero())
 	require.False(t, b.Disabled)
 
 	require.True(t, usage.Buckets[1].Disabled)
+}
+
+// TestFetchUsageDisambiguatesSharedWindowNames is a regression test for
+// buckets sharing a generic window-based display name (e.g. "5h",
+// "Weekly") across multiple groups: without combining the group's name
+// into the label, two different groups' "5h" buckets would render as
+// two indistinguishable duplicate "5h" entries.
+func TestFetchUsageDisambiguatesSharedWindowNames(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1internal:loadCodeAssist":
+			_, _ = w.Write([]byte(`{}`))
+		case "/v1internal:retrieveUserQuotaSummary":
+			_, _ = w.Write([]byte(`{
+				"groups": [
+					{"displayName": "Gemini 2.5 Pro", "buckets": [
+						{"displayName": "5h", "remainingFraction": 0.9},
+						{"displayName": "Weekly", "remainingFraction": 0.5}
+					]},
+					{"displayName": "Gemini 2.5 Flash", "buckets": [
+						{"displayName": "5h", "remainingFraction": 0.4},
+						{"displayName": "Weekly", "remainingFraction": 0.2}
+					]}
+				]
+			}`))
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	withCodeAssistEndpoint(t, srv.URL)
+
+	usage, err := FetchUsage(context.Background(), "tok", "proj", GeminiCLIIdentity)
+	require.NoError(t, err)
+	require.Len(t, usage.Buckets, 4)
+
+	labels := make([]string, len(usage.Buckets))
+	for i, b := range usage.Buckets {
+		labels[i] = b.Label
+	}
+	require.ElementsMatch(t, []string{
+		"Gemini 2.5 Pro — 5h", "Gemini 2.5 Pro — Weekly",
+		"Gemini 2.5 Flash — 5h", "Gemini 2.5 Flash — Weekly",
+	}, labels, "every label must be unique despite sharing generic window-based bucket names")
 }
 
 // TestFetchUsageQuotaError covers a retrieveUserQuotaSummary failure
@@ -131,6 +176,15 @@ func TestFetchUsageBucketWithoutFractionIsUnknown(t *testing.T) {
 	b := usage.Buckets[0]
 	require.Equal(t, "Gemini", b.Label, "falls back to the group's display name when the bucket has none")
 	require.InDelta(t, -1.0, b.RemainingFraction, 1e-9)
+}
+
+// TestCombineLabel covers the label-disambiguation rule directly.
+func TestCombineLabel(t *testing.T) {
+	require.Equal(t, "Gemini 2.5 Pro", combineLabel("Gemini 2.5 Pro", ""))
+	require.Equal(t, "Gemini 2.5 Pro", combineLabel("", "Gemini 2.5 Pro"))
+	require.Equal(t, "Gemini 2.5 Pro", combineLabel("Gemini 2.5 Pro", "Gemini 2.5 Pro"))
+	require.Equal(t, "Gemini 2.5 Pro — 5h", combineLabel("Gemini 2.5 Pro", "5h"))
+	require.Equal(t, "", combineLabel("", ""))
 }
 
 // readBody decodes a request's JSON body into a generic map for field

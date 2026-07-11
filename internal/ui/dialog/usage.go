@@ -143,8 +143,66 @@ func (u *Usage) fetchUsageCmd() tea.Cmd {
 			lines, err := u.fetchProviderUsage(ctx, cfg, p.id)
 			sections = append(sections, usageSection{providerName: p.name, lines: lines, err: err})
 		}
-		return usageLoadedMsg{sections: sections}
+		return usageLoadedMsg{sections: mergeSharedAccountSections(sections)}
 	}
+}
+
+// mergeSharedAccountSections collapses the Gemini CLI and Antigravity
+// sections into one when both are present and report identical data.
+// The two providers are confirmed to share the exact same Cloud Code
+// Assist backend and account quota (see
+// docs/antigravity-cli-oauth-findings.md), so when both are logged in
+// with the same underlying Google account they always report the same
+// tier and buckets; showing that data twice under two different
+// headings looks like duplicated "5h"/"weekly" limits rather than the
+// same limits reported by two names for the same subscription. If the
+// two logins somehow resolved to different accounts (different results),
+// they are left as separate sections since merging would be wrong.
+func mergeSharedAccountSections(sections []usageSection) []usageSection {
+	geminiIdx, antigravityIdx := -1, -1
+	for i, s := range sections {
+		switch s.providerName {
+		case "Gemini CLI":
+			geminiIdx = i
+		case "Google Antigravity":
+			antigravityIdx = i
+		}
+	}
+	if geminiIdx == -1 || antigravityIdx == -1 {
+		return sections
+	}
+
+	gemini, antigravity := sections[geminiIdx], sections[antigravityIdx]
+	if gemini.err != nil || antigravity.err != nil || !usageLinesEqual(gemini.lines, antigravity.lines) {
+		return sections
+	}
+
+	merged := make([]usageSection, 0, len(sections)-1)
+	for i, s := range sections {
+		if i == antigravityIdx {
+			continue
+		}
+		if i == geminiIdx {
+			s.providerName = "Gemini CLI / Antigravity"
+		}
+		merged = append(merged, s)
+	}
+	return merged
+}
+
+// usageLinesEqual reports whether two usage line slices carry the same
+// labels and values, regardless of order sensitivity (both sides come
+// from the same code path so ordering is already stable).
+func usageLinesEqual(a, b []usageLine) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchProviderUsage fetches and formats plan usage for a single

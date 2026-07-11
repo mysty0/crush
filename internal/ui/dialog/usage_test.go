@@ -180,3 +180,60 @@ func TestHumanizeUntilDuration(t *testing.T) {
 	assert.Equal(t, "2h13m", humanizeUntilDuration(2*time.Hour+13*time.Minute))
 	assert.Equal(t, "1d2h", humanizeUntilDuration(26*time.Hour))
 }
+
+// TestMergeSharedAccountSections covers the Gemini CLI / Antigravity
+// merge: since both providers share the exact same Cloud Code Assist
+// backend and account quota, showing byte-identical usage under two
+// separate headings looks like duplicated "5h"/"weekly" limits rather
+// than the same limits reported twice. Sections should be merged when
+// they match and left alone otherwise (different data, an error on
+// either side, or either provider missing).
+func TestMergeSharedAccountSections(t *testing.T) {
+	t.Parallel()
+
+	sameLines := []usageLine{{"Gemini 2.5 Pro — 5h:", "90% remaining"}}
+
+	t.Run("merges when both report identical data", func(t *testing.T) {
+		t.Parallel()
+		sections := []usageSection{
+			{providerName: "Claude Code", lines: []usageLine{{"5-hour:", "10% used"}}},
+			{providerName: "Gemini CLI", lines: sameLines},
+			{providerName: "Google Antigravity", lines: sameLines},
+		}
+		merged := mergeSharedAccountSections(sections)
+		require.Len(t, merged, 2)
+		assert.Equal(t, "Claude Code", merged[0].providerName)
+		assert.Equal(t, "Gemini CLI / Antigravity", merged[1].providerName)
+		assert.Equal(t, sameLines, merged[1].lines)
+	})
+
+	t.Run("left separate when data differs", func(t *testing.T) {
+		t.Parallel()
+		sections := []usageSection{
+			{providerName: "Gemini CLI", lines: []usageLine{{"Gemini 2.5 Pro — 5h:", "90% remaining"}}},
+			{providerName: "Google Antigravity", lines: []usageLine{{"Gemini 2.5 Pro — 5h:", "50% remaining"}}},
+		}
+		merged := mergeSharedAccountSections(sections)
+		require.Len(t, merged, 2)
+		assert.Equal(t, "Gemini CLI", merged[0].providerName)
+		assert.Equal(t, "Google Antigravity", merged[1].providerName)
+	})
+
+	t.Run("left separate when either side errored", func(t *testing.T) {
+		t.Parallel()
+		sections := []usageSection{
+			{providerName: "Gemini CLI", lines: sameLines},
+			{providerName: "Google Antigravity", err: assert.AnError},
+		}
+		merged := mergeSharedAccountSections(sections)
+		require.Len(t, merged, 2)
+	})
+
+	t.Run("no-op when only one is present", func(t *testing.T) {
+		t.Parallel()
+		sections := []usageSection{{providerName: "Gemini CLI", lines: sameLines}}
+		merged := mergeSharedAccountSections(sections)
+		require.Len(t, merged, 1)
+		assert.Equal(t, "Gemini CLI", merged[0].providerName)
+	})
+}
