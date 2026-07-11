@@ -4,12 +4,15 @@ import "charm.land/catwalk/pkg/catwalk"
 
 // ThinkingBudgetLevels enumerates the discrete extended-thinking
 // presets offered for providers that configure thinking via a numeric
-// token budget (Anthropic direct, Bedrock) rather than catwalk-supplied
-// named effort levels (as OpenAI-style reasoning models use). Selecting
-// a level sets SelectedModel.ReasoningEffort to its name; the actual
-// budget is resolved by ThinkingBudgetTokens. "off" disables thinking
-// outright, mirroring the low/medium/high/off intensity picker Claude
-// Code offers instead of a plain on/off toggle.
+// token budget or discrete level (Anthropic direct, Bedrock, Google)
+// rather than catwalk-supplied named effort levels (as OpenAI-style
+// reasoning models use). Selecting a level sets
+// SelectedModel.ReasoningEffort to its name; the actual budget/level is
+// resolved downstream (ThinkingBudgetTokens for Anthropic/Bedrock/
+// Gemini 2.x's numeric budget, or a provider-specific level mapping for
+// Gemini 3+). "off" disables thinking outright, mirroring the
+// low/medium/high/off intensity picker Claude Code offers instead of a
+// plain on/off toggle.
 var ThinkingBudgetLevels = []string{"off", "low", "medium", "high"}
 
 // ThinkingBudgetTokens returns the token budget for one of
@@ -29,8 +32,14 @@ func ThinkingBudgetTokens(level string) int64 {
 }
 
 // UsesThinkingBudget reports whether a provider configures extended
-// thinking via a numeric token budget (ThinkingBudgetLevels) rather
-// than catwalk-supplied named reasoning-effort levels.
+// thinking via the discrete off/low/medium/high picker (ThinkingBudgetLevels)
+// rather than catwalk-supplied named reasoning-effort levels. This
+// includes Google (Gemini's thinking is a numeric token budget on 2.x
+// models and a discrete level on 3+ models -- both map onto this same
+// picker; see the google.Name case in coordinator.go's
+// getProviderOptions).
 func UsesThinkingBudget(providerType catwalk.Type) bool {
-	return providerType == catwalk.TypeAnthropic || providerType == catwalk.TypeBedrock
+	return providerType == catwalk.TypeAnthropic ||
+		providerType == catwalk.TypeBedrock ||
+		providerType == catwalk.TypeGoogle
 }

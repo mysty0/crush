@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/oauth/antigravity"
 	"github.com/charmbracelet/crush/internal/oauth/codex"
 	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 	"github.com/charmbracelet/x/ansi"
@@ -29,7 +30,7 @@ var logoutCmd = &cobra.Command{
 	Long: `Logout Crush from a specified platform, removing stored credentials.
 The platform should be provided as an argument.
 If no argument is given, a list of logged-in platforms will be shown.
-Available platforms are: hyper, copilot, codex, gemini.`,
+Available platforms are: hyper, copilot, codex, gemini, antigravity.`,
 	Example: `
 # Sign out from Charm Hyper
 crush logout hyper
@@ -42,6 +43,9 @@ crush logout codex
 
 # Sign out from Gemini CLI
 crush logout gemini
+
+# Sign out from Google Antigravity
+crush logout antigravity
   `,
 	ValidArgs: []cobra.Completion{
 		"hyper",
@@ -50,6 +54,7 @@ crush logout gemini
 		"github-copilot",
 		"codex",
 		"gemini",
+		"antigravity",
 	},
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -98,6 +103,8 @@ crush logout gemini
 			return logoutProvider(c, ws.ID, codex.ProviderID, "OpenAI Codex")
 		case "gemini", "gemini-cli", "google-gemini-cli":
 			return logoutProvider(c, ws.ID, geminicli.ProviderID, "Gemini CLI")
+		case "antigravity", "agy", "google-antigravity":
+			return logoutProvider(c, ws.ID, antigravity.ProviderID, "Google Antigravity")
 		default:
 			return fmt.Errorf("unknown platform: %s", provider)
 		}

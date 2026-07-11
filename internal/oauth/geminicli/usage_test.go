@@ -28,7 +28,7 @@ func TestFetchUsageSuccess(t *testing.T) {
 	defer srv.Close()
 	withCodeAssistEndpoint(t, srv.URL)
 
-	usage, err := FetchUsage(context.Background(), "tok", "proj")
+	usage, err := FetchUsage(context.Background(), "tok", "proj", GeminiCLIIdentity)
 	require.NoError(t, err)
 	require.Equal(t, "free-tier", usage.Tier)
 	require.InDelta(t, 0.75, usage.RemainingFraction, 1e-9)
@@ -52,7 +52,7 @@ func TestFetchUsageQuotaError(t *testing.T) {
 	defer srv.Close()
 	withCodeAssistEndpoint(t, srv.URL)
 
-	usage, err := FetchUsage(context.Background(), "tok", "proj")
+	usage, err := FetchUsage(context.Background(), "tok", "proj", GeminiCLIIdentity)
 	require.Error(t, err)
 	require.Nil(t, usage)
 }
@@ -75,7 +75,7 @@ func TestFetchUsageTierErrorQuotaOK(t *testing.T) {
 	defer srv.Close()
 	withCodeAssistEndpoint(t, srv.URL)
 
-	usage, err := FetchUsage(context.Background(), "tok", "proj")
+	usage, err := FetchUsage(context.Background(), "tok", "proj", GeminiCLIIdentity)
 	require.NoError(t, err)
 	require.Equal(t, "", usage.Tier)
 	require.InDelta(t, 0.5, usage.RemainingFraction, 1e-9)

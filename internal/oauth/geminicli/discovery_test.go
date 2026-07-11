@@ -38,7 +38,7 @@ func TestDiscoverProjectCurrentTier(t *testing.T) {
 	defer srv.Close()
 	withCodeAssistEndpoint(t, srv.URL)
 
-	proj, err := DiscoverProject(context.Background(), "tok")
+	proj, err := DiscoverProject(context.Background(), "tok", GeminiCLIIdentity)
 	require.NoError(t, err)
 	require.Equal(t, "proj-direct", proj)
 }
@@ -68,7 +68,7 @@ func TestDiscoverProjectOnboard(t *testing.T) {
 	defer srv.Close()
 	withCodeAssistEndpoint(t, srv.URL)
 
-	proj, err := DiscoverProject(context.Background(), "tok")
+	proj, err := DiscoverProject(context.Background(), "tok", GeminiCLIIdentity)
 	require.NoError(t, err)
 	require.Equal(t, "onboarded-proj", proj)
 }
@@ -88,7 +88,7 @@ func TestDiscoverProjectSecurityPolicy(t *testing.T) {
 	defer srv.Close()
 	withCodeAssistEndpoint(t, srv.URL)
 
-	proj, err := DiscoverProject(context.Background(), "tok")
+	proj, err := DiscoverProject(context.Background(), "tok", GeminiCLIIdentity)
 	require.NoError(t, err)
 	require.Equal(t, "env-proj", proj)
 }
@@ -120,7 +120,7 @@ func TestDiscoverProjectOnboardPolls(t *testing.T) {
 	pollInterval = 10 * time.Millisecond
 	t.Cleanup(func() { pollInterval = prev })
 
-	proj, err := DiscoverProject(context.Background(), "tok")
+	proj, err := DiscoverProject(context.Background(), "tok", GeminiCLIIdentity)
 	require.NoError(t, err)
 	require.Equal(t, "polled-proj", proj)
 }

@@ -24,13 +24,17 @@ type cloudMetadata struct {
 	DuetProject string `json:"duetProject,omitempty"`
 }
 
-// baseMetadata returns the standard metadata block, optionally tagged with
-// the caller's Cloud project id.
-func baseMetadata(projectID string) cloudMetadata {
+// baseMetadata returns the standard metadata block for the given client
+// identity, optionally tagged with the caller's Cloud project id.
+func baseMetadata(projectID string, id Identity) cloudMetadata {
+	ideType := id.IDEType
+	if ideType == "" {
+		ideType = "IDE_UNSPECIFIED"
+	}
 	return cloudMetadata{
-		IDEType:     "IDE_UNSPECIFIED",
+		IDEType:     ideType,
 		Platform:    "PLATFORM_UNSPECIFIED",
-		PluginType:  "GEMINI",
+		PluginType:  id.PluginType,
 		DuetProject: projectID,
 	}
 }
@@ -46,11 +50,13 @@ func envProjectID() string {
 
 // DiscoverProject performs the Cloud Code Assist onboarding handshake and
 // returns the Cloud project id that must be attached to every inference
-// request. The access token must already be valid.
-func DiscoverProject(ctx context.Context, accessToken string) (string, error) {
+// request. The access token must already be valid. id identifies the
+// calling client product (see Identity) and affects the tier Google's
+// backend assigns the account.
+func DiscoverProject(ctx context.Context, accessToken string, id Identity) (string, error) {
 	envProject := envProjectID()
 
-	load, err := loadCodeAssist(ctx, accessToken, envProject)
+	load, err := loadCodeAssist(ctx, accessToken, envProject, id)
 	if err != nil {
 		return "", err
 	}
@@ -82,7 +88,7 @@ func DiscoverProject(ctx context.Context, accessToken string) (string, error) {
 		return "", fmt.Errorf("geminicli: tier %q requires a Cloud project; set GOOGLE_CLOUD_PROJECT", tierID)
 	}
 
-	return onboardUser(ctx, accessToken, tierID, envProject)
+	return onboardUser(ctx, accessToken, tierID, envProject, id)
 }
 
 // loadCodeAssistResponse is the parsed body of a loadCodeAssist call.
@@ -101,12 +107,12 @@ type tier struct {
 // loadCodeAssist calls loadCodeAssist to learn the user's current tier and
 // project. VPC-SC users whose request is blocked by a security policy are
 // treated as already on the standard tier.
-func loadCodeAssist(ctx context.Context, accessToken, envProject string) (*loadCodeAssistResponse, error) {
+func loadCodeAssist(ctx context.Context, accessToken, envProject string, id Identity) (*loadCodeAssistResponse, error) {
 	body := map[string]any{
 		"cloudaicompanionProject": envProject,
-		"metadata":                baseMetadata(envProject),
+		"metadata":                baseMetadata(envProject, id),
 	}
-	respBody, status, err := codeAssistPost(ctx, accessToken, "loadCodeAssist", body)
+	respBody, status, err := codeAssistPost(ctx, accessToken, "loadCodeAssist", body, id)
 	if err != nil {
 		return nil, err
 	}
@@ -160,17 +166,17 @@ type longRunningOperation struct {
 // onboardUser onboards the account to the given tier and returns the
 // resulting Cloud project id, polling the long-running operation until it
 // completes.
-func onboardUser(ctx context.Context, accessToken, tierID, envProject string) (string, error) {
+func onboardUser(ctx context.Context, accessToken, tierID, envProject string, id Identity) (string, error) {
 	body := map[string]any{
 		"tierId":   tierID,
-		"metadata": baseMetadata(""),
+		"metadata": baseMetadata("", id),
 	}
 	if tierID != freeTier && envProject != "" {
 		body["cloudaicompanionProject"] = envProject
-		body["metadata"] = baseMetadata(envProject)
+		body["metadata"] = baseMetadata(envProject, id)
 	}
 
-	respBody, status, err := codeAssistPost(ctx, accessToken, "onboardUser", body)
+	respBody, status, err := codeAssistPost(ctx, accessToken, "onboardUser", body, id)
 	if err != nil {
 		return "", err
 	}
@@ -189,7 +195,7 @@ func onboardUser(ctx context.Context, accessToken, tierID, envProject string) (s
 			return "", ctx.Err()
 		case <-time.After(pollInterval):
 		}
-		op, err = pollOperation(ctx, accessToken, op.Name)
+		op, err = pollOperation(ctx, accessToken, op.Name, id)
 		if err != nil {
 			return "", err
 		}
@@ -206,7 +212,7 @@ func onboardUser(ctx context.Context, accessToken, tierID, envProject string) (s
 
 // pollOperation fetches the current state of a long-running operation by
 // name.
-func pollOperation(ctx context.Context, accessToken, name string) (longRunningOperation, error) {
+func pollOperation(ctx context.Context, accessToken, name string, id Identity) (longRunningOperation, error) {
 	var op longRunningOperation
 	url := fmt.Sprintf("%s/v1internal/%s", codeAssistEndpoint, name)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -215,7 +221,7 @@ func pollOperation(ctx context.Context, accessToken, name string) (longRunningOp
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range cliHeaders("") {
+	for k, v := range cliHeaders("", id) {
 		req.Header.Set(k, v)
 	}
 
@@ -240,7 +246,7 @@ func pollOperation(ctx context.Context, accessToken, name string) (longRunningOp
 
 // codeAssistPost issues a JSON POST to a v1internal Code Assist method and
 // returns the raw response body and status code.
-func codeAssistPost(ctx context.Context, accessToken, method string, body any) ([]byte, int, error) {
+func codeAssistPost(ctx context.Context, accessToken, method string, body any, id Identity) ([]byte, int, error) {
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, 0, err
@@ -252,7 +258,7 @@ func codeAssistPost(ctx context.Context, accessToken, method string, body any) (
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range cliHeaders("") {
+	for k, v := range cliHeaders("", id) {
 		req.Header.Set(k, v)
 	}
 

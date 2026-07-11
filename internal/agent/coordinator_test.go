@@ -9,9 +9,12 @@ import (
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
 	"charm.land/fantasy/providers/bedrock"
+	"charm.land/fantasy/providers/google"
 	"charm.land/fantasy/providers/openaicompat"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/oauth/antigravity"
+	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -708,6 +711,111 @@ func TestGetProviderOptionsThinkingBudget(t *testing.T) {
 			}
 			require.NotNil(t, parsed.Thinking)
 			assert.Equal(t, tc.wantBudget, parsed.Thinking.BudgetTokens)
+		})
+	}
+}
+
+func TestGetProviderOptionsGoogleThinking(t *testing.T) {
+	tests := []struct {
+		name            string
+		modelID         string
+		reasoningEffort string
+		think           bool
+		wantBudget      *int64 // nil means "not set"
+		wantLevel       string // "" means "not set"
+	}{
+		{"gemini 2.x low sets a token budget", "gemini-2.5-flash", "low", false, ptr(config.ThinkingBudgetTokens("low")), ""},
+		{"gemini 2.x off disables via a zero budget", "gemini-2.5-flash", "off", false, ptr(int64(0)), ""},
+		{"gemini 2.x legacy Think falls back to a low budget", "gemini-2.5-flash", "", true, ptr(config.ThinkingBudgetTokens("low")), ""},
+		{"gemini 2.x neither level nor Think sets nothing", "gemini-2.5-flash", "", false, nil, ""},
+		{"gemini 3+ low maps to the uppercase level enum", "gemini-3-pro", "low", false, nil, google.ThinkingLevelLow},
+		{"gemini 3+ medium maps to the uppercase level enum", "gemini-3-pro", "medium", false, nil, google.ThinkingLevelMedium},
+		{"gemini 3+ high maps to the uppercase level enum", "gemini-3-pro", "high", false, nil, google.ThinkingLevelHigh},
+		{"gemini 3+ off has no disabling equivalent, so nothing is set", "gemini-3-pro", "off", false, nil, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			model := Model{
+				CatwalkCfg: catwalk.Model{
+					ID:        tc.modelID,
+					CanReason: true,
+				},
+				ModelCfg: config.SelectedModel{
+					Provider:        "test",
+					ReasoningEffort: tc.reasoningEffort,
+					Think:           tc.think,
+				},
+			}
+			providerCfg := config.ProviderConfig{ID: "test", Type: catwalk.Type(google.Name)}
+
+			opts := getProviderOptions(model, providerCfg)
+
+			raw, ok := opts[google.Name]
+			require.True(t, ok)
+			parsed, ok := raw.(*google.ProviderOptions)
+			require.True(t, ok)
+
+			if tc.wantBudget == nil && tc.wantLevel == "" {
+				assert.Nil(t, parsed.ThinkingConfig)
+				return
+			}
+			require.NotNil(t, parsed.ThinkingConfig)
+			if tc.wantBudget != nil {
+				require.NotNil(t, parsed.ThinkingConfig.ThinkingBudget)
+				assert.Equal(t, *tc.wantBudget, *parsed.ThinkingConfig.ThinkingBudget)
+			}
+			if tc.wantLevel != "" {
+				require.NotNil(t, parsed.ThinkingConfig.ThinkingLevel)
+				assert.Equal(t, tc.wantLevel, *parsed.ThinkingConfig.ThinkingLevel)
+			}
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// TestBuildGeminiCliProviderDoesNotRequireAPIKey is a regression test for
+// a bug where selecting any Gemini CLI or Antigravity model always failed
+// silently: genai.NewClient hard-requires a non-empty APIKey for any
+// non-Vertex backend even when Credentials/skipAuth are set, so
+// buildGeminiCliProvider's use of google.WithSkipAuth(true) alone (with
+// no API key) made every model switch to these providers fail with "api
+// key is required for Google AI backend" as soon as the language model
+// was constructed -- which looked to the user like the picker selection
+// silently not taking effect, since the resulting error just failed the
+// background UpdateAgentModel call.
+func TestBuildGeminiCliProviderDoesNotRequireAPIKey(t *testing.T) {
+	tests := []struct {
+		name       string
+		providerID string
+		identity   geminicli.Identity
+	}{
+		{"gemini cli", geminicli.ProviderID, geminicli.GeminiCLIIdentity},
+		{"antigravity", antigravity.ProviderID, antigravity.Identity},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testEnv(t)
+			providerCfg := config.ProviderConfig{
+				ID:      tc.providerID,
+				Type:    catwalk.TypeGoogle,
+				BaseURL: geminicli.BaseURL,
+				APIKey:  "fake-access-token",
+				Models: []catwalk.Model{
+					{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro", CanReason: true, ContextWindow: 2097152, DefaultMaxTokens: 65536},
+				},
+				OAuthExtra: map[string]string{"project_id": "proj-1"},
+			}
+			coord := newTestCoordinator(t, env, tc.providerID, providerCfg)
+
+			modelCfg := config.SelectedModel{
+				Provider: tc.providerID,
+				Model:    "gemini-2.5-pro",
+			}
+
+			m, err := coord.buildModelFromSelected(context.Background(), modelCfg, false)
+			require.NoError(t, err)
+			require.Equal(t, "gemini-2.5-pro", m.CatwalkCfg.ID)
 		})
 	}
 }

@@ -33,6 +33,9 @@ type WireTransport struct {
 	// ProjectID is the discovered Cloud project id attached to every
 	// request envelope.
 	ProjectID string
+	// Identity identifies the calling client product (see Identity).
+	// Zero value falls back to GeminiCLIIdentity.
+	Identity Identity
 }
 
 // RoundTrip rewrites an outgoing genai request into the Cloud Code Assist
@@ -97,7 +100,11 @@ func (t *WireTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	outReq.Header.Del("X-Goog-Api-Key")
 	outReq.Header.Set("Authorization", "Bearer "+t.AccessToken)
 	outReq.Header.Set("Content-Type", "application/json")
-	for k, v := range cliHeaders(model) {
+	id := t.Identity
+	if id == (Identity{}) {
+		id = GeminiCLIIdentity
+	}
+	for k, v := range cliHeaders(model, id) {
 		outReq.Header.Set(k, v)
 	}
 

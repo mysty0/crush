@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
+	"github.com/charmbracelet/crush/internal/oauth/antigravity"
 	"github.com/charmbracelet/crush/internal/oauth/codex"
 	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 )
@@ -44,11 +45,39 @@ func (c *Config) seedOAuthProviders(ctx context.Context) {
 		pc.Type = catwalk.TypeGoogle
 		pc.BaseURL = geminicli.BaseURL
 		if len(pc.Models) == 0 {
-			// Cloud Code Assist has no public model-list endpoint, so use
-			// the curated subscription model set.
-			pc.Models = geminicli.DefaultModels()
+			// Query the native fetchAvailableModels endpoint for the
+			// account's actual model line-up, falling back to a static
+			// list.
+			projectID := ""
+			if pc.OAuthExtra != nil {
+				projectID = pc.OAuthExtra["project_id"]
+			}
+			mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			pc.Models = geminicli.CachedModels(mctx, pc.OAuthToken.AccessToken, projectID, geminicli.GeminiCLIIdentity)
+			cancel()
 		}
 		pc.AutoDiscoverModels = &disableDiscovery
 		c.Providers.Set(geminicli.ProviderID, pc)
+	}
+
+	// EXPERIMENTAL: see docs/antigravity-cli-oauth-findings.md. Reuses
+	// geminicli's BaseURL and model discovery since Antigravity shares
+	// that exact Cloud Code Assist backend and wire format.
+	if pc, ok := c.Providers.Get(antigravity.ProviderID); ok && !pc.Disable && pc.OAuthToken != nil {
+		pc.ID = antigravity.ProviderID
+		pc.Name = cmp.Or(pc.Name, "Google Antigravity")
+		pc.Type = catwalk.TypeGoogle
+		pc.BaseURL = geminicli.BaseURL
+		if len(pc.Models) == 0 {
+			projectID := ""
+			if pc.OAuthExtra != nil {
+				projectID = pc.OAuthExtra["project_id"]
+			}
+			mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			pc.Models = geminicli.CachedModels(mctx, pc.OAuthToken.AccessToken, projectID, antigravity.Identity)
+			cancel()
+		}
+		pc.AutoDiscoverModels = &disableDiscovery
+		c.Providers.Set(antigravity.ProviderID, pc)
 	}
 }

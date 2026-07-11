@@ -19,7 +19,6 @@ func withTokenURL(t *testing.T, u string) {
 }
 
 func TestExchangeCode(t *testing.T) {
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, r.ParseForm())
 		require.Equal(t, "authorization_code", r.Form.Get("grant_type"))
@@ -43,7 +42,6 @@ func TestExchangeCode(t *testing.T) {
 }
 
 func TestExchangeCodeMissingRefresh(t *testing.T) {
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"access_token":"at","expires_in":3600}`))
 	}))
@@ -56,7 +54,6 @@ func TestExchangeCodeMissingRefresh(t *testing.T) {
 }
 
 func TestRefreshToken(t *testing.T) {
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, r.ParseForm())
 		require.Equal(t, "refresh_token", r.Form.Get("grant_type"))
@@ -75,7 +72,6 @@ func TestRefreshToken(t *testing.T) {
 }
 
 func TestRefreshTokenRotates(t *testing.T) {
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"access_token":"new-at","refresh_token":"rotated","expires_in":1800}`))
 	}))

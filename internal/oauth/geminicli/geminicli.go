@@ -52,6 +52,38 @@ const (
 	cliVersion = "0.46.0"
 )
 
+// Identity identifies the client product making Cloud Code Assist
+// requests: the User-Agent product/version and the Client-Metadata
+// pluginType/ideType. Google's tier-eligibility logic for loadCodeAssist
+// keys off pluginType — see docs/antigravity-cli-oauth-findings.md, which
+// documents the exact PluginType/IdeType enums recovered from the
+// Antigravity CLI binary's raw protobuf descriptor. Notably
+// PluginType.GEMINI is marked `deprecated = true` in that schema, so
+// callers other than the reference Gemini CLI (e.g. the antigravity
+// package) must supply their own identity rather than reusing
+// GeminiCLIIdentity.
+type Identity struct {
+	// Product is the User-Agent product name, e.g. "GeminiCLI".
+	Product string
+	// Version is the User-Agent product version.
+	Version string
+	// PluginType is the Client-Metadata "pluginType" value, a
+	// ClientMetadata.PluginType enum name (e.g. "GEMINI", "CLOUD_CODE").
+	PluginType string
+	// IDEType is the Client-Metadata "ideType" value, a
+	// ClientMetadata.IdeType enum name (e.g. "IDE_UNSPECIFIED",
+	// "ANTIGRAVITY"). Defaults to "IDE_UNSPECIFIED" when empty.
+	IDEType string
+}
+
+// GeminiCLIIdentity is the identity Gemini CLI itself reports.
+var GeminiCLIIdentity = Identity{
+	Product:    "GeminiCLI",
+	Version:    cliVersion,
+	PluginType: "GEMINI",
+	IDEType:    "IDE_UNSPECIFIED",
+}
+
 // Cloud Code Assist tier identifiers.
 const (
 	// freeTier is the tier id that requires no Cloud project.
@@ -96,17 +128,21 @@ func clientSecret() string {
 	return string(b)
 }
 
-// cliHeaders returns the Gemini CLI identification headers that must
+// cliHeaders returns the client identification headers that must
 // accompany every Cloud Code Assist and inference request. The model is
 // embedded in the User-Agent; when empty a default is substituted.
-func cliHeaders(model string) map[string]string {
+func cliHeaders(model string, id Identity) map[string]string {
 	if model == "" {
 		model = defaultModel
 	}
-	ua := fmt.Sprintf("GeminiCLI/%s/%s (%s; %s; terminal)",
-		cliVersion, model, runtime.GOOS, runtime.GOARCH)
+	ideType := id.IDEType
+	if ideType == "" {
+		ideType = "IDE_UNSPECIFIED"
+	}
+	ua := fmt.Sprintf("%s/%s/%s (%s; %s; terminal)",
+		id.Product, id.Version, model, runtime.GOOS, runtime.GOARCH)
 	return map[string]string{
 		"User-Agent":      ua,
-		"Client-Metadata": "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
+		"Client-Metadata": "ideType=" + ideType + ",platform=PLATFORM_UNSPECIFIED,pluginType=" + id.PluginType,
 	}
 }

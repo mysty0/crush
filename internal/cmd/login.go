@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/oauth"
+	"github.com/charmbracelet/crush/internal/oauth/antigravity"
 	"github.com/charmbracelet/crush/internal/oauth/codex"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/oauth/geminicli"
@@ -27,7 +28,7 @@ var loginCmd = &cobra.Command{
 	Short:   "Login Crush to a platform",
 	Long: `Login Crush to a specified platform.
 The platform should be provided as an argument.
-Available platforms are: hyper, copilot, codex, gemini.`,
+Available platforms are: hyper, copilot, codex, gemini, antigravity.`,
 	Example: `
 # Authenticate with Charm Hyper
 crush login
@@ -44,6 +45,13 @@ crush login codex --device
 # Authenticate with Gemini CLI (Cloud Code Assist)
 crush login gemini
 
+# Authenticate with Google Antigravity (experimental; see
+# docs/antigravity-cli-oauth-findings.md)
+crush login antigravity
+
+# Authenticate with Google Antigravity using the device-code flow
+crush login antigravity --device
+
 # Force re-authentication even if already logged in
 crush login -f copilot
   `,
@@ -54,6 +62,7 @@ crush login -f copilot
 		"github-copilot",
 		"codex",
 		"gemini",
+		"antigravity",
 	},
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -84,6 +93,8 @@ crush login -f copilot
 			return loginCodex(c, ws.ID, force, device)
 		case "gemini", "gemini-cli", "google-gemini-cli":
 			return loginGemini(c, ws.ID, force)
+		case "antigravity", "agy", "google-antigravity":
+			return loginAntigravity(c, ws.ID, force, device)
 		default:
 			return fmt.Errorf("unknown platform: %s", provider)
 		}
@@ -92,7 +103,7 @@ crush login -f copilot
 
 func init() {
 	loginCmd.Flags().BoolP("force", "f", false, "Force re-authentication even if already logged in")
-	loginCmd.Flags().Bool("device", false, "Use the device-code flow (Codex only; for headless environments)")
+	loginCmd.Flags().Bool("device", false, "Use the device-code flow (Codex and Antigravity only; for headless environments)")
 }
 
 func loginHyper(c *client.Client, wsID string, force bool) error {
@@ -306,6 +317,58 @@ func loginGemini(c *client.Client, wsID string, force bool) error {
 
 	fmt.Println()
 	fmt.Println("You're now authenticated with Gemini CLI!")
+	return nil
+}
+
+func loginAntigravity(c *client.Client, wsID string, force, device bool) error {
+	ctx := getLoginContext()
+
+	if !force {
+		cfg, err := c.GetConfig(ctx, wsID)
+		if err == nil && cfg != nil {
+			if pc, ok := cfg.Providers.Get(antigravity.ProviderID); ok && pc.OAuthToken != nil {
+				fmt.Println("You are already logged in to Google Antigravity.")
+				fmt.Println("Use --force to re-authenticate.")
+				return nil
+			}
+		}
+	}
+
+	fmt.Println("Note: Antigravity login is experimental and based on reverse-engineered")
+	fmt.Println("OAuth parameters (see docs/antigravity-cli-oauth-findings.md). If project")
+	fmt.Println("discovery fails with a tier/Cloud project error, that's a known open issue.")
+	fmt.Println()
+
+	var (
+		token *oauth.Token
+		err   error
+	)
+	if device {
+		token, err = antigravity.LoginDevice(ctx)
+	} else {
+		token, err = antigravity.LoginBrowser(ctx)
+	}
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Discovering Cloud Code Assist project...")
+	projectID, err := geminicli.DiscoverProject(ctx, token.AccessToken, antigravity.Identity)
+	if err != nil {
+		return err
+	}
+	extra := map[string]string{"project_id": projectID}
+
+	if err := cmp.Or(
+		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+antigravity.ProviderID+".api_key", token.AccessToken),
+		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+antigravity.ProviderID+".oauth", token),
+		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+antigravity.ProviderID+".oauth_extra", extra),
+	); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Println("You're now authenticated with Google Antigravity!")
 	return nil
 }
 

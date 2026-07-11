@@ -46,11 +46,11 @@ func TestUsesThinkingBudget(t *testing.T) {
 
 	assert.True(t, UsesThinkingBudget(catwalk.TypeAnthropic))
 	assert.True(t, UsesThinkingBudget(catwalk.TypeBedrock))
+	assert.True(t, UsesThinkingBudget(catwalk.TypeGoogle))
 	assert.False(t, UsesThinkingBudget(catwalk.TypeOpenAI))
 	assert.False(t, UsesThinkingBudget(catwalk.TypeOpenAICompat))
 	assert.False(t, UsesThinkingBudget(catwalk.TypeOpenRouter))
 	assert.False(t, UsesThinkingBudget(catwalk.TypeVercel))
-	assert.False(t, UsesThinkingBudget(catwalk.TypeGoogle))
 	assert.False(t, UsesThinkingBudget(catwalk.TypeAzure))
 }
 

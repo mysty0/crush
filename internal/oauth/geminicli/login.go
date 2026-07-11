@@ -68,7 +68,7 @@ func LoginBrowser(ctx context.Context) (token *oauth.Token, projectID, email str
 	// The account email is best-effort; failures are ignored.
 	email, _ = fetchEmail(ctx, tok.AccessToken)
 
-	projectID, err = DiscoverProject(ctx, tok.AccessToken)
+	projectID, err = DiscoverProject(ctx, tok.AccessToken, GeminiCLIIdentity)
 	if err != nil {
 		return nil, "", "", err
 	}

@@ -37,19 +37,19 @@ type quotaResponse struct {
 // tier; failures there are logged and ignored so the tier simply stays
 // empty. It then calls retrieveUserQuota to derive the remaining quota
 // fraction, returning an error only when that call fails.
-func FetchUsage(ctx context.Context, accessToken, projectID string) (*Usage, error) {
+func FetchUsage(ctx context.Context, accessToken, projectID string, id Identity) (*Usage, error) {
 	usage := &Usage{RemainingFraction: -1}
 
 	// Best-effort tier lookup. Any failure is swallowed because the tier
 	// is optional context for the quota reading.
-	if tier, err := fetchTier(ctx, accessToken, projectID); err != nil {
+	if tier, err := fetchTier(ctx, accessToken, projectID, id); err != nil {
 		slog.Debug("geminicli: loadCodeAssist for usage failed",
 			"error", err)
 	} else {
 		usage.Tier = tier
 	}
 
-	frac, err := fetchRemainingFraction(ctx, accessToken, projectID)
+	frac, err := fetchRemainingFraction(ctx, accessToken, projectID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -59,17 +59,12 @@ func FetchUsage(ctx context.Context, accessToken, projectID string) (*Usage, err
 
 // fetchTier performs a loadCodeAssist call and returns the reported current
 // tier id, if any.
-func fetchTier(ctx context.Context, accessToken, projectID string) (string, error) {
+func fetchTier(ctx context.Context, accessToken, projectID string, id Identity) (string, error) {
 	body := map[string]any{
 		"cloudaicompanionProject": projectID,
-		"metadata": map[string]any{
-			"ideType":     "IDE_UNSPECIFIED",
-			"platform":    "PLATFORM_UNSPECIFIED",
-			"pluginType":  "GEMINI",
-			"duetProject": projectID,
-		},
+		"metadata":                baseMetadata(projectID, id),
 	}
-	respBody, status, err := codeAssistPost(ctx, accessToken, "loadCodeAssist", body)
+	respBody, status, err := codeAssistPost(ctx, accessToken, "loadCodeAssist", body, id)
 	if err != nil {
 		return "", err
 	}
@@ -94,11 +89,11 @@ func fetchTier(ctx context.Context, accessToken, projectID string) (string, erro
 // fetchRemainingFraction performs a retrieveUserQuota call and derives the
 // remaining quota fraction, clamped to the range 0..1. It returns -1 when
 // the response carries no usable field.
-func fetchRemainingFraction(ctx context.Context, accessToken, projectID string) (float64, error) {
+func fetchRemainingFraction(ctx context.Context, accessToken, projectID string, id Identity) (float64, error) {
 	body := map[string]any{
 		"cloudaicompanionProject": projectID,
 	}
-	respBody, status, err := codeAssistPost(ctx, accessToken, "retrieveUserQuota", body)
+	respBody, status, err := codeAssistPost(ctx, accessToken, "retrieveUserQuota", body, id)
 	if err != nil {
 		return -1, err
 	}

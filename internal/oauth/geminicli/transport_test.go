@@ -48,7 +48,6 @@ func TestExtractModelAndMethod(t *testing.T) {
 // outgoing request is rewritten to the Cloud Code Assist envelope and that
 // the SSE response is unwrapped for the caller.
 func TestWireTransportStreaming(t *testing.T) {
-
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// (a) URL rewritten to the v1internal streaming method with SSE.
 		require.Equal(t, "/v1internal:streamGenerateContent", r.URL.Path)
@@ -123,7 +122,6 @@ func TestWireTransportStreaming(t *testing.T) {
 // TestWireTransportNonStreaming covers the generateContent path where the
 // whole JSON body is unwrapped once.
 func TestWireTransportNonStreaming(t *testing.T) {
-
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1internal:generateContent", r.URL.Path)
 		require.Empty(t, r.URL.Query().Get("alt"))

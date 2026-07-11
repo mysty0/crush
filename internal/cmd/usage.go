@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/oauth/antigravity"
 	"github.com/charmbracelet/crush/internal/oauth/codex"
 	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 	"github.com/charmbracelet/x/ansi"
@@ -29,7 +30,7 @@ var usageCmd = &cobra.Command{
 you are logged in to.
 
 With no argument, usage for every logged-in subscription provider is shown.
-Available platforms are: codex, gemini.`,
+Available platforms are: codex, gemini, antigravity.`,
 	Example: `
 # Show usage for all logged-in subscription providers
 crush usage
@@ -39,7 +40,7 @@ crush usage codex
 
 # Machine-readable output
 crush usage --json`,
-	ValidArgs: []cobra.Completion{"codex", "gemini"},
+	ValidArgs: []cobra.Completion{"codex", "gemini", "antigravity"},
 	Args:      cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, ws, cleanup, err := connectToServer(cmd)
@@ -103,6 +104,11 @@ func runUsage(c *client.Client, wsID, filter string, asJSON bool) error {
 	if want(geminicli.ProviderID, "gemini") {
 		if pc, ok := cfg.Providers.Get(geminicli.ProviderID); ok && pc.OAuthToken != nil {
 			reports = append(reports, geminiUsageReport(ctx, c, wsID, cfg, pc))
+		}
+	}
+	if want(antigravity.ProviderID, "antigravity") {
+		if pc, ok := cfg.Providers.Get(antigravity.ProviderID); ok && pc.OAuthToken != nil {
+			reports = append(reports, antigravityUsageReport(ctx, c, wsID, cfg, pc))
 		}
 	}
 
@@ -194,7 +200,26 @@ func geminiUsageReport(ctx context.Context, c *client.Client, wsID string, cfg *
 	if pc.OAuthExtra != nil {
 		projectID = pc.OAuthExtra["project_id"]
 	}
-	u, err := geminicli.FetchUsage(ctx, pc.OAuthToken.AccessToken, projectID)
+	u, err := geminicli.FetchUsage(ctx, pc.OAuthToken.AccessToken, projectID, geminicli.GeminiCLIIdentity)
+	if err != nil {
+		rep.Error = err.Error()
+		return rep
+	}
+	rep.PlanType = u.Tier
+	rep.RemainingFraction = u.RemainingFraction
+	return rep
+}
+
+func antigravityUsageReport(ctx context.Context, c *client.Client, wsID string, cfg *config.Config, pc config.ProviderConfig) usageReport {
+	pc = refreshedProvider(ctx, c, wsID, cfg, pc, antigravity.ProviderID)
+	rep := usageReport{Provider: antigravity.ProviderID, Name: "Google Antigravity"}
+
+	projectID := ""
+	if pc.OAuthExtra != nil {
+		projectID = pc.OAuthExtra["project_id"]
+	}
+	// Antigravity shares Gemini CLI's Cloud Code Assist quota backend.
+	u, err := geminicli.FetchUsage(ctx, pc.OAuthToken.AccessToken, projectID, antigravity.Identity)
 	if err != nil {
 		rep.Error = err.Error()
 		return rep

@@ -37,6 +37,7 @@ import (
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/oauth/antigravity"
 	"github.com/charmbracelet/crush/internal/oauth/codex"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/oauth/geminicli"
@@ -448,6 +449,27 @@ func effectiveReasoningEffort(model Model) string {
 	return ""
 }
 
+// googleThinkingLevel maps Crush's off/low/medium/high thinking-budget
+// levels (config.ThinkingBudgetLevels) to Gemini 3+'s ThinkingLevel enum,
+// which uses distinct uppercase names (google.ThinkingLevelLow, etc; see
+// charm.land/fantasy/providers/google.ThinkingLevel). "off" has no
+// disabling equivalent in this enum -- unlike the token-budget path used
+// by Gemini 2.x, where a zero budget disables thinking -- so it maps to
+// "" (unset), leaving the model's own default thinking behavior in
+// place.
+func googleThinkingLevel(level string) string {
+	switch level {
+	case "low":
+		return google.ThinkingLevelLow
+	case "medium":
+		return google.ThinkingLevelMedium
+	case "high":
+		return google.ThinkingLevelHigh
+	default:
+		return ""
+	}
+}
+
 func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.ProviderOptions {
 	options := fantasy.ProviderOptions{}
 
@@ -589,15 +611,32 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		}
 	case google.Name:
 		_, hasReasoning := mergedOptions["thinking_config"]
-		if !hasReasoning {
+		if !hasReasoning && model.CatwalkCfg.CanReason {
+			level := model.ModelCfg.ReasoningEffort
+			if level == "" && model.ModelCfg.Think {
+				// Legacy boolean toggle with no discrete level selected
+				// yet: preserve the old always-on behavior.
+				level = "low"
+			}
 			if strings.HasPrefix(model.CatwalkCfg.ID, "gemini-2") {
-				mergedOptions["thinking_config"] = map[string]any{
-					"thinking_budget":  2000,
-					"include_thoughts": true,
+				// Gemini 2.x controls thinking via a numeric token
+				// budget, the same shape Anthropic uses.
+				if level == "off" {
+					mergedOptions["thinking_config"] = map[string]any{
+						"thinking_budget":  0,
+						"include_thoughts": false,
+					}
+				} else if budget := config.ThinkingBudgetTokens(level); budget > 0 {
+					mergedOptions["thinking_config"] = map[string]any{
+						"thinking_budget":  budget,
+						"include_thoughts": true,
+					}
 				}
-			} else {
+			} else if lvl := googleThinkingLevel(level); lvl != "" {
+				// Gemini 3+ controls thinking via a discrete level
+				// instead of a token budget.
 				mergedOptions["thinking_config"] = map[string]any{
-					"thinking_level":   reasoningEffort,
+					"thinking_level":   lvl,
 					"include_thoughts": true,
 				}
 			}
@@ -838,10 +877,11 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewAstGrepTool(c.cfg.WorkingDir()),
 	)
 	if c.memory != nil && c.cfg.Config().Options.MemoryEnabled() {
-		allTools = append(allTools,
-			tools.NewRememberTool(c.memory, c.cfg.WorkingDir(), c.cfg.Config().Options.MemoryMaxPerScope()),
+		allTools = append(
+			allTools,
+			tools.NewRememberTool(c.memory, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.MemoryMaxPerScope()),
 			tools.NewRecallTool(c.memory, c.cfg.WorkingDir()),
-			tools.NewForgetTool(c.memory, c.cfg.WorkingDir()),
+			tools.NewForgetTool(c.memory, c.permissions, c.cfg.WorkingDir()),
 		)
 	}
 	allTools = append(
@@ -1252,10 +1292,13 @@ func (c *coordinator) buildCodexProvider(baseURL, apiKey string, headers map[str
 }
 
 // buildGeminiCliProvider builds the Gemini CLI (Cloud Code Assist)
-// provider. Requests are driven through the standard fantasy google
-// provider but rewritten onto the Code Assist wire format (and signed with
-// the subscription bearer + discovered project id) by geminicli.WireTransport.
-func (c *coordinator) buildGeminiCliProvider(apiKey string, headers, oauthExtra map[string]string) (fantasy.Provider, error) {
+// provider, also reused for the experimental Antigravity provider since
+// both share the same backend and wire format (see
+// docs/antigravity-cli-oauth-findings.md). Requests are driven through the
+// standard fantasy google provider but rewritten onto the Code Assist wire
+// format (and signed with the subscription bearer + discovered project
+// id) by geminicli.WireTransport.
+func (c *coordinator) buildGeminiCliProvider(apiKey string, headers, oauthExtra map[string]string, identity geminicli.Identity) (fantasy.Provider, error) {
 	projectID := ""
 	if oauthExtra != nil {
 		projectID = oauthExtra["project_id"]
@@ -1268,8 +1311,24 @@ func (c *coordinator) buildGeminiCliProvider(apiKey string, headers, oauthExtra 
 		Base:        base,
 		AccessToken: apiKey,
 		ProjectID:   projectID,
+		Identity:    identity,
 	}}
 	opts := []google.Option{
+		// genai.NewClient hard-requires a non-empty APIKey whenever the
+		// backend isn't Vertex AI, even when Credentials/skipAuth are
+		// set (see google.golang.org/genai@v1.61.0 client.go), so
+		// WithSkipAuth alone left buildProvider always failing with
+		// "api key is required for Google AI backend" for both Gemini
+		// CLI and Antigravity. Requesting the Vertex AI backend avoids
+		// that check entirely once a custom BaseURL is set (genai's own
+		// project/location auth requirement is waived for a custom
+		// BaseURL) -- and it doesn't matter that these placeholder
+		// project/location values aren't real: geminicli.WireTransport
+		// discards genai's own request URL and body outright and
+		// rebuilds both from scratch, and it also injects the real
+		// bearer token, so genai's own auth path (already bypassed by
+		// the custom HTTPClient below) never runs.
+		google.WithVertex("unused-wiretransport-handles-auth", "global"),
 		google.WithBaseURL(geminicli.BaseURL),
 		google.WithSkipAuth(true),
 		google.WithHTTPClient(httpClient),
@@ -1315,7 +1374,9 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 	case codex.ProviderID:
 		return c.buildCodexProvider(baseURL, apiKey, headers)
 	case geminicli.ProviderID:
-		return c.buildGeminiCliProvider(apiKey, headers, providerCfg.OAuthExtra)
+		return c.buildGeminiCliProvider(apiKey, headers, providerCfg.OAuthExtra, geminicli.GeminiCLIIdentity)
+	case antigravity.ProviderID:
+		return c.buildGeminiCliProvider(apiKey, headers, providerCfg.OAuthExtra, antigravity.Identity)
 	}
 
 	switch providerCfg.Type {
