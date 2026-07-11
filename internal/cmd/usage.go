@@ -71,11 +71,10 @@ func init() {
 
 // usageReport is the machine-readable shape emitted with --json.
 type usageReport struct {
-	Provider          string  `json:"provider"`
-	Name              string  `json:"name"`
-	PlanType          string  `json:"plan_type,omitempty"`
-	RemainingFraction float64 `json:"remaining_fraction,omitempty"`
-	Windows           []struct {
+	Provider string `json:"provider"`
+	Name     string `json:"name"`
+	PlanType string `json:"plan_type,omitempty"`
+	Windows  []struct {
 		Label       string  `json:"label"`
 		UsedPercent float64 `json:"used_percent"`
 		ResetsAt    string  `json:"resets_at,omitempty"`
@@ -206,7 +205,7 @@ func geminiUsageReport(ctx context.Context, c *client.Client, wsID string, cfg *
 		return rep
 	}
 	rep.PlanType = u.Tier
-	rep.RemainingFraction = u.RemainingFraction
+	addGeminiCliWindows(&rep, u)
 	return rep
 }
 
@@ -225,8 +224,35 @@ func antigravityUsageReport(ctx context.Context, c *client.Client, wsID string, 
 		return rep
 	}
 	rep.PlanType = u.Tier
-	rep.RemainingFraction = u.RemainingFraction
+	addGeminiCliWindows(&rep, u)
 	return rep
+}
+
+// addGeminiCliWindows appends one report window per non-disabled quota
+// bucket returned by retrieveUserQuotaSummary.
+func addGeminiCliWindows(rep *usageReport, u *geminicli.Usage) {
+	for _, b := range u.Buckets {
+		if b.Disabled {
+			continue
+		}
+		label := b.Label
+		if b.Window != "" {
+			label += " (" + b.Window + ")"
+		}
+		usedPercent := -1.0
+		if b.RemainingFraction >= 0 {
+			usedPercent = (1 - b.RemainingFraction) * 100
+		}
+		entry := struct {
+			Label       string  `json:"label"`
+			UsedPercent float64 `json:"used_percent"`
+			ResetsAt    string  `json:"resets_at,omitempty"`
+		}{Label: label, UsedPercent: usedPercent}
+		if !b.ResetsAt.IsZero() {
+			entry.ResetsAt = b.ResetsAt.Format(time.RFC3339)
+		}
+		rep.Windows = append(rep.Windows, entry)
+	}
 }
 
 func printUsageReports(reports []usageReport) {
@@ -241,10 +267,6 @@ func printUsageReports(reports []usageReport) {
 		}
 		if r.PlanType != "" {
 			fmt.Printf("  %s %s\n", usageLabelStyle.Render("plan:"), usageValueStyle.Render(r.PlanType))
-		}
-		if r.RemainingFraction >= 0 {
-			fmt.Printf("  %s %s\n", usageLabelStyle.Render("remaining:"),
-				usageValueStyle.Render(fmt.Sprintf("%.0f%%", r.RemainingFraction*100)))
 		}
 		for _, w := range r.Windows {
 			line := fmt.Sprintf("%.0f%% used", w.UsedPercent)

@@ -7,38 +7,69 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 )
+
+// UsageBucket is a single named quota window returned by the Cloud Code
+// Assist retrieveUserQuotaSummary RPC, e.g. "Gemini 2.5 Pro" over a "24h"
+// window.
+type UsageBucket struct {
+	// Label is the bucket's (or, if the bucket has none, its group's)
+	// display name, e.g. "Gemini 2.5 Pro".
+	Label string
+	// Window is the human-readable window the bucket covers, e.g. "24h".
+	// It is empty when the server does not report one.
+	Window string
+	// RemainingFraction is the fraction of quota still available for
+	// this bucket, in the range 0..1. It is -1 when the server reported
+	// a raw remaining amount instead of a fraction, or reported neither.
+	RemainingFraction float64
+	// ResetsAt is when this bucket's quota resets. It is the zero time
+	// when unknown.
+	ResetsAt time.Time
+	// Disabled reports whether this bucket does not apply to the
+	// account and should not be displayed.
+	Disabled bool
+}
 
 // Usage is a Gemini CLI (Cloud Code Assist) subscription quota snapshot.
 type Usage struct {
 	// Tier is the Cloud Code Assist tier id, e.g. "free-tier". It is empty
 	// when the tier could not be determined.
 	Tier string
-	// RemainingFraction is the fraction of quota still available, in the
-	// range 0..1. It is -1 when the remaining quota is unknown.
-	RemainingFraction float64
+	// Buckets are the account's quota windows, one per model or feature
+	// group, as returned by retrieveUserQuotaSummary.
+	Buckets []UsageBucket
 }
 
-// quotaResponse is the defensive shape of a retrieveUserQuota response. The
-// Cloud Code Assist backend reports remaining quota under one of several
-// field layouts, so every field is optional.
-type quotaResponse struct {
-	RemainingFraction *float64 `json:"remainingFraction"`
-	Quota             *struct {
-		RemainingFraction *float64 `json:"remainingFraction"`
-	} `json:"quota"`
-	Remaining *float64 `json:"remaining"`
-	Limit     *float64 `json:"limit"`
+// quotaSummaryResponse is the parsed body of a retrieveUserQuotaSummary
+// call. Field names and the overall message shape (groups of buckets,
+// each with a display name, window, and either a remaining fraction or
+// a raw remaining amount) were recovered by disassembling the real
+// Antigravity CLI binary's compiled protobuf descriptor for
+// google.internal.cloud.code.v1internal.RetrieveUserQuotaSummaryResponse;
+// see docs/antigravity-cli-oauth-findings.md.
+type quotaSummaryResponse struct {
+	Groups []struct {
+		DisplayName string `json:"displayName"`
+		Buckets     []struct {
+			DisplayName       string   `json:"displayName"`
+			Window            string   `json:"window"`
+			RemainingFraction *float64 `json:"remainingFraction"`
+			ResetTime         string   `json:"resetTime"`
+			Disabled          bool     `json:"disabled"`
+		} `json:"buckets"`
+	} `json:"groups"`
 }
 
 // FetchUsage retrieves the Cloud Code Assist quota for the given project.
 //
 // It first performs a best-effort loadCodeAssist call to learn the current
 // tier; failures there are logged and ignored so the tier simply stays
-// empty. It then calls retrieveUserQuota to derive the remaining quota
-// fraction, returning an error only when that call fails.
+// empty. It then calls retrieveUserQuotaSummary to derive the account's
+// quota buckets, returning an error only when that call fails.
 func FetchUsage(ctx context.Context, accessToken, projectID string, id Identity) (*Usage, error) {
-	usage := &Usage{RemainingFraction: -1}
+	usage := &Usage{}
 
 	// Best-effort tier lookup. Any failure is swallowed because the tier
 	// is optional context for the quota reading.
@@ -49,11 +80,11 @@ func FetchUsage(ctx context.Context, accessToken, projectID string, id Identity)
 		usage.Tier = tier
 	}
 
-	frac, err := fetchRemainingFraction(ctx, accessToken, projectID, id)
+	buckets, err := fetchQuotaBuckets(ctx, accessToken, projectID, id)
 	if err != nil {
 		return nil, err
 	}
-	usage.RemainingFraction = frac
+	usage.Buckets = buckets
 	return usage, nil
 }
 
@@ -86,37 +117,63 @@ func fetchTier(ctx context.Context, accessToken, projectID string, id Identity) 
 	return "", nil
 }
 
-// fetchRemainingFraction performs a retrieveUserQuota call and derives the
-// remaining quota fraction, clamped to the range 0..1. It returns -1 when
-// the response carries no usable field.
-func fetchRemainingFraction(ctx context.Context, accessToken, projectID string, id Identity) (float64, error) {
+// fetchQuotaBuckets performs a retrieveUserQuotaSummary call and flattens
+// every group's buckets into a single list. Disabled buckets are kept
+// (callers decide whether to display them) since the caller may still
+// want to know they exist.
+//
+// The request's project field is named "project", not
+// "cloudaicompanionProject" like loadCodeAssist/onboardUser -- confirmed
+// by disassembling RetrieveUserQuotaSummaryRequest's compiled protobuf
+// descriptor (see docs/antigravity-cli-oauth-findings.md). Sending the
+// wrong field name previously left the server-required project
+// unset, which is the root cause of a prior "usage" failure for Gemini
+// CLI/Antigravity accounts.
+func fetchQuotaBuckets(ctx context.Context, accessToken, projectID string, id Identity) ([]UsageBucket, error) {
 	body := map[string]any{
-		"cloudaicompanionProject": projectID,
+		"project": projectID,
 	}
-	respBody, status, err := codeAssistPost(ctx, accessToken, "retrieveUserQuota", body, id)
+	respBody, status, err := codeAssistPost(ctx, accessToken, "retrieveUserQuotaSummary", body, id)
 	if err != nil {
-		return -1, err
+		return nil, err
 	}
 	if status != http.StatusOK {
-		return -1, fmt.Errorf("geminicli: retrieveUserQuota failed: %s - %s",
+		return nil, fmt.Errorf("geminicli: retrieveUserQuotaSummary failed: %s - %s",
 			http.StatusText(status), strings.TrimSpace(string(respBody)))
 	}
 
-	var q quotaResponse
-	if err := json.Unmarshal(respBody, &q); err != nil {
-		return -1, fmt.Errorf("geminicli: parse retrieveUserQuota response: %w", err)
+	var parsed quotaSummaryResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("geminicli: parse retrieveUserQuotaSummary response: %w", err)
 	}
 
-	switch {
-	case q.RemainingFraction != nil:
-		return clampFraction(*q.RemainingFraction), nil
-	case q.Quota != nil && q.Quota.RemainingFraction != nil:
-		return clampFraction(*q.Quota.RemainingFraction), nil
-	case q.Remaining != nil && q.Limit != nil && *q.Limit != 0:
-		return clampFraction(*q.Remaining / *q.Limit), nil
-	default:
-		return -1, nil
+	var buckets []UsageBucket
+	for _, g := range parsed.Groups {
+		for _, b := range g.Buckets {
+			label := b.DisplayName
+			if label == "" {
+				label = g.DisplayName
+			}
+			frac := -1.0
+			if b.RemainingFraction != nil {
+				frac = clampFraction(*b.RemainingFraction)
+			}
+			var resetsAt time.Time
+			if b.ResetTime != "" {
+				if t, err := time.Parse(time.RFC3339, b.ResetTime); err == nil {
+					resetsAt = t
+				}
+			}
+			buckets = append(buckets, UsageBucket{
+				Label:             label,
+				Window:            b.Window,
+				RemainingFraction: frac,
+				ResetsAt:          resetsAt,
+				Disabled:          b.Disabled,
+			})
+		}
 	}
+	return buckets, nil
 }
 
 // clampFraction constrains a quota fraction to the closed range 0..1.

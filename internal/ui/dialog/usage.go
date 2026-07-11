@@ -23,26 +23,48 @@ const (
 	usageDialogMaxWidth = 60
 )
 
-// usageProviderName returns the display name of the subscription
-// provider whose usage the dialog should show, or "" when the current
-// large model's provider has no known usage endpoint. It backs both the
-// "Plan Usage" command's visibility and the dialog's title.
-func usageProviderName(cfg *config.Config) string {
+// usageProviders lists every subscription provider with a known plan
+// usage endpoint, in display order.
+var usageProviders = []struct {
+	id   string
+	name string
+}{
+	{claudecode.ProviderID, "Claude Code"},
+	{codex.ProviderID, "OpenAI Codex"},
+	{geminicli.ProviderID, "Gemini CLI"},
+	{antigravity.ProviderID, "Google Antigravity"},
+}
+
+// usageProviderAvailable reports whether the given subscription provider
+// is configured and ready to report usage. Claude Code authenticates via
+// its own credentials file rather than an OAuth token stored in the
+// provider config, so it only needs to be present and not disabled;
+// the others need a stored OAuth token.
+func usageProviderAvailable(cfg *config.Config, providerID string) bool {
+	pc, ok := cfg.Providers.Get(providerID)
+	if !ok || pc.Disable {
+		return false
+	}
+	if providerID == claudecode.ProviderID {
+		return true
+	}
+	return pc.OAuthToken != nil
+}
+
+// usageAnyProviderAvailable reports whether any subscription provider
+// with a known usage endpoint is configured, regardless of which one (if
+// any) is currently selected as the active model's provider. It backs
+// the "Plan Usage" command's visibility.
+func usageAnyProviderAvailable(cfg *config.Config) bool {
 	if cfg == nil {
-		return ""
+		return false
 	}
-	switch cfg.Models[config.SelectedModelTypeLarge].Provider {
-	case claudecode.ProviderID:
-		return "Claude Code"
-	case codex.ProviderID:
-		return "OpenAI Codex"
-	case geminicli.ProviderID:
-		return "Gemini CLI"
-	case antigravity.ProviderID:
-		return "Google Antigravity"
-	default:
-		return ""
+	for _, p := range usageProviders {
+		if usageProviderAvailable(cfg, p.id) {
+			return true
+		}
 	}
+	return false
 }
 
 // usageLine is one rendered row of the plan usage view: a label and a
@@ -52,25 +74,30 @@ type usageLine struct {
 	value string
 }
 
-// usageLoadedMsg carries the result of the asynchronous plan usage fetch.
-type usageLoadedMsg struct {
-	lines []usageLine
-	err   error
+// usageSection is one provider's plan usage, rendered as a header
+// followed by its lines. err is set when the fetch failed; lines is
+// empty (with no err) when the provider reported no usage data.
+type usageSection struct {
+	providerName string
+	lines        []usageLine
+	err          error
 }
 
-// Usage is a read-only dialog that shows the current subscription
-// provider's plan usage limits: Claude Code, OpenAI Codex, Gemini CLI, or
-// Google Antigravity. It is only meaningful when the active large model's
-// provider is one of these OAuth subscription providers (see
-// usageProviderName).
+// usageLoadedMsg carries the result of the asynchronous plan usage
+// fetch across every configured subscription provider.
+type usageLoadedMsg struct {
+	sections []usageSection
+}
+
+// Usage is a read-only dialog that shows plan usage limits for every
+// configured subscription provider: Claude Code, OpenAI Codex, Gemini
+// CLI, and Google Antigravity.
 type Usage struct {
 	com     *common.Common
 	spinner spinner.Model
 	loading bool
 
-	providerName string
-	lines        []usageLine
-	err          error
+	sections []usageSection
 
 	keyMap struct {
 		Close key.Binding
@@ -84,7 +111,7 @@ var (
 
 // NewUsage creates a new plan usage dialog in its loading state.
 func NewUsage(com *common.Common) *Usage {
-	u := &Usage{com: com, loading: true, providerName: usageProviderName(com.Config())}
+	u := &Usage{com: com, loading: true}
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -95,56 +122,64 @@ func NewUsage(com *common.Common) *Usage {
 	return u
 }
 
-// fetchUsageCmd queries the active subscription provider's plan usage
-// endpoint, refreshing its stored OAuth token first if it has expired.
+// fetchUsageCmd queries the plan usage endpoint of every configured
+// subscription provider, refreshing each one's stored OAuth token first
+// if it has expired.
 func (u *Usage) fetchUsageCmd() tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		cfg := u.com.Config()
 		if cfg == nil {
-			return usageLoadedMsg{err: fmt.Errorf("configuration not found")}
+			return usageLoadedMsg{sections: []usageSection{{err: fmt.Errorf("configuration not found")}}}
 		}
 
-		providerID := cfg.Models[config.SelectedModelTypeLarge].Provider
-		switch providerID {
-		case claudecode.ProviderID:
-			usage, err := claudecode.DefaultSource().Usage(ctx)
-			if err != nil {
-				return usageLoadedMsg{err: err}
+		var sections []usageSection
+		for _, p := range usageProviders {
+			if !usageProviderAvailable(cfg, p.id) {
+				continue
 			}
-			return usageLoadedMsg{lines: claudeCodeUsageLines(usage)}
-		case codex.ProviderID, geminicli.ProviderID, antigravity.ProviderID:
-			pc, ok := cfg.Providers.Get(providerID)
-			if !ok || pc.OAuthToken == nil {
-				return usageLoadedMsg{err: fmt.Errorf("not logged in to %s", providerID)}
-			}
-			if pc.OAuthToken.IsExpired() {
-				if err := u.com.Workspace.RefreshOAuthToken(ctx, config.ScopeGlobal, providerID); err == nil {
-					if refreshed, ok := u.com.Config().Providers.Get(providerID); ok {
-						pc = refreshed
-					}
-				}
-			}
-			return fetchOAuthUsage(ctx, providerID, pc)
-		default:
-			return usageLoadedMsg{err: fmt.Errorf("plan usage is not available for this provider")}
+			lines, err := u.fetchProviderUsage(ctx, cfg, p.id)
+			sections = append(sections, usageSection{providerName: p.name, lines: lines, err: err})
 		}
+		return usageLoadedMsg{sections: sections}
 	}
 }
 
-// fetchOAuthUsage dispatches to the provider-specific FetchUsage call for
-// the Codex/Gemini-CLI-family subscription providers, translating the
-// result into display lines.
-func fetchOAuthUsage(ctx context.Context, providerID string, pc config.ProviderConfig) usageLoadedMsg {
+// fetchProviderUsage fetches and formats plan usage for a single
+// subscription provider.
+func (u *Usage) fetchProviderUsage(ctx context.Context, cfg *config.Config, providerID string) ([]usageLine, error) {
+	if providerID == claudecode.ProviderID {
+		usage, err := claudecode.DefaultSource().Usage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return claudeCodeUsageLines(usage), nil
+	}
+
+	pc, _ := cfg.Providers.Get(providerID)
+	if pc.OAuthToken.IsExpired() {
+		if err := u.com.Workspace.RefreshOAuthToken(ctx, config.ScopeGlobal, providerID); err == nil {
+			if refreshed, ok := u.com.Config().Providers.Get(providerID); ok {
+				pc = refreshed
+			}
+		}
+	}
+	return fetchOAuthUsageLines(ctx, providerID, pc)
+}
+
+// fetchOAuthUsageLines dispatches to the provider-specific FetchUsage
+// call for the Codex/Gemini-CLI-family subscription providers,
+// translating the result into display lines.
+func fetchOAuthUsageLines(ctx context.Context, providerID string, pc config.ProviderConfig) ([]usageLine, error) {
 	switch providerID {
 	case codex.ProviderID:
 		u, err := codex.FetchUsage(ctx, pc.OAuthToken.AccessToken)
 		if err != nil {
-			return usageLoadedMsg{err: err}
+			return nil, err
 		}
-		return usageLoadedMsg{lines: codexUsageLines(u)}
+		return codexUsageLines(u), nil
 	case geminicli.ProviderID, antigravity.ProviderID:
 		projectID := ""
 		if pc.OAuthExtra != nil {
@@ -156,11 +191,11 @@ func fetchOAuthUsage(ctx context.Context, providerID string, pc config.ProviderC
 		}
 		u, err := geminicli.FetchUsage(ctx, pc.OAuthToken.AccessToken, projectID, identity)
 		if err != nil {
-			return usageLoadedMsg{err: err}
+			return nil, err
 		}
-		return usageLoadedMsg{lines: geminiCliUsageLines(u)}
+		return geminiCliUsageLines(u), nil
 	default:
-		return usageLoadedMsg{err: fmt.Errorf("plan usage is not available for this provider")}
+		return nil, fmt.Errorf("plan usage is not available for this provider")
 	}
 }
 
@@ -190,8 +225,7 @@ func (u *Usage) HandleMsg(msg tea.Msg) Action {
 		}
 	case usageLoadedMsg:
 		u.loading = false
-		u.lines = msg.lines
-		u.err = msg.err
+		u.sections = msg.sections
 	case spinner.TickMsg:
 		if u.loading {
 			var cmd tea.Cmd
@@ -206,24 +240,32 @@ func (u *Usage) HandleMsg(msg tea.Msg) Action {
 func (u *Usage) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	t := u.com.Styles
 	width := max(0, min(usageDialogMaxWidth, area.Dx()))
+	innerWidth := width - t.Dialog.View.GetHorizontalFrameSize()
 
 	rc := NewRenderContext(t, width)
 	rc.Title = "Plan Usage"
-	if u.providerName != "" {
-		rc.Title = u.providerName + " Plan Usage"
-	}
 
 	switch {
 	case u.loading:
 		rc.AddPart(u.spinner.View() + " Fetching plan usage…")
-	case u.err != nil:
-		rc.AddPart(t.Dialog.Quit.Content.Render("Unable to fetch plan usage:"))
-		rc.AddPart(t.Dialog.Quit.Content.Render(u.err.Error()))
-	case len(u.lines) == 0:
-		rc.AddPart("No plan usage data available.")
+	case len(u.sections) == 0:
+		rc.AddPart("You are not logged in to any subscription provider with usage reporting.")
 	default:
-		for _, l := range u.lines {
-			rc.AddPart(fmt.Sprintf("%-20s %s", l.label, l.value))
+		for i, s := range u.sections {
+			if i > 0 {
+				rc.AddPart("")
+			}
+			rc.AddPart(common.Section(t, s.providerName, innerWidth))
+			switch {
+			case s.err != nil:
+				rc.AddPart(t.Dialog.Quit.Content.Render("Unable to fetch plan usage: " + s.err.Error()))
+			case len(s.lines) == 0:
+				rc.AddPart("No plan usage data available.")
+			default:
+				for _, l := range s.lines {
+					rc.AddPart(fmt.Sprintf("%-20s %s", l.label, l.value))
+				}
+			}
 		}
 	}
 
@@ -295,7 +337,8 @@ func codexUsageLines(u *codex.Usage) []usageLine {
 }
 
 // geminiCliUsageLines renders the Gemini CLI / Antigravity plan tier and
-// remaining quota fraction.
+// each quota bucket (one per model or feature group) returned by
+// retrieveUserQuotaSummary.
 func geminiCliUsageLines(u *geminicli.Usage) []usageLine {
 	if u == nil {
 		return nil
@@ -304,8 +347,22 @@ func geminiCliUsageLines(u *geminicli.Usage) []usageLine {
 	if u.Tier != "" {
 		lines = append(lines, usageLine{"Tier:", u.Tier})
 	}
-	if u.RemainingFraction >= 0 {
-		lines = append(lines, usageLine{"Remaining:", fmt.Sprintf("%.0f%%", u.RemainingFraction*100)})
+	for _, b := range u.Buckets {
+		if b.Disabled {
+			continue
+		}
+		label := b.Label
+		if b.Window != "" {
+			label += " (" + b.Window + ")"
+		}
+		value := "usage unknown"
+		if b.RemainingFraction >= 0 {
+			value = fmt.Sprintf("%.0f%% remaining", b.RemainingFraction*100)
+		}
+		if !b.ResetsAt.IsZero() {
+			value += ", resets " + formatResetTime(b.ResetsAt)
+		}
+		lines = append(lines, usageLine{label + ":", value})
 	}
 	return lines
 }

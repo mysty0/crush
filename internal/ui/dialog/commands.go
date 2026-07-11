@@ -444,10 +444,12 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		commands = append(commands, NewCommandItem(c.com.Styles, "regenerate_title", "Regenerate Title", "", ActionRegenerateTitle{}))
 	}
 
-	// Only show plan usage for subscription providers with a known usage
-	// endpoint (Claude Code, OpenAI Codex, Gemini CLI, Antigravity).
-	// API-key providers have no equivalent endpoint.
-	if usageProviderName(c.com.Config()) != "" {
+	// Only show plan usage when at least one subscription provider with a
+	// known usage endpoint (Claude Code, OpenAI Codex, Gemini CLI,
+	// Antigravity) is configured, regardless of which one is currently
+	// selected as the active model's provider -- the dialog shows all of
+	// them. API-key providers have no equivalent endpoint.
+	if usageAnyProviderAvailable(c.com.Config()) {
 		commands = append(commands, NewCommandItem(c.com.Styles, "usage", "Plan Usage", "", ActionOpenDialog{DialogID: UsageID}))
 	}
 

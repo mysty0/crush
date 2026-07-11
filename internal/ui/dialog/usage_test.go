@@ -6,6 +6,8 @@ import (
 
 	"github.com/charmbracelet/crush/internal/claudecode"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/antigravity"
 	"github.com/charmbracelet/crush/internal/oauth/codex"
 	"github.com/charmbracelet/crush/internal/oauth/geminicli"
@@ -13,39 +15,64 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestUsageProviderName covers every subscription provider with a known
-// usage endpoint, plus the API-key/unknown-provider case where the "Plan
-// Usage" command should not be offered at all.
-func TestUsageProviderName(t *testing.T) {
+// TestUsageProviderAvailable covers every subscription provider with a
+// known usage endpoint. Claude Code only needs to be present and not
+// disabled (it authenticates via its own credentials file); the other
+// three additionally need a stored OAuth token.
+func TestUsageProviderAvailable(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		providerID string
-		want       string
-	}{
-		{"claude code", claudecode.ProviderID, "Claude Code"},
-		{"codex", codex.ProviderID, "OpenAI Codex"},
-		{"gemini cli", geminicli.ProviderID, "Gemini CLI"},
-		{"antigravity", antigravity.ProviderID, "Google Antigravity"},
-		{"unknown provider", "some-api-key-provider", ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	t.Run("claude code needs no oauth token", func(t *testing.T) {
+		t.Parallel()
+		cfg := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
+		cfg.Providers.Set(claudecode.ProviderID, config.ProviderConfig{})
+		assert.True(t, usageProviderAvailable(cfg, claudecode.ProviderID))
+	})
+
+	t.Run("claude code disabled", func(t *testing.T) {
+		t.Parallel()
+		cfg := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
+		cfg.Providers.Set(claudecode.ProviderID, config.ProviderConfig{Disable: true})
+		assert.False(t, usageProviderAvailable(cfg, claudecode.ProviderID))
+	})
+
+	for _, id := range []string{codex.ProviderID, geminicli.ProviderID, antigravity.ProviderID} {
+		t.Run(id+" needs an oauth token", func(t *testing.T) {
 			t.Parallel()
-			cfg := &config.Config{
-				Models: map[config.SelectedModelType]config.SelectedModel{
-					config.SelectedModelTypeLarge: {Provider: tc.providerID},
-				},
-			}
-			assert.Equal(t, tc.want, usageProviderName(cfg))
+			cfg := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
+			cfg.Providers.Set(id, config.ProviderConfig{})
+			assert.False(t, usageProviderAvailable(cfg, id), "no token yet")
+
+			cfg.Providers.Set(id, config.ProviderConfig{OAuthToken: &oauth.Token{AccessToken: "tok"}})
+			assert.True(t, usageProviderAvailable(cfg, id))
 		})
 	}
 
-	t.Run("nil config", func(t *testing.T) {
+	t.Run("provider not configured", func(t *testing.T) {
 		t.Parallel()
-		assert.Equal(t, "", usageProviderName(nil))
+		cfg := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
+		assert.False(t, usageProviderAvailable(cfg, codex.ProviderID))
 	})
+}
+
+// TestUsageAnyProviderAvailable covers the aggregate check backing the
+// "Plan Usage" command's visibility: it should trigger on any configured
+// subscription provider, not just the currently active one.
+func TestUsageAnyProviderAvailable(t *testing.T) {
+	t.Parallel()
+
+	assert.False(t, usageAnyProviderAvailable(nil))
+
+	empty := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
+	assert.False(t, usageAnyProviderAvailable(empty))
+
+	withClaude := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
+	withClaude.Providers.Set(claudecode.ProviderID, config.ProviderConfig{})
+	assert.True(t, usageAnyProviderAvailable(withClaude))
+
+	withCodex := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
+	withCodex.Providers.Set(codex.ProviderID, config.ProviderConfig{OAuthToken: &oauth.Token{AccessToken: "tok"}})
+	assert.True(t, usageAnyProviderAvailable(withCodex))
 }
 
 // TestClaudeCodeUsageLines covers the per-window rendering and the extra
@@ -112,29 +139,38 @@ func TestCodexUsageLines(t *testing.T) {
 	assert.Equal(t, "usage unknown", lines[2].value)
 }
 
-// TestGeminiCliUsageLines covers the tier and remaining-quota lines,
-// including the "unknown remaining" case (-1) being omitted.
+// TestGeminiCliUsageLines covers the tier line and per-bucket rendering,
+// including a bucket with an unknown remaining fraction and a disabled
+// bucket being skipped.
 func TestGeminiCliUsageLines(t *testing.T) {
 	t.Parallel()
 
 	assert.Nil(t, geminiCliUsageLines(nil))
 
-	u := &geminicli.Usage{Tier: "free-tier", RemainingFraction: 0.75}
+	u := &geminicli.Usage{
+		Tier: "free-tier",
+		Buckets: []geminicli.UsageBucket{
+			{Label: "Gemini 2.5 Pro", Window: "24h", RemainingFraction: 0.75, ResetsAt: time.Now().Add(time.Hour)},
+			{Label: "Gemini 2.5 Flash", RemainingFraction: -1},
+			{Label: "Legacy", Disabled: true},
+		},
+	}
 	lines := geminiCliUsageLines(u)
-	require.Len(t, lines, 2)
+	require.Len(t, lines, 3)
+
 	assert.Equal(t, "Tier:", lines[0].label)
 	assert.Equal(t, "free-tier", lines[0].value)
-	assert.Equal(t, "Remaining:", lines[1].label)
-	assert.Equal(t, "75%", lines[1].value)
 
-	unknown := &geminicli.Usage{Tier: "standard-tier", RemainingFraction: -1}
-	lines = geminiCliUsageLines(unknown)
-	require.Len(t, lines, 1)
-	assert.Equal(t, "Tier:", lines[0].label)
+	assert.Equal(t, "Gemini 2.5 Pro (24h):", lines[1].label)
+	assert.Contains(t, lines[1].value, "75% remaining")
+	assert.Contains(t, lines[1].value, "resets in")
+
+	assert.Equal(t, "Gemini 2.5 Flash:", lines[2].label)
+	assert.Equal(t, "usage unknown", lines[2].value)
 }
 
 // TestHumanizeUntilDuration covers the compact duration formatting used
-// for both Claude Code and Codex reset times.
+// for Claude Code, Codex, and Gemini CLI reset times.
 func TestHumanizeUntilDuration(t *testing.T) {
 	t.Parallel()
 
