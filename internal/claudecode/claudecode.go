@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -217,10 +218,67 @@ type modelsResponse struct {
 		MaxInputTokens int64  `json:"max_input_tokens"`
 		MaxTokens      int64  `json:"max_tokens"`
 		Capabilities   struct {
-			Thinking   struct{ Supported bool `json:"supported"` } `json:"thinking"`
-			ImageInput struct{ Supported bool `json:"supported"` } `json:"image_input"`
+			Thinking struct {
+				Supported bool `json:"supported"`
+			} `json:"thinking"`
+			ImageInput struct {
+				Supported bool `json:"supported"`
+			} `json:"image_input"`
+			Effort effortCapabilities `json:"effort"`
 		} `json:"capabilities"`
 	} `json:"data"`
+}
+
+// effortCapabilities mirrors the "capabilities.effort" object of a
+// /v1/models response entry: a top-level supported flag plus one flag
+// per named effort level.
+type effortCapabilities struct {
+	Supported bool `json:"supported"`
+	Low       struct {
+		Supported bool `json:"supported"`
+	} `json:"low"`
+	Medium struct {
+		Supported bool `json:"supported"`
+	} `json:"medium"`
+	High struct {
+		Supported bool `json:"supported"`
+	} `json:"high"`
+	XHigh struct {
+		Supported bool `json:"supported"`
+	} `json:"xhigh"`
+	Max struct {
+		Supported bool `json:"supported"`
+	} `json:"max"`
+}
+
+// effortLevels returns the reasoning-effort levels this model supports,
+// in Anthropic's documented low-to-max order, read directly from the
+// live /v1/models response rather than a hardcoded list -- so newly
+// released levels (e.g. xhigh, max) appear automatically for whichever
+// models actually support them, and are never offered for models that
+// don't support a given level. See
+// platform.claude.com/docs/en/build-with-claude/effort.
+func effortLevels(c effortCapabilities) []string {
+	if !c.Supported {
+		return nil
+	}
+	var levels []string
+	if c.Low.Supported {
+		levels = append(levels, "low")
+	}
+	if c.Medium.Supported {
+		levels = append(levels, "medium")
+	}
+	if c.High.Supported {
+		levels = append(levels, "high")
+	}
+	if c.XHigh.Supported {
+		levels = append(levels, "xhigh")
+	}
+	if c.Max.Supported {
+		levels = append(levels, "max")
+	}
+	return levels
 }
 
 // Models queries /v1/models and returns the subscription's available models
@@ -230,7 +288,11 @@ func (s *Source) Models(ctx context.Context) ([]catwalk.Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, BaseURL+"/v1/models?limit=100", nil)
+	base := s.baseURL
+	if base == "" {
+		base = BaseURL
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/models?limit=100", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -259,16 +321,34 @@ func (s *Source) Models(ctx context.Context) ([]catwalk.Model, error) {
 		if name == "" {
 			name = m.ID
 		}
+		levels := effortLevels(m.Capabilities.Effort)
 		models = append(models, catwalk.Model{
-			ID:               m.ID,
-			Name:             name,
-			ContextWindow:    m.MaxInputTokens,
-			DefaultMaxTokens: m.MaxTokens,
-			CanReason:        m.Capabilities.Thinking.Supported,
-			SupportsImages:   m.Capabilities.ImageInput.Supported,
+			ID:                     m.ID,
+			Name:                   name,
+			ContextWindow:          m.MaxInputTokens,
+			DefaultMaxTokens:       m.MaxTokens,
+			CanReason:              m.Capabilities.Thinking.Supported || len(levels) > 0,
+			SupportsImages:         m.Capabilities.ImageInput.Supported,
+			ReasoningLevels:        levels,
+			DefaultReasoningEffort: defaultEffortLevel(levels),
 		})
 	}
 	return models, nil
+}
+
+// defaultEffortLevel picks the effort level Crush should use when the
+// user hasn't chosen one. Anthropic documents "high" as the API's own
+// default (explicitly equivalent to omitting the effort parameter), so
+// that is preferred whenever the model supports it; otherwise the
+// highest level the model does support is used.
+func defaultEffortLevel(levels []string) string {
+	if slices.Contains(levels, "high") {
+		return "high"
+	}
+	if len(levels) > 0 {
+		return levels[len(levels)-1]
+	}
+	return ""
 }
 
 var (
@@ -301,6 +381,14 @@ func CachedModels(ctx context.Context) []catwalk.Model {
 
 // DefaultModels is a static fallback list used when /v1/models cannot be
 // reached. It mirrors the known Claude Code subscription line-up.
+//
+// It intentionally leaves ReasoningLevels/DefaultReasoningEffort unset
+// rather than guessing which effort levels (e.g. xhigh, max) each model
+// supports: that support is only known live, from /v1/models'
+// capabilities.effort field (see effortLevels), and would silently go
+// stale here as a hardcoded list. Leaving it unset makes Crush fall
+// back to the safe, generic off/low/medium/high thinking-budget picker
+// (see config.UsesThinkingBudget) until a live model list is available.
 func DefaultModels() []catwalk.Model {
 	mk := func(id, name string, ctx, maxTok int64) catwalk.Model {
 		return catwalk.Model{
