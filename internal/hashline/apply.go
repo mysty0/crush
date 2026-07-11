@@ -30,6 +30,19 @@ func Apply(text string, edits []Edit) (ApplyResult, error) {
 	}
 	n := len(lines)
 
+	// Validate every edit's line reference against the actual file up
+	// front, before the boundary-echo repair pass runs: that pass indexes
+	// directly into fileLines (see groupDelta/countLeadingEcho/
+	// countTrailingEcho) and assumes every group's line range is already
+	// in bounds. Deferring this check to the main apply loop below (which
+	// only validates as it consumes each edit) let an out-of-range
+	// reference -- typically the model miscounting a file's lines --
+	// reach the repair pass first and panic on a slice out of range
+	// instead of surfacing the same clean "line does not exist" error.
+	if err := validateEditLines(edits, n); err != nil {
+		return ApplyResult{}, err
+	}
+
 	// Absorb common off-by-one keeper mistakes where a SWAP payload restates an
 	// unchanged line bordering the replaced range before validation runs.
 	edits, repairWarnings := repairReplacementBoundaries(edits, lines)
@@ -105,6 +118,29 @@ func Apply(text string, edits []Edit) (ApplyResult, error) {
 func checkLine(line, n int) error {
 	if line < 1 || line > n {
 		return fmt.Errorf("line %d does not exist (file has %d lines)", line, n)
+	}
+	return nil
+}
+
+// validateEditLines checks every edit's line reference against n (the
+// file's line count) up front, so a bad reference from any edit kind is
+// reported as the same clean error before any pass indexes fileLines by
+// those line numbers.
+func validateEditLines(edits []Edit, n int) error {
+	for _, e := range edits {
+		switch e.Kind {
+		case EditInsert:
+			switch e.Cursor.Kind {
+			case CursorBeforeAnchor, CursorAfterAnchor:
+				if err := checkLine(e.Cursor.Line, n); err != nil {
+					return err
+				}
+			}
+		case EditDelete:
+			if err := checkLine(e.Anchor, n); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

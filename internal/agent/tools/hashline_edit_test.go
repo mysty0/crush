@@ -293,3 +293,78 @@ func TestHashlineEditSyntaxGateDisabled(t *testing.T) {
 	resp := runHashlineEdit(t, tool, "sess", "[a.go#"+tag+"]\nDEL 6")
 	require.False(t, resp.IsError, resp.Content)
 }
+
+// TestHashlineEditOutOfRangeDeleteReturnsCleanError reproduces the exact
+// production crash end-to-end through the real tool: an out-of-range SWAP
+// hunk used to reach hashline.Apply's boundary-echo repair pass and panic
+// with "slice bounds out of range" instead of returning a normal tool
+// error, crashing the whole TUI process. Covers the root-cause fix
+// (validateEditLines in internal/hashline/apply.go).
+func TestHashlineEditOutOfRangeDeleteReturnsCleanError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.txt")
+	content := "one\ntwo\nthree\n" // 3 lines.
+	require.NoError(t, os.WriteFile(file, []byte(content), 0o644))
+
+	store := hashline.NewStore()
+	abs, _ := filepath.Abs(file)
+	tag := recordRead(t, store, "sess", abs, content)
+
+	tool := hashlineTestTool(store, dir)
+	// Deletes lines 1..5, but the file only has 3 lines.
+	input := "[a.txt#" + tag + "]\nSWAP 1.=5:\n+X\n+Y\n+three\n+four\n+five"
+
+	var resp fantasy.ToolResponse
+	require.NotPanics(t, func() {
+		resp = runHashlineEdit(t, tool, "sess", input)
+	})
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "does not exist")
+
+	got, err := os.ReadFile(file)
+	require.NoError(t, err)
+	require.Equal(t, content, string(got), "an out-of-range edit must not write")
+}
+
+// panicResolver is a hashline.BlockResolver test double that always panics,
+// used to prove the tool-level recover() safety net (defense in depth
+// beyond the specific validateEditLines fix) converts ANY panic in this
+// pipeline into a normal tool error instead of crashing the process.
+type panicResolver struct{}
+
+func (panicResolver) ResolveBlock(req hashline.BlockRequest) (hashline.BlockSpan, bool) {
+	panic("simulated panic in block resolution")
+}
+
+func TestHashlineEditToolRecoversFromPanic(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.go")
+	content := "package main\n\nfunc main() {\n}\n"
+	require.NoError(t, os.WriteFile(file, []byte(content), 0o644))
+
+	store := hashline.NewStore()
+	abs, _ := filepath.Abs(file)
+	tag := recordRead(t, store, "sess", abs, content)
+
+	perms := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tool := NewHashlineEditTool(nil, perms, &mockHistoryService{}, mockFileTracker{}, store, panicResolver{}, dir, true)
+	input := "[a.go#" + tag + "]\nSWAP.BLK 3:\n+func main() {\n+\tprintln(\"hi\")\n+}"
+
+	var resp fantasy.ToolResponse
+	var runErr error
+	require.NotPanics(t, func() {
+		raw, merr := json.Marshal(HashlineEditParams{Input: input})
+		require.NoError(t, merr)
+		ctx := context.WithValue(context.Background(), SessionIDContextKey, "sess")
+		resp, runErr = tool.Run(ctx, fantasy.ToolCall{ID: "call-1", Name: EditToolName, Input: string(raw)})
+	})
+	require.NoError(t, runErr, "a recovered panic must surface as a tool error, not a Go error")
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "internal error")
+
+	got, err := os.ReadFile(file)
+	require.NoError(t, err)
+	require.Equal(t, content, string(got), "a panicking edit must not write")
+}

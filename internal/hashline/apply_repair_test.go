@@ -105,3 +105,31 @@ func TestRepairImbalancedTrailingEchoKept(t *testing.T) {
 	require.Equal(t, "if cond {\n\tnew := 2\n}\n}\nmore()\n", got)
 	require.Empty(t, warns)
 }
+
+// TestRepairOutOfRangeDeleteReturnsCleanError is a regression test for a
+// production crash: a SWAP hunk whose delete range extends past the file's
+// actual line count reached the boundary-echo repair pass before any bounds
+// check ran, and groupDelta's fileLines[startLine-1:endLine] slice panicked
+// ("slice bounds out of range") instead of failing cleanly. The repair pass
+// only fires for a multi-row payload on a multi-line range (see
+// boundaryEchoRepair), which this hunk satisfies -- it is not a synthetic
+// worst case.
+func TestRepairOutOfRangeDeleteReturnsCleanError(t *testing.T) {
+	t.Parallel()
+	text := "one\ntwo\nthree\n" // 3 lines.
+
+	require.NotPanics(t, func() {
+		sections, _, err := Parse("[f#0000]\nSWAP 1.=5:\n+X\n+Y\n+three\n+four\n+five")
+		require.NoError(t, err)
+		require.Len(t, sections, 1)
+		// A plain (non-block) line-range SWAP passes through ResolveBlockEdits
+		// unchanged -- it never validates line numbers against the real file,
+		// so an out-of-range M reaches Apply exactly as it did in production.
+		edits, _, err := ResolveBlockEdits(sections[0].Edits, text, sections[0].Path, nil)
+		require.NoError(t, err)
+
+		_, err = Apply(text, edits)
+		require.Error(t, err, "an out-of-range delete must be rejected, not panic")
+		require.Contains(t, err.Error(), "does not exist")
+	})
+}

@@ -81,7 +81,33 @@ func NewHashlineEditTool(
 	return fantasy.NewAgentTool(
 		EditToolName,
 		hashlineEditDescription,
-		func(ctx context.Context, params HashlineEditParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+		func(ctx context.Context, params HashlineEditParams, call fantasy.ToolCall) (resp fantasy.ToolResponse, err error) {
+			// This pipeline (line-anchored diffing, boundary-echo repair,
+			// tree-sitter block resolution) is reachable directly from
+			// model-generated input and has already produced one production
+			// crash from an out-of-range edit (see the validateEditLines fix
+			// in internal/hashline/apply.go). A panic anywhere in here must
+			// degrade to a normal tool error, not take down the whole TUI
+			// process and lose the session's unsaved state -- mirroring the
+			// recover() pattern used for MCP client init goroutines
+			// (internal/agent/tools/mcp/init.go).
+			defer func() {
+				if r := recover(); r != nil {
+					var perr error
+					switch v := r.(type) {
+					case error:
+						perr = v
+					default:
+						perr = fmt.Errorf("%v", v)
+					}
+					slog.Error("Panic in hashline edit tool", "error", perr, "session_id", GetSessionFromContext(ctx))
+					resp = fantasy.NewTextErrorResponse(fmt.Sprintf(
+						"internal error while editing: %s. This is a bug; the file was not modified. Try re-reading the file and issuing the edit again.",
+						perr,
+					))
+					err = nil
+				}
+			}()
 			if strings.TrimSpace(params.Input) == "" {
 				return fantasy.NewTextErrorResponse("input is required"), nil
 			}
