@@ -28,6 +28,11 @@ type Reasoning struct {
 	help  help.Model
 	list  *list.FilterableList
 	input textinput.Model
+	// usingThinkingBudget is true when this dialog is presenting the
+	// discrete off/low/medium/high thinking-budget levels (Anthropic,
+	// Bedrock) rather than catwalk-supplied named reasoning-effort
+	// levels (OpenAI-style), used to adjust the dialog title.
+	usingThinkingBudget bool
 
 	keyMap struct {
 		Select   key.Binding
@@ -178,6 +183,9 @@ func (r *Reasoning) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 
 	rc := NewRenderContext(t, width)
 	rc.Title = "Select Reasoning Effort"
+	if r.usingThinkingBudget {
+		rc.Title = "Select Thinking Budget"
+	}
 	inputView := t.Dialog.InputPrompt.Render(r.input.View())
 	rc.AddPart(inputView)
 
@@ -237,18 +245,37 @@ func (r *Reasoning) setReasoningItems() error {
 		return errors.New("model configuration not found")
 	}
 
-	if len(model.ReasoningLevels) == 0 {
+	levels := model.ReasoningLevels
+	r.usingThinkingBudget = false
+	if len(levels) == 0 {
+		if providerCfg := cfg.GetProviderForModel(agentCfg.Model); providerCfg != nil && config.UsesThinkingBudget(providerCfg.Type) {
+			levels = config.ThinkingBudgetLevels
+			r.usingThinkingBudget = true
+		}
+	}
+	if len(levels) == 0 {
 		return errors.New("no reasoning levels available")
 	}
 
 	currentEffort := selectedModel.ReasoningEffort
 	if currentEffort == "" {
-		currentEffort = model.DefaultReasoningEffort
+		switch {
+		case r.usingThinkingBudget:
+			// No level chosen yet -- fall back to the legacy boolean
+			// toggle's state so a prior "Think: on" still shows as
+			// something other than "off" here.
+			currentEffort = "off"
+			if selectedModel.Think {
+				currentEffort = "low"
+			}
+		default:
+			currentEffort = model.DefaultReasoningEffort
+		}
 	}
 
-	items := make([]list.FilterableItem, 0, len(model.ReasoningLevels))
+	items := make([]list.FilterableItem, 0, len(levels))
 	selectedIndex := 0
-	for i, effort := range model.ReasoningLevels {
+	for i, effort := range levels {
 		item := &ReasoningItem{
 			Versioned: list.NewVersioned(),
 			effort:    effort,

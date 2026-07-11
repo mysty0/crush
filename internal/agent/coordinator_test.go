@@ -661,6 +661,57 @@ func TestGetProviderOptionsReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestGetProviderOptionsThinkingBudget(t *testing.T) {
+	// Direct Anthropic/Bedrock models have no catwalk ReasoningLevels
+	// (Anthropic's API takes a numeric budget_tokens, not named
+	// levels), so the off/low/medium/high picker is Crush's own and
+	// resolved via config.ThinkingBudgetTokens instead of the
+	// catwalk-driven "effort" path.
+	tests := []struct {
+		name            string
+		reasoningEffort string
+		think           bool
+		wantBudget      int64 // 0 means no thinking option should be set
+	}{
+		{"low level sets its budget", "low", false, config.ThinkingBudgetTokens("low")},
+		{"medium level sets its budget", "medium", false, config.ThinkingBudgetTokens("medium")},
+		{"high level sets its budget", "high", false, config.ThinkingBudgetTokens("high")},
+		{"off level disables thinking regardless of legacy Think", "off", true, 0},
+		{"legacy Think alone falls back to the old fixed budget", "", true, 2000},
+		{"neither level nor Think set disables thinking", "", false, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			model := Model{
+				CatwalkCfg: catwalk.Model{
+					ID:        "claude-opus-4-7",
+					CanReason: true,
+				},
+				ModelCfg: config.SelectedModel{
+					Provider:        "test",
+					ReasoningEffort: tc.reasoningEffort,
+					Think:           tc.think,
+				},
+			}
+			providerCfg := config.ProviderConfig{ID: "test", Type: catwalk.Type(anthropic.Name)}
+
+			opts := getProviderOptions(model, providerCfg)
+
+			raw, ok := opts[anthropic.Name]
+			require.True(t, ok)
+			parsed, ok := raw.(*anthropic.ProviderOptions)
+			require.True(t, ok)
+
+			if tc.wantBudget == 0 {
+				assert.Nil(t, parsed.Thinking)
+				return
+			}
+			require.NotNil(t, parsed.Thinking)
+			assert.Equal(t, tc.wantBudget, parsed.Thinking.BudgetTokens)
+		})
+	}
+}
+
 func TestGetProviderOptionsReasoningEffortFallback(t *testing.T) {
 	model := Model{
 		CatwalkCfg: catwalk.Model{

@@ -2128,14 +2128,28 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 
 		currentModel := cfg.Models[agentCfg.Model]
 		currentModel.ReasoningEffort = msg.Effort
+
+		providerCfg := cfg.GetProviderForModel(agentCfg.Model)
+		usingThinkingBudget := providerCfg != nil && config.UsesThinkingBudget(providerCfg.Type)
+		if usingThinkingBudget {
+			// Keep the legacy boolean toggle's state in sync with the
+			// chosen level so anything still reading .Think directly
+			// (e.g. the sidebar's fallback display) stays accurate.
+			currentModel.Think = msg.Effort != "" && msg.Effort != "off"
+		}
+
 		if err := m.com.Workspace.UpdatePreferredModel(config.ScopeGlobal, agentCfg.Model, currentModel); err != nil {
 			cmds = append(cmds, util.ReportError(err))
 			break
 		}
 
+		infoMsg := "Reasoning effort set to " + msg.Effort
+		if usingThinkingBudget {
+			infoMsg = "Thinking budget set to " + common.FormatReasoningEffort(msg.Effort)
+		}
 		cmds = append(cmds, func() tea.Msg {
 			m.com.Workspace.UpdateAgentModel(context.TODO())
-			return util.NewInfoMsg("Reasoning effort set to " + msg.Effort)
+			return util.NewInfoMsg(infoMsg)
 		})
 		m.dialog.CloseDialog(dialog.ReasoningID)
 	case dialog.ActionPermissionResponse:

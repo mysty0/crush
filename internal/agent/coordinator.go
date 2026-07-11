@@ -547,8 +547,14 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 			switch {
 			case !hasEffort && shouldSetEffort:
 				mergedOptions["effort"] = reasoningEffort
-			case !hasThink && model.ModelCfg.Think:
-				mergedOptions["thinking"] = map[string]any{"budget_tokens": 2000}
+			case !hasThink:
+				if budget := config.ThinkingBudgetTokens(model.ModelCfg.ReasoningEffort); budget > 0 {
+					mergedOptions["thinking"] = map[string]any{"budget_tokens": budget}
+				} else if model.ModelCfg.ReasoningEffort == "" && model.ModelCfg.Think {
+					// Legacy boolean toggle with no discrete level
+					// selected yet: preserve prior default budget.
+					mergedOptions["thinking"] = map[string]any{"budget_tokens": 2000}
+				}
 			}
 		}
 

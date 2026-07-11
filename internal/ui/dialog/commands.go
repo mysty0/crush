@@ -460,20 +460,25 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		if providerCfg != nil && model != nil && model.CanReason {
 			selectedModel := cfg.Models[agentCfg.Model]
 
-			// Anthropic models: thinking toggle
-			if model.CanReason && len(model.ReasoningLevels) == 0 {
+			switch {
+			case len(model.ReasoningLevels) > 0:
+				// OpenAI-style models: named reasoning effort dialog.
+				commands = append(commands, NewCommandItem(c.com.Styles, "select_reasoning_effort", "Select Reasoning Effort", "", ActionOpenDialog{
+					DialogID: ReasoningID,
+				}))
+			case config.UsesThinkingBudget(providerCfg.Type):
+				// Anthropic/Bedrock-style models: numeric thinking
+				// budget, presented as discrete off/low/medium/high
+				// levels through the same picker.
+				commands = append(commands, NewCommandItem(c.com.Styles, "select_thinking_budget", "Select Thinking Budget", "", ActionOpenDialog{
+					DialogID: ReasoningID,
+				}))
+			default:
 				status := "Enable"
 				if selectedModel.Think {
 					status = "Disable"
 				}
 				commands = append(commands, NewCommandItem(c.com.Styles, "toggle_thinking", status+" Thinking Mode", "", ActionToggleThinking{}))
-			}
-
-			// OpenAI models: reasoning effort dialog
-			if len(model.ReasoningLevels) > 0 {
-				commands = append(commands, NewCommandItem(c.com.Styles, "select_reasoning_effort", "Select Reasoning Effort", "", ActionOpenDialog{
-					DialogID: ReasoningID,
-				}))
 			}
 		}
 	}

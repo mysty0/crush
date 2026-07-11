@@ -6,6 +6,7 @@ import (
 	"image"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/logo"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -27,15 +28,25 @@ func (m *UI) modelInfo(width int) string {
 
 			// Only check reasoning if model can reason
 			if model.CatwalkCfg.CanReason {
-				if len(model.CatwalkCfg.ReasoningLevels) == 0 {
+				switch {
+				case len(model.CatwalkCfg.ReasoningLevels) > 0:
+					reasoningEffort := cmp.Or(model.ModelCfg.ReasoningEffort, model.CatwalkCfg.DefaultReasoningEffort)
+					reasoningInfo = fmt.Sprintf("Reasoning %s", common.FormatReasoningEffort(reasoningEffort))
+				case config.UsesThinkingBudget(providerConfig.Type):
+					level := model.ModelCfg.ReasoningEffort
+					if level == "" {
+						level = "off"
+						if model.ModelCfg.Think {
+							level = "low"
+						}
+					}
+					reasoningInfo = fmt.Sprintf("Thinking %s", common.FormatReasoningEffort(level))
+				default:
 					if model.ModelCfg.Think {
 						reasoningInfo = "Thinking On"
 					} else {
 						reasoningInfo = "Thinking Off"
 					}
-				} else {
-					reasoningEffort := cmp.Or(model.ModelCfg.ReasoningEffort, model.CatwalkCfg.DefaultReasoningEffort)
-					reasoningInfo = fmt.Sprintf("Reasoning %s", common.FormatReasoningEffort(reasoningEffort))
 				}
 			}
 		}
