@@ -9,6 +9,10 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/claudecode"
+	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/oauth/antigravity"
+	"github.com/charmbracelet/crush/internal/oauth/codex"
+	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	uv "github.com/charmbracelet/ultraviolet"
 )
@@ -19,22 +23,54 @@ const (
 	usageDialogMaxWidth = 60
 )
 
+// usageProviderName returns the display name of the subscription
+// provider whose usage the dialog should show, or "" when the current
+// large model's provider has no known usage endpoint. It backs both the
+// "Plan Usage" command's visibility and the dialog's title.
+func usageProviderName(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	switch cfg.Models[config.SelectedModelTypeLarge].Provider {
+	case claudecode.ProviderID:
+		return "Claude Code"
+	case codex.ProviderID:
+		return "OpenAI Codex"
+	case geminicli.ProviderID:
+		return "Gemini CLI"
+	case antigravity.ProviderID:
+		return "Google Antigravity"
+	default:
+		return ""
+	}
+}
+
+// usageLine is one rendered row of the plan usage view: a label and a
+// formatted value, e.g. {"5-hour:", "42% used (resets in 2h13m)"}.
+type usageLine struct {
+	label string
+	value string
+}
+
 // usageLoadedMsg carries the result of the asynchronous plan usage fetch.
 type usageLoadedMsg struct {
-	usage *claudecode.Utilization
+	lines []usageLine
 	err   error
 }
 
-// Usage is a read-only dialog that shows the Claude Code subscription plan
-// usage limits. It is only meaningful when the active provider is the
-// claude-code subscription provider.
+// Usage is a read-only dialog that shows the current subscription
+// provider's plan usage limits: Claude Code, OpenAI Codex, Gemini CLI, or
+// Google Antigravity. It is only meaningful when the active large model's
+// provider is one of these OAuth subscription providers (see
+// usageProviderName).
 type Usage struct {
 	com     *common.Common
 	spinner spinner.Model
 	loading bool
 
-	usage *claudecode.Utilization
-	err   error
+	providerName string
+	lines        []usageLine
+	err          error
 
 	keyMap struct {
 		Close key.Binding
@@ -48,7 +84,7 @@ var (
 
 // NewUsage creates a new plan usage dialog in its loading state.
 func NewUsage(com *common.Common) *Usage {
-	u := &Usage{com: com, loading: true}
+	u := &Usage{com: com, loading: true, providerName: usageProviderName(com.Config())}
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -59,13 +95,72 @@ func NewUsage(com *common.Common) *Usage {
 	return u
 }
 
-// fetchUsageCmd queries the subscription plan usage endpoint.
-func fetchUsageCmd() tea.Cmd {
+// fetchUsageCmd queries the active subscription provider's plan usage
+// endpoint, refreshing its stored OAuth token first if it has expired.
+func (u *Usage) fetchUsageCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		usage, err := claudecode.DefaultSource().Usage(ctx)
-		return usageLoadedMsg{usage: usage, err: err}
+
+		cfg := u.com.Config()
+		if cfg == nil {
+			return usageLoadedMsg{err: fmt.Errorf("configuration not found")}
+		}
+
+		providerID := cfg.Models[config.SelectedModelTypeLarge].Provider
+		switch providerID {
+		case claudecode.ProviderID:
+			usage, err := claudecode.DefaultSource().Usage(ctx)
+			if err != nil {
+				return usageLoadedMsg{err: err}
+			}
+			return usageLoadedMsg{lines: claudeCodeUsageLines(usage)}
+		case codex.ProviderID, geminicli.ProviderID, antigravity.ProviderID:
+			pc, ok := cfg.Providers.Get(providerID)
+			if !ok || pc.OAuthToken == nil {
+				return usageLoadedMsg{err: fmt.Errorf("not logged in to %s", providerID)}
+			}
+			if pc.OAuthToken.IsExpired() {
+				if err := u.com.Workspace.RefreshOAuthToken(ctx, config.ScopeGlobal, providerID); err == nil {
+					if refreshed, ok := u.com.Config().Providers.Get(providerID); ok {
+						pc = refreshed
+					}
+				}
+			}
+			return fetchOAuthUsage(ctx, providerID, pc)
+		default:
+			return usageLoadedMsg{err: fmt.Errorf("plan usage is not available for this provider")}
+		}
+	}
+}
+
+// fetchOAuthUsage dispatches to the provider-specific FetchUsage call for
+// the Codex/Gemini-CLI-family subscription providers, translating the
+// result into display lines.
+func fetchOAuthUsage(ctx context.Context, providerID string, pc config.ProviderConfig) usageLoadedMsg {
+	switch providerID {
+	case codex.ProviderID:
+		u, err := codex.FetchUsage(ctx, pc.OAuthToken.AccessToken)
+		if err != nil {
+			return usageLoadedMsg{err: err}
+		}
+		return usageLoadedMsg{lines: codexUsageLines(u)}
+	case geminicli.ProviderID, antigravity.ProviderID:
+		projectID := ""
+		if pc.OAuthExtra != nil {
+			projectID = pc.OAuthExtra["project_id"]
+		}
+		identity := geminicli.GeminiCLIIdentity
+		if providerID == antigravity.ProviderID {
+			identity = antigravity.Identity
+		}
+		u, err := geminicli.FetchUsage(ctx, pc.OAuthToken.AccessToken, projectID, identity)
+		if err != nil {
+			return usageLoadedMsg{err: err}
+		}
+		return usageLoadedMsg{lines: geminiCliUsageLines(u)}
+	default:
+		return usageLoadedMsg{err: fmt.Errorf("plan usage is not available for this provider")}
 	}
 }
 
@@ -78,7 +173,7 @@ func (u *Usage) ID() string {
 // animation and the usage fetch.
 func (u *Usage) StartLoading() tea.Cmd {
 	u.loading = true
-	return tea.Batch(u.spinner.Tick, fetchUsageCmd())
+	return tea.Batch(u.spinner.Tick, u.fetchUsageCmd())
 }
 
 // StopLoading implements [LoadingDialog].
@@ -95,7 +190,7 @@ func (u *Usage) HandleMsg(msg tea.Msg) Action {
 		}
 	case usageLoadedMsg:
 		u.loading = false
-		u.usage = msg.usage
+		u.lines = msg.lines
 		u.err = msg.err
 	case spinner.TickMsg:
 		if u.loading {
@@ -114,6 +209,9 @@ func (u *Usage) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 
 	rc := NewRenderContext(t, width)
 	rc.Title = "Plan Usage"
+	if u.providerName != "" {
+		rc.Title = u.providerName + " Plan Usage"
+	}
 
 	switch {
 	case u.loading:
@@ -121,9 +219,11 @@ func (u *Usage) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	case u.err != nil:
 		rc.AddPart(t.Dialog.Quit.Content.Render("Unable to fetch plan usage:"))
 		rc.AddPart(t.Dialog.Quit.Content.Render(u.err.Error()))
+	case len(u.lines) == 0:
+		rc.AddPart("No plan usage data available.")
 	default:
-		for _, line := range u.usageLines() {
-			rc.AddPart(line)
+		for _, l := range u.lines {
+			rc.AddPart(fmt.Sprintf("%-20s %s", l.label, l.value))
 		}
 	}
 
@@ -133,10 +233,11 @@ func (u *Usage) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	return nil
 }
 
-// usageLines renders one line per applicable plan window plus extra usage.
-func (u *Usage) usageLines() []string {
-	if u.usage == nil {
-		return []string{"No plan usage data available."}
+// claudeCodeUsageLines renders one line per applicable Claude Code plan
+// window plus extra usage.
+func claudeCodeUsageLines(usage *claudecode.Utilization) []usageLine {
+	if usage == nil {
+		return nil
 	}
 
 	type window struct {
@@ -144,29 +245,83 @@ func (u *Usage) usageLines() []string {
 		rl    *claudecode.RateLimit
 	}
 	windows := []window{
-		{"5-hour", u.usage.FiveHour},
-		{"7-day", u.usage.SevenDay},
-		{"7-day (Opus)", u.usage.SevenDayOpus},
-		{"7-day (Sonnet)", u.usage.SevenDaySonnet},
-		{"7-day (OAuth apps)", u.usage.SevenDayOAuthApps},
+		{"5-hour:", usage.FiveHour},
+		{"7-day:", usage.SevenDay},
+		{"7-day (Opus):", usage.SevenDayOpus},
+		{"7-day (Sonnet):", usage.SevenDaySonnet},
+		{"7-day (OAuth apps):", usage.SevenDayOAuthApps},
 	}
 
-	var lines []string
+	var lines []usageLine
 	for _, w := range windows {
 		if w.rl == nil || w.rl.Utilization == nil {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("%-20s %s", w.label+":", formatRateLimit(w.rl)))
+		lines = append(lines, usageLine{w.label, formatRateLimit(w.rl)})
 	}
 
-	if eu := u.usage.ExtraUsage; eu != nil && eu.IsEnabled {
-		lines = append(lines, fmt.Sprintf("%-20s %s", "Extra usage:", formatExtraUsage(eu)))
-	}
-
-	if len(lines) == 0 {
-		return []string{"No plan usage data available."}
+	if eu := usage.ExtraUsage; eu != nil && eu.IsEnabled {
+		lines = append(lines, usageLine{"Extra usage:", formatExtraUsage(eu)})
 	}
 	return lines
+}
+
+// codexUsageLines renders the OpenAI Codex plan type and its rate-limit
+// windows.
+func codexUsageLines(u *codex.Usage) []usageLine {
+	if u == nil {
+		return nil
+	}
+	var lines []usageLine
+	if u.PlanType != "" {
+		lines = append(lines, usageLine{"Plan:", u.PlanType})
+	}
+	addWindow := func(label string, w *codex.UsageWindow) {
+		if w == nil {
+			return
+		}
+		value := fmt.Sprintf("%.0f%% used", w.UsedPercent)
+		if w.UsedPercent < 0 {
+			value = "usage unknown"
+		}
+		if !w.ResetsAt.IsZero() {
+			value += ", resets " + formatResetTime(w.ResetsAt)
+		}
+		lines = append(lines, usageLine{codexWindowLabel(w, label) + ":", value})
+	}
+	addWindow("Primary", u.Primary)
+	addWindow("Secondary", u.Secondary)
+	return lines
+}
+
+// geminiCliUsageLines renders the Gemini CLI / Antigravity plan tier and
+// remaining quota fraction.
+func geminiCliUsageLines(u *geminicli.Usage) []usageLine {
+	if u == nil {
+		return nil
+	}
+	var lines []usageLine
+	if u.Tier != "" {
+		lines = append(lines, usageLine{"Tier:", u.Tier})
+	}
+	if u.RemainingFraction >= 0 {
+		lines = append(lines, usageLine{"Remaining:", fmt.Sprintf("%.0f%%", u.RemainingFraction*100)})
+	}
+	return lines
+}
+
+// codexWindowLabel names a window by its duration when known.
+func codexWindowLabel(w *codex.UsageWindow, fallback string) string {
+	if w == nil || w.WindowSeconds <= 0 {
+		return fallback
+	}
+	d := time.Duration(w.WindowSeconds) * time.Second
+	switch {
+	case d >= 24*time.Hour:
+		return fmt.Sprintf("%dd window", int(d.Hours()/24))
+	default:
+		return fmt.Sprintf("%dh window", int(d.Hours()))
+	}
 }
 
 // formatRateLimit renders a single window as "42% used (resets in 2h13m)".
@@ -200,7 +355,18 @@ func formatReset(resetsAt *string) string {
 	if err != nil {
 		return *resetsAt
 	}
-	d := time.Until(ts)
+	return "in " + humanizeUntilDuration(time.Until(ts))
+}
+
+// formatResetTime renders an absolute reset time as a relative "in
+// 2h13m" string.
+func formatResetTime(t time.Time) string {
+	return "in " + humanizeUntilDuration(time.Until(t))
+}
+
+// humanizeUntilDuration renders a duration as a compact "2h13m"-style
+// string, or "now" when it has already elapsed.
+func humanizeUntilDuration(d time.Duration) string {
 	if d <= 0 {
 		return "now"
 	}
@@ -209,11 +375,11 @@ func formatReset(resetsAt *string) string {
 	m := int(d.Minutes()) % 60
 	switch {
 	case h >= 24:
-		return fmt.Sprintf("in %dd%dh", h/24, h%24)
+		return fmt.Sprintf("%dd%dh", h/24, h%24)
 	case h > 0:
-		return fmt.Sprintf("in %dh%dm", h, m)
+		return fmt.Sprintf("%dh%dm", h, m)
 	default:
-		return fmt.Sprintf("in %dm", m)
+		return fmt.Sprintf("%dm", m)
 	}
 }
 

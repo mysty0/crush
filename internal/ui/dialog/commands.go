@@ -9,7 +9,6 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/crush/internal/claudecode"
 	"github.com/charmbracelet/crush/internal/commands"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/ui/common"
@@ -445,10 +444,10 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		commands = append(commands, NewCommandItem(c.com.Styles, "regenerate_title", "Regenerate Title", "", ActionRegenerateTitle{}))
 	}
 
-	// Only show plan usage for the Claude Code subscription provider, whose
-	// OAuth token can query Anthropic's plan usage endpoint. API-key
-	// providers have no equivalent endpoint.
-	if cfg := c.com.Config(); cfg != nil && cfg.Models[config.SelectedModelTypeLarge].Provider == claudecode.ProviderID {
+	// Only show plan usage for subscription providers with a known usage
+	// endpoint (Claude Code, OpenAI Codex, Gemini CLI, Antigravity).
+	// API-key providers have no equivalent endpoint.
+	if usageProviderName(c.com.Config()) != "" {
 		commands = append(commands, NewCommandItem(c.com.Styles, "usage", "Plan Usage", "", ActionOpenDialog{DialogID: UsageID}))
 	}
 
