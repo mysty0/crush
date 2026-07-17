@@ -160,10 +160,14 @@ func (m *UI) autoExpandPillsIfReasonable() tea.Cmd {
 	}
 	m.pillsExpanded = true
 	m.pillsAutoExpanded = true
-	if hasIncompleteTodos(m.session.Todos) {
-		m.focusedPillSection = pillSectionTodos
-	} else {
+	// Prefer showing the message queue expanded when prompts are
+	// queued; fall back to the todo list otherwise. The panel only
+	// expands one section at a time, so a pending queue takes
+	// precedence since the user asked to see what's waiting to run.
+	if m.promptQueue > 0 {
 		m.focusedPillSection = pillSectionQueue
+	} else {
+		m.focusedPillSection = pillSectionTodos
 	}
 	m.updateLayoutAndSize()
 	if m.chat.Follow() {

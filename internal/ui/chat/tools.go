@@ -164,6 +164,14 @@ type baseToolMessageItem struct {
 	// partialOutput holds incremental output streamed while the tool is
 	// still running, shown until the final result arrives.
 	partialOutput string
+	// startedAt is when this tool call was first rendered, set lazily on
+	// the first spinning render. It drives the elapsed-time stopwatch
+	// appended to the spinner label once a run passes
+	// spinnerStopwatchAfter (see assistant.go), so a long-running tool
+	// gets the same live "· 12s" hint as the assistant loader. The tool
+	// name itself (rendered outside the anim) already serves as the
+	// "what is loading" hint.
+	startedAt time.Time
 }
 
 var (
@@ -182,6 +190,13 @@ func newBaseToolMessageItem(
 	// we only do full width for diffs (as far as I know)
 	hasCappedWidth := toolCall.Name != tools.EditToolName && toolCall.Name != tools.MultiEditToolName
 
+	// Code edits render their diff/content expanded by default so the
+	// change is visible without an extra keypress. The user can still
+	// collapse an individual edit with the expand toggle.
+	expandedByDefault := toolCall.Name == tools.EditToolName ||
+		toolCall.Name == tools.MultiEditToolName ||
+		toolCall.Name == tools.WriteToolName
+
 	status := ToolStatusRunning
 	if canceled {
 		status = ToolStatusCanceled
@@ -199,10 +214,12 @@ func newBaseToolMessageItem(
 		result:                   result,
 		status:                   status,
 		hasCappedWidth:           hasCappedWidth,
+		expandedContent:          expandedByDefault,
 	}
 	t.anim = anim.New(anim.Settings{
 		ID:          toolCall.ID,
 		Size:        15,
+		Label:       "Running",
 		GradColorA:  sty.WorkingGradFromColor,
 		GradColorB:  sty.WorkingGradToColor,
 		LabelColor:  sty.WorkingLabelColor,
@@ -340,6 +357,14 @@ func (t *baseToolMessageItem) RawRender(width int) string {
 	content, height, ok := t.getCachedRender(toolItemWidth)
 	// if we are spinning or there is no cache rerender
 	if !ok || t.isSpinning() {
+		if t.isSpinning() {
+			if t.startedAt.IsZero() {
+				t.startedAt = time.Now()
+			}
+			if elapsed := time.Since(t.startedAt); elapsed >= spinnerStopwatchAfter {
+				t.anim.SetLabel("Running · " + formatElapsed(elapsed))
+			}
+		}
 		content = t.toolRenderer.RenderTool(t.sty, toolItemWidth, &ToolRenderOpts{
 			ToolCall:        t.toolCall,
 			Result:          t.result,
