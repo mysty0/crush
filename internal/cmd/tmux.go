@@ -24,7 +24,12 @@ var tmuxResolveCmd = &cobra.Command{
 			return fmt.Errorf("not running inside tmux")
 		}
 
-		cwd, err := ResolveCwd(cmd)
+		// Read the pane's directory from tmux itself rather than
+		// os.Getwd(): during a tmux-resurrect restore this command runs
+		// in a freshly spawned shell whose cwd may not have settled yet,
+		// and #{pane_current_path} is the authoritative directory tmux
+		// (re)created the pane with.
+		cwd, err := tmux.PaneCurrentPath(cmd.Context())
 		if err != nil {
 			return err
 		}

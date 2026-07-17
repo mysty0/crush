@@ -8,6 +8,7 @@ package tmux
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,21 @@ import (
 
 	"github.com/charmbracelet/crush/internal/config"
 )
+
+// paneKeyMaxRetries and paneKeyRetryDelay bound the retry loop in PaneKey.
+// Four retries at 150ms cover roughly the first second after the tmux
+// server (re)starts -- enough to ride out a restore-time burst -- without
+// making a single resolve attempt noticeably slow to the user in the
+// common (non-restore) case, where the first attempt always succeeds.
+var (
+	paneKeyMaxRetries = 4
+	paneKeyRetryDelay = 150 * time.Millisecond
+)
+
+// errEmptyPaneKey is used internally when "tmux display-message" exits
+// successfully but prints nothing, which is treated the same as a hard
+// error for retry purposes.
+var errEmptyPaneKey = errors.New("tmux: empty pane key")
 
 // SessionIDOption is the tmux pane user option that holds the ID of the
 // Crush session currently active in that pane.
@@ -83,21 +99,63 @@ func setPaneOption(ctx context.Context, key, value string) error {
 	return cmd.Run()
 }
 
-// PaneKey returns a stable identifier for the current tmux pane, of
+// PaneKey returns a stable identifier for the current tmux pane, in
 // the form "session_name:window_index.pane_index". It is used as the
 // key into the on-disk pane-to-session mapping.
 func PaneKey(ctx context.Context) (string, error) {
+	return displayMessage(ctx, "#{session_name}:#{window_index}.#{pane_index}")
+}
+
+// PaneCurrentPath returns the working directory tmux tracks for the
+// current pane (its "#{pane_current_path}"). This is the authoritative
+// source for a pane's directory during a tmux-resurrect restore -- the
+// pane is (re)created with that directory via "new-window -c" -- whereas
+// os.Getwd() of a process launched into the pane can momentarily report
+// the wrong directory (e.g. $HOME) before the shell has settled, which
+// would defeat the cwd guard in ResolveSession.
+func PaneCurrentPath(ctx context.Context) (string, error) {
+	return displayMessage(ctx, "#{pane_current_path}")
+}
+
+// displayMessage runs "tmux display-message -p <format>" against the
+// current pane and returns the trimmed output.
+//
+// The call is retried a few times with a short delay: it sits on the
+// critical path of a tmux-resurrect restore hook (see cmd/tmux-resolve),
+// where dozens of panes can each shell out to tmux in a tight burst moments
+// after the server itself finished (re)starting. A single transient hiccup
+// on the control socket under that burst would otherwise permanently fail
+// the resolve for that pane -- the caller has no later opportunity to retry
+// -- so it lands the user on a blank session instead of the one that was
+// actually running there.
+func displayMessage(ctx context.Context, format string) (string, error) {
 	args := []string{"display-message", "-p"}
 	if t := paneTarget(); t != "" {
 		args = append(args, "-t", t)
 	}
-	args = append(args, "#{session_name}:#{window_index}.#{pane_index}")
-	cmd := exec.CommandContext(ctx, "tmux", args...)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
+	args = append(args, format)
+
+	var lastErr error
+	for attempt := 0; attempt <= paneKeyMaxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(paneKeyRetryDelay):
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+		// A fresh exec.Cmd is required each attempt: exec.Cmd cannot be
+		// re-run once Output has been called.
+		out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+		if v := strings.TrimSpace(string(out)); err == nil && v != "" {
+			return v, nil
+		}
+		lastErr = err
+		if lastErr == nil {
+			lastErr = errEmptyPaneKey
+		}
 	}
-	return strings.TrimSpace(string(out)), nil
+	return "", lastErr
 }
 
 // RecordSession durably associates the current tmux pane with the
@@ -134,10 +192,36 @@ func ResolveSession(ctx context.Context, cwd string) (entry PaneEntry, ok bool, 
 		return PaneEntry{}, false, err
 	}
 	e, found := m[key]
-	if !found || e.Cwd != cwd {
+	if !found || !sameDir(e.Cwd, cwd) {
 		return PaneEntry{}, false, nil
 	}
 	return e, true, nil
+}
+
+// sameDir reports whether two directory paths refer to the same
+// location. It compares them cleaned, then falls back to comparing
+// their symlink-resolved forms. The fallback matters because the cwd
+// recorded by a running Crush (RecordSession) may be unresolved, while
+// the value read back from tmux's "#{pane_current_path}" is typically
+// symlink-resolved; without it, a project reached through a symlink
+// would spuriously fail the cwd guard and land on a blank session.
+func sameDir(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ca, cb := filepath.Clean(a), filepath.Clean(b)
+	if ca == cb {
+		return true
+	}
+	ra, err := filepath.EvalSymlinks(ca)
+	if err != nil {
+		return false
+	}
+	rb, err := filepath.EvalSymlinks(cb)
+	if err != nil {
+		return false
+	}
+	return ra == rb
 }
 
 func mappingPath() string {
