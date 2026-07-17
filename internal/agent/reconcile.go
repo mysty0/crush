@@ -71,12 +71,15 @@ func (c *coordinator) sessionHasLiveRun(sessionID string) bool {
 }
 
 // reconcileSessionMessages scans one session's own message history
-// (not its descendants) for tool calls with no matching tool result
-// and writes a synthetic, error-flagged result for each, mirroring
-// the cleanup a live run's own error path performs (see
-// sessionAgent.Run's post-stream error handling). Any assistant
-// message left without a terminal Finish part is marked
-// FinishReasonCanceled. Returns the number of tool calls reconciled.
+// (not its descendants) and heals whatever an interrupted run left
+// behind. It writes a synthetic, error-flagged result for every tool
+// call with no matching result (mirroring the cleanup a live run's own
+// error path performs, see sessionAgent.Run's post-stream error
+// handling), and marks every assistant message with no terminal Finish
+// part as FinishReasonCanceled. The latter also covers a turn
+// interrupted during the reasoning phase, before any tool call, which
+// the UI would otherwise animate as a perpetual "thinking" indicator on
+// the next load. Returns the number of orphaned tool calls reconciled.
 func (c *coordinator) reconcileSessionMessages(ctx context.Context, sessionID string) (int, error) {
 	msgs, err := c.messages.List(ctx, sessionID)
 	if err != nil {
@@ -98,33 +101,40 @@ func (c *coordinator) reconcileSessionMessages(ctx context.Context, sessionID st
 		if m.Role != message.Assistant {
 			continue
 		}
-		toolCalls := m.ToolCalls()
-		if len(toolCalls) == 0 {
-			continue
-		}
 
-		var orphaned bool
-		for _, tc := range toolCalls {
+		// Write a synthetic result for any tool call this turn left
+		// unanswered (interrupted after the model asked for a tool but
+		// before the result was recorded).
+		for _, tc := range m.ToolCalls() {
 			if _, ok := knownToolResultIDs[tc.ID]; ok {
 				continue
 			}
-			orphaned = true
-			_, err := c.messages.Create(ctx, sessionID, message.CreateMessageParams{
-				Role: message.Tool,
-				Parts: []message.ContentPart{message.ToolResult{
-					ToolCallID: tc.ID,
-					Name:       tc.Name,
-					Content:    reconcileInterruptedContent,
-					IsError:    true,
-				}},
+			_, created, err := c.messages.CreateToolResultIfAbsent(ctx, sessionID, message.ToolResult{
+				ToolCallID: tc.ID,
+				Name:       tc.Name,
+				Content:    reconcileInterruptedContent,
+				IsError:    true,
 			})
 			if err != nil {
 				return fixed, err
 			}
-			fixed++
+			// A concurrent reconcile pass (this process or another
+			// sharing the same database) may have already written a
+			// result between our read of msgs above and now; only count
+			// results we actually created.
+			if created {
+				fixed++
+			}
 		}
 
-		if orphaned && !m.IsFinished() {
+		// Finalize any assistant message the interrupted run left
+		// without a terminal Finish part. This covers both an
+		// interrupted tool call (handled above) and a turn cut off
+		// mid-reasoning with no tool call at all -- the latter would
+		// otherwise render as an eternally animating "thinking"
+		// indicator on the next load. Safe because the caller only
+		// reaches here for a session with no live run.
+		if !m.IsFinished() {
 			m.AddFinish(message.FinishReasonCanceled, "Interrupted", "Crush was closed or restarted while this turn was in progress.")
 			if err := c.messages.Update(ctx, m); err != nil {
 				return fixed, err

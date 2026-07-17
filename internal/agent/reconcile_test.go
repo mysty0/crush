@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/csync"
@@ -72,6 +74,47 @@ func TestReconcileStuckSession_FixesOrphanedToolCall(t *testing.T) {
 	require.True(t, results[0].IsError)
 }
 
+// createInterruptedThinking writes an assistant message left with only
+// reasoning content and no terminal Finish part -- a turn interrupted
+// during the thinking phase, before it produced any tool call. On load
+// the UI animates such a message as perpetually "thinking".
+func createInterruptedThinking(t *testing.T, env fakeEnv, sessionID string) message.Message {
+	t.Helper()
+	msg, err := env.messages.Create(t.Context(), sessionID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ReasoningContent{Thinking: "let me think about this"},
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, msg.IsThinking(), "fixture should look like a stuck thinking message")
+	return msg
+}
+
+// TestReconcileStuckSession_FinalizesInterruptedThinking covers a turn
+// cut off mid-reasoning with no tool call: it has nothing to orphan, so
+// the fix count is 0, but it must still be finalized so the UI stops
+// animating it as perpetually thinking.
+func TestReconcileStuckSession_FinalizesInterruptedThinking(t *testing.T) {
+	env := testEnv(t)
+	c := newReconcileTestCoordinator(t, env, &mockSessionAgent{})
+
+	sess, err := env.sessions.Create(t.Context(), "parent")
+	require.NoError(t, err)
+	createInterruptedThinking(t, env, sess.ID)
+
+	fixed, err := c.ReconcileStuckSession(t.Context(), sess.ID)
+	require.NoError(t, err)
+	require.Equal(t, 0, fixed, "no tool calls to reconcile")
+
+	msgs, err := env.messages.List(t.Context(), sess.ID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	require.True(t, msgs[0].IsFinished(), "interrupted thinking must be finalized")
+	require.False(t, msgs[0].IsThinking(), "must no longer render as thinking")
+	require.Equal(t, message.FinishReasonCanceled, msgs[0].FinishReason())
+}
+
 func TestReconcileStuckSession_SkipsBusySession(t *testing.T) {
 	env := testEnv(t)
 	sess, err := env.sessions.Create(t.Context(), "parent")
@@ -132,6 +175,46 @@ func TestReconcileStuckSession_SkipsLiveWorkflowSubtree(t *testing.T) {
 	fixed, err := c.ReconcileStuckSession(t.Context(), workflowSess.ID)
 	require.NoError(t, err)
 	require.Equal(t, 0, fixed, "a live workflow's subtree must be left untouched")
+}
+
+// TestReconcileStuckSession_ConcurrentPassesDoNotDuplicate simulates two
+// "stuck session" reconcile passes racing over the same orphaned tool
+// call -- e.g. two separate crush processes sharing one database, both
+// opening the same recently-used session at once. Only one of them may
+// write the synthetic tool_result; a duplicate would make every
+// subsequent turn fail against the provider (Anthropic rejects
+// multiple tool_result blocks sharing a tool_call_id).
+func TestReconcileStuckSession_ConcurrentPassesDoNotDuplicate(t *testing.T) {
+	env := testEnv(t)
+	c := newReconcileTestCoordinator(t, env, &mockSessionAgent{})
+
+	sess, err := env.sessions.Create(t.Context(), "parent")
+	require.NoError(t, err)
+	createOrphanedToolCall(t, env, sess.ID, "call_1")
+
+	const n = 8
+	var wg sync.WaitGroup
+	var totalFixed atomic.Int32
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			fixed, err := c.ReconcileStuckSession(t.Context(), sess.ID)
+			require.NoError(t, err)
+			totalFixed.Add(int32(fixed))
+		}(i)
+	}
+	wg.Wait()
+
+	require.Equal(t, int32(1), totalFixed.Load(), "exactly one racer must fix the orphaned call")
+
+	msgs, err := env.messages.List(t.Context(), sess.ID)
+	require.NoError(t, err)
+	var toolResultCount int
+	for _, m := range msgs {
+		toolResultCount += len(m.ToolResults())
+	}
+	require.Equal(t, 1, toolResultCount, "no duplicate tool_result blocks for the same tool_call_id")
 }
 
 func TestCoordinatorCancelAll(t *testing.T) {
