@@ -313,6 +313,25 @@ type UI struct {
 	// the current sub-agent view was not entered from a workflow.
 	workflowViewReturnSessionID string
 
+	// Fullscreen bash output view. bashViewJobID is non-empty while
+	// the user is viewing a background bash job's live stdout/stderr
+	// (see enterBashOutputView / exitBashOutputView in bash_view.go).
+	// bashViewStdout/bashViewStderr/bashViewDone/bashViewOK cache the
+	// last AgentBackgroundJobOutput snapshot, refreshed on a scoped
+	// tea.Tick (bashViewSeq guards against stale ticks the same way
+	// animClockSeq guards the animation clock). bashViewScroll is the
+	// first visible output line; bashViewFollow mirrors Chat.Follow(),
+	// true while auto-scrolled to the bottom and disengaged once the
+	// user scrolls up.
+	bashViewJobID  string
+	bashViewStdout string
+	bashViewStderr string
+	bashViewDone   bool
+	bashViewOK     bool
+	bashViewScroll int
+	bashViewFollow bool
+	bashViewSeq    uint64
+
 	// agentListFocused is true when the always-visible agent picker
 	// list below the chat has keyboard focus (entered by pressing
 	// Down at the bottom of a chat; see enterAgentList/subagent.go).
@@ -754,6 +773,16 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case subAgentMessagesLoadedMsg:
 		if cmd := m.handleSubAgentMessagesLoaded(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+
+	case bashViewTickMsg:
+		if cmd := m.handleBashViewTick(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+
+	case bashViewOutputMsg:
+		if cmd := m.handleBashViewOutput(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 
@@ -2569,6 +2598,12 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 		return m.handleWorkflowViewKeyMsg(msg)
 	}
 
+	// The fullscreen bash output view captures all navigation while
+	// active.
+	if m.bashViewJobID != "" {
+		return m.handleBashOutputViewKeyMsg(msg)
+	}
+
 	// Keyboard visual-selection mode ("v"/"V") takes full priority over
 	// normal chat navigation while active: movement, word-motion, and
 	// yank keys drive the in-message selection cursor instead of
@@ -3057,6 +3092,8 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 
 		if m.workflowViewSessionID != "" {
 			m.drawWorkflowView(scr, layout.main)
+		} else if m.bashViewJobID != "" {
+			m.drawBashOutputView(scr, layout.main)
 		} else if m.subAgentSessionID != "" {
 			rest := m.drawSubAgentBanner(scr, layout.main)
 			m.subAgentChat.Draw(scr, rest)

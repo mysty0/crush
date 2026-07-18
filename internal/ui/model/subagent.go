@@ -649,19 +649,7 @@ func (m *UI) confirmAgentListSelection() tea.Cmd {
 		return m.openScheduleCancelDialog(entry.TaskID)
 	}
 	if entry.Kind == agentListKindBash {
-		// Bash jobs have no session; open the tail-output view (2b).
-		// Until that lands, surface a concise status so the row is not
-		// a dead end.
-		stdout, stderr, done, ok := m.com.Workspace.AgentBackgroundJobOutput(entry.TaskID)
-		if !ok {
-			return util.ReportInfo(fmt.Sprintf("Background job %s is no longer available.", entry.TaskID))
-		}
-		state := "running"
-		if done {
-			state = "finished"
-		}
-		n := len(stdout) + len(stderr)
-		return util.ReportInfo(fmt.Sprintf("Background job %s: %s (%d bytes of output).", entry.TaskID, state, n))
+		return m.enterBashOutputView(entry.TaskID)
 	}
 	if entry.SessionID == "" {
 		// "Main" selected.
