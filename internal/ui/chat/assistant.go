@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -163,6 +164,22 @@ type AssistantMessageItem struct {
 	fenceMapBuilt bool
 	fenceMapWidth int
 	fenceMapHash  uint64
+
+	// Retry indicator state. While the in-flight provider request is being
+	// retried after a transient failure, these drive a "Retrying N/M" spinner
+	// label with a live countdown to the next attempt. retryAttempt == 0 means
+	// no retry is in progress. Cleared when the request resumes or the turn
+	// ends.
+	retryAttempt int
+	retryMax     int
+	retryReason  string
+	retryAt      time.Time
+
+	// spinStartedAt is when the loader first appeared for this message, set
+	// lazily on the first spinning render. It drives the elapsed-time
+	// stopwatch shown once a wait passes spinnerStopwatchAfter. A message
+	// spins only until it produces output, so this is set once.
+	spinStartedAt time.Time
 }
 
 var _ Expandable = (*AssistantMessageItem)(nil)
@@ -544,12 +561,87 @@ func (a *AssistantMessageItem) renderMarkdown(content string, width int) string 
 }
 
 func (a *AssistantMessageItem) renderSpinning() string {
-	if a.message.IsThinking() {
-		a.anim.SetLabel("Thinking")
-	} else if a.message.IsSummaryMessage {
-		a.anim.SetLabel("Summarizing")
+	// Record when the loader first appeared so a long wait can show a live
+	// elapsed stopwatch. Set once: the message spins only until it produces
+	// output, then never spins again.
+	if a.spinStartedAt.IsZero() {
+		a.spinStartedAt = time.Now()
+	}
+
+	switch {
+	case a.retryAttempt > 0:
+		// Retry already renders its own countdown; leave it as the label.
+		a.anim.SetLabel(a.retryLabel())
+	case a.message.IsThinking():
+		a.anim.SetLabel(a.withElapsed("Thinking"))
+	case a.message.IsSummaryMessage:
+		a.anim.SetLabel(a.withElapsed("Summarizing"))
+	default:
+		// Otherwise the request is in flight waiting on the model. Without a
+		// hint this is just an anonymous spinner, so label it explicitly.
+		a.anim.SetLabel(a.withElapsed("Working"))
 	}
 	return a.anim.Render()
+}
+
+// spinnerStopwatchAfter is how long a loader must be visible before its hint
+// grows a live elapsed stopwatch, so a stall makes clear Crush is still
+// working and for how long.
+const spinnerStopwatchAfter = 10 * time.Second
+
+// withElapsed appends a live elapsed stopwatch to a spinner hint once the
+// loader has been visible for at least spinnerStopwatchAfter (e.g.
+// "Working · 12s"). Before then it returns the bare hint.
+func (a *AssistantMessageItem) withElapsed(hint string) string {
+	if elapsed := time.Since(a.spinStartedAt); elapsed >= spinnerStopwatchAfter {
+		return hint + " · " + formatElapsed(elapsed)
+	}
+	return hint
+}
+
+// formatElapsed renders a whole-second elapsed duration compactly: "12s" under
+// a minute, "1m05s" at or above one minute.
+func formatElapsed(d time.Duration) string {
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
+	return fmt.Sprintf("%dm%02ds", int(d/time.Minute), int((d%time.Minute)/time.Second))
+}
+
+// retryLabel builds the spinner label shown while a provider request is being
+// retried, e.g. "Retrying 3/5 · Rate limited · 12s". The countdown is derived
+// from retryAt at render time so it ticks down as the spinner advances.
+func (a *AssistantMessageItem) retryLabel() string {
+	label := fmt.Sprintf("Retrying %d/%d", a.retryAttempt, a.retryMax)
+	if a.retryReason != "" {
+		label += " · " + a.retryReason
+	}
+	if remaining := time.Until(a.retryAt); remaining > 0 {
+		label += fmt.Sprintf(" · %ds", int(remaining.Round(time.Second)/time.Second))
+	}
+	return label
+}
+
+// SetRetryStatus records that the in-flight provider request is being retried,
+// so the spinner shows "Retrying N/M" with a live countdown. It implements
+// [RetryStatusSetter].
+func (a *AssistantMessageItem) SetRetryStatus(attempt, max int, reason string, retryAt time.Time) {
+	a.retryAttempt = attempt
+	a.retryMax = max
+	a.retryReason = reason
+	a.retryAt = retryAt
+	a.Bump()
+}
+
+// ClearRetryStatus removes the retry indicator once the request resumes or the
+// turn ends. It implements [RetryStatusSetter].
+func (a *AssistantMessageItem) ClearRetryStatus() {
+	if a.retryAttempt == 0 {
+		return
+	}
+	a.retryAttempt = 0
+	a.Bump()
 }
 
 // renderError renders an error message.

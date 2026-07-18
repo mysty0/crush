@@ -13,6 +13,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/message"
@@ -100,6 +101,8 @@ func (s *runCoordinator) CancelSchedule(string)                         {}
 func (s *runCoordinator) ReconcileStuckSession(context.Context, string) (int, error) {
 	return 0, nil
 }
+
+func (s *runCoordinator) BackgroundNow(string) map[agenttools.BackgroundKind]int { return nil }
 
 func (s *runCoordinator) capturedCtx() context.Context {
 	s.mu.Lock()

@@ -8,6 +8,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/memory"
+	"github.com/charmbracelet/crush/internal/permission"
 )
 
 const (
@@ -41,8 +42,15 @@ type RememberParams struct {
 	Scope      string  `json:"scope,omitempty" description:"'project' (default) for repo-specific facts, or 'global' for user preferences that apply everywhere."`
 }
 
-// NewRememberTool stores a durable fact in long-term memory.
-func NewRememberTool(store *memory.Store, workingDir string, maxPerScope int) fantasy.AgentTool {
+// NewRememberTool stores a durable fact in long-term memory. Storing a
+// memory persists it across every future session, so it goes through the
+// same permission gate as any other mutating tool (and is blocked
+// outright while Plan Mode is active, see permission.PlanModeBlocksTool)
+// rather than writing silently -- without this, content the model reads
+// from an untrusted source (a fetched page, a file, an MCP resource)
+// could plant an instruction that gets auto-injected into every future
+// turn with no user confirmation.
+func NewRememberTool(store *memory.Store, permissions permission.Service, workingDir string, maxPerScope int) fantasy.AgentTool {
 	projectScope := memory.ProjectScope(workingDir)
 	return fantasy.NewAgentTool(
 		RememberToolName,
@@ -51,6 +59,30 @@ func NewRememberTool(store *memory.Store, workingDir string, maxPerScope int) fa
 			if strings.TrimSpace(params.Content) == "" {
 				return fantasy.NewTextErrorResponse("content is required"), nil
 			}
+
+			sessionID := GetSessionFromContext(ctx)
+			if sessionID == "" {
+				return fantasy.ToolResponse{}, fmt.Errorf("session_id is required")
+			}
+			p, err := permissions.Request(
+				ctx,
+				permission.CreatePermissionRequest{
+					SessionID:   sessionID,
+					Path:        workingDir,
+					ToolCallID:  call.ID,
+					ToolName:    RememberToolName,
+					Action:      "remember",
+					Description: fmt.Sprintf("Remember: %s", strings.TrimSpace(params.Content)),
+					Params:      params,
+				},
+			)
+			if err != nil {
+				return fantasy.ToolResponse{}, err
+			}
+			if !p {
+				return NewPermissionDeniedResponse(), nil
+			}
+
 			_, created, err := store.Remember(ctx, memory.RememberParams{
 				Scope:       memoryScope(params.Scope, projectScope),
 				Content:     strings.TrimSpace(params.Content),
@@ -108,8 +140,10 @@ type ForgetParams struct {
 	Scope  string `json:"scope,omitempty" description:"'project' (default) or 'global'."`
 }
 
-// NewForgetTool removes a memory the agent (or user) found to be wrong or stale.
-func NewForgetTool(store *memory.Store, workingDir string) fantasy.AgentTool {
+// NewForgetTool removes a memory the agent (or user) found to be wrong or
+// stale. Gated the same way as NewRememberTool -- deleting a memory is
+// also a persistent mutation worth confirming.
+func NewForgetTool(store *memory.Store, permissions permission.Service, workingDir string) fantasy.AgentTool {
 	projectScope := memory.ProjectScope(workingDir)
 	return fantasy.NewAgentTool(
 		ForgetToolName,
@@ -118,6 +152,30 @@ func NewForgetTool(store *memory.Store, workingDir string) fantasy.AgentTool {
 			if strings.TrimSpace(params.Target) == "" {
 				return fantasy.NewTextErrorResponse("target is required"), nil
 			}
+
+			sessionID := GetSessionFromContext(ctx)
+			if sessionID == "" {
+				return fantasy.ToolResponse{}, fmt.Errorf("session_id is required")
+			}
+			p, err := permissions.Request(
+				ctx,
+				permission.CreatePermissionRequest{
+					SessionID:   sessionID,
+					Path:        workingDir,
+					ToolCallID:  call.ID,
+					ToolName:    ForgetToolName,
+					Action:      "forget",
+					Description: fmt.Sprintf("Forget: %s", strings.TrimSpace(params.Target)),
+					Params:      params,
+				},
+			)
+			if err != nil {
+				return fantasy.ToolResponse{}, err
+			}
+			if !p {
+				return NewPermissionDeniedResponse(), nil
+			}
+
 			n, err := store.Forget(ctx, memoryScope(params.Scope, projectScope), strings.TrimSpace(params.Target))
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("could not forget: %v", err)), nil

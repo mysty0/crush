@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -42,6 +43,11 @@ type ShellItem struct {
 	sty             *styles.Styles
 	pending         bool
 	anim            *anim.Anim
+	// startedAt is when the pending command was first rendered, set lazily
+	// on the first spinning render. Drives the elapsed-time stopwatch
+	// appended to the "Running" label once the command passes
+	// spinnerStopwatchAfter (see assistant.go).
+	startedAt time.Time
 }
 
 var (
@@ -201,6 +207,15 @@ func (s *ShellItem) RawRender(width int) string {
 
 	highlighted := s.sty.Messages.ShellCommand.Render(cmd)
 	header := prompt + " " + highlighted
+
+	if s.pending {
+		if s.startedAt.IsZero() {
+			s.startedAt = time.Now()
+		}
+		if elapsed := time.Since(s.startedAt); elapsed >= spinnerStopwatchAfter {
+			s.anim.SetLabel("Running · " + formatElapsed(elapsed))
+		}
+	}
 
 	if s.pending {
 		if s.output == "" {

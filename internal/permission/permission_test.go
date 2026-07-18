@@ -123,7 +123,7 @@ func TestPermissionService_PlanMode(t *testing.T) {
 		service := NewPermissionService("/tmp", true, []string{"Bash"})
 		service.SetPlanMode(true)
 
-		for _, tool := range []string{"Bash", "Edit", "MultiEdit", "Write", "download"} {
+		for _, tool := range []string{"Bash", "Edit", "MultiEdit", "Write", "download", "Remember", "Forget"} {
 			granted, err := service.Request(t.Context(), CreatePermissionRequest{
 				SessionID: "s",
 				ToolName:  tool,
@@ -174,8 +174,11 @@ func TestPlanModeBlocksTool(t *testing.T) {
 	t.Parallel()
 	assert.True(t, PlanModeBlocksTool("Bash"))
 	assert.True(t, PlanModeBlocksTool("Write"))
+	assert.True(t, PlanModeBlocksTool("Remember"))
+	assert.True(t, PlanModeBlocksTool("Forget"))
 	assert.False(t, PlanModeBlocksTool("ls"))
 	assert.False(t, PlanModeBlocksTool("View"))
+	assert.False(t, PlanModeBlocksTool("Recall"), "Recall is read-only and must stay usable in plan mode")
 }
 
 func TestPermissionService_HookApproval(t *testing.T) {

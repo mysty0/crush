@@ -132,6 +132,9 @@ type shellStreamMsg struct {
 type (
 	// cancelTimerExpiredMsg is sent when the cancel timer expires.
 	cancelTimerExpiredMsg struct{}
+	// backgroundTimerExpiredMsg is sent when the Ctrl+B arm window expires
+	// without a confirming second press.
+	backgroundTimerExpiredMsg struct{}
 	// userCommandsLoadedMsg is sent when user commands are loaded.
 	userCommandsLoadedMsg struct {
 		Commands []commands.CustomCommand
@@ -181,6 +184,11 @@ type UI struct {
 	session      *session.Session
 	sessionFiles []SessionFile
 
+	// restartRequested is set when the user asks to restart into a
+	// freshly built binary (see ActionRestart). Checked by the caller
+	// after the Bubble Tea program returns from Run.
+	restartRequested bool
+
 	// keeps track of read files while we don't have a session id
 	sessionFileReads []string
 
@@ -214,6 +222,11 @@ type UI struct {
 
 	// isCanceling tracks whether the user has pressed escape once to cancel.
 	isCanceling bool
+
+	// backgroundArmed tracks whether the user has pressed Ctrl+B once to
+	// arm the "send whatever's blocking to the background" gesture. See
+	// backgroundNow (background.go).
+	backgroundArmed bool
 
 	// cancelRestore holds the prompt to return to the editor after a
 	// no-output cancel finalizes. Set when Escape cancels a turn that has
@@ -939,6 +952,8 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handlePermissionNotification(msg.Payload)
 	case cancelTimerExpiredMsg:
 		m.isCanceling = false
+	case backgroundTimerExpiredMsg:
+		m.backgroundArmed = false
 	case tea.TerminalVersionMsg:
 		termVersion := strings.ToLower(msg.Name)
 		// Only enable progress bar for the following terminals.
@@ -1146,6 +1161,21 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if cmd := m.chat.ScrollToBottom(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
+				}
+			}
+		}
+	case pubsub.Event[agent.RetryProgressEvent]:
+		if item := m.chat.MessageItem(msg.Payload.MessageID); item != nil {
+			if setter, ok := item.(chat.RetryStatusSetter); ok {
+				if msg.Payload.Done {
+					setter.ClearRetryStatus()
+				} else {
+					setter.SetRetryStatus(
+						msg.Payload.Attempt,
+						msg.Payload.MaxRetries,
+						msg.Payload.Reason,
+						msg.Payload.RetryAt,
+					)
 				}
 			}
 		}
@@ -2090,6 +2120,14 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionQuit:
 		cmds = append(cmds, tea.Quit)
+	case dialog.ActionRestart:
+		m.dialog.CloseDialog(dialog.CommandsID)
+		if m.isAgentBusy() {
+			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before restarting..."))
+			break
+		}
+		m.restartRequested = true
+		cmds = append(cmds, tea.Quit)
 	case dialog.ActionEnableDockerMCP:
 		m.dialog.CloseDialog(dialog.CommandsID)
 		cmds = append(cmds, m.enableDockerMCP)
@@ -2565,6 +2603,19 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		if m.isAgentBusy() {
 			if cmd := m.cancelAgent(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return tea.Batch(cmds...)
+		}
+	}
+
+	// Handle Ctrl+B (double-tap to background whatever's currently
+	// blocking). Only consumed while the agent is busy -- there is
+	// nothing to background otherwise, so a lone Ctrl+B falls through to
+	// its normal editor binding (move cursor back).
+	if key.Matches(msg, m.keyMap.Chat.Background) {
+		if m.isAgentBusy() {
+			if cmd := m.backgroundNow(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 			return tea.Batch(cmds...)
@@ -3156,6 +3207,16 @@ func (m *UI) ShortHelp() []key.Binding {
 			binds = append(binds, cancelBinding)
 		}
 
+		// Show background binding if agent is busy (there's something
+		// to background).
+		if m.isAgentBusy() {
+			bgBinding := k.Chat.Background
+			if m.backgroundArmed {
+				bgBinding.SetHelp("ctrl+b", "press again to background")
+			}
+			binds = append(binds, bgBinding)
+		}
+
 		if m.focus == uiFocusEditor {
 			tab.SetHelp("tab", "focus chat")
 		} else {
@@ -3238,6 +3299,16 @@ func (m *UI) FullHelp() [][]key.Binding {
 				cancelBinding.SetHelp("esc", "clear queue")
 			}
 			binds = append(binds, []key.Binding{cancelBinding})
+		}
+
+		// Show background binding if agent is busy (there's something
+		// to background).
+		if m.isAgentBusy() {
+			bgBinding := k.Chat.Background
+			if m.backgroundArmed {
+				bgBinding.SetHelp("ctrl+b", "press again to background")
+			}
+			binds = append(binds, []key.Binding{bgBinding})
 		}
 
 		mainBinds := []key.Binding{}
@@ -3927,6 +3998,20 @@ func (m *UI) isAgentBusy() bool {
 // hasSession returns true if there is an active session with a valid ID.
 func (m *UI) hasSession() bool {
 	return m.session != nil && m.session.ID != ""
+}
+
+// RestartRequested reports whether the user asked to restart into a
+// freshly built binary (see ActionRestart), and the session ID to resume
+// into. Intended to be checked by the caller once [tea.Program.Run]
+// returns, after the terminal has already been restored.
+func (m *UI) RestartRequested() (sessionID string, ok bool) {
+	if !m.restartRequested {
+		return "", false
+	}
+	if m.session != nil {
+		sessionID = m.session.ID
+	}
+	return sessionID, true
 }
 
 // mimeOf detects the MIME type of the given content.

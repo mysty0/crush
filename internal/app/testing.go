@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
@@ -81,6 +82,7 @@ func NewForTestWithSessions(ctx context.Context, sessions session.Service, messa
 	setupSubscriber(a.eventsCtx, a.serviceEventsWG, "bash-progress", agenttools.SubscribeBashProgress, a.events)
 	setupSubscriber(a.eventsCtx, a.serviceEventsWG, "workflow-progress", agenttools.SubscribeWorkflowProgress, a.events)
 	setupSubscriber(a.eventsCtx, a.serviceEventsWG, "workflow-status", agenttools.SubscribeWorkflowStatus, a.events)
+	setupSubscriber(a.eventsCtx, a.serviceEventsWG, "retry-progress", agent.SubscribeRetryProgress, a.events)
 	return a
 }
 

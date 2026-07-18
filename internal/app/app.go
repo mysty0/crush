@@ -105,7 +105,7 @@ type App struct {
 func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr *skills.Manager) (*App, error) {
 	q := db.New(conn)
 	sessions := session.NewService(q, conn)
-	messages := message.NewService(q)
+	messages := message.NewService(q, conn)
 	files := history.NewService(q, conn)
 	cfg := store.Config()
 	skipPermissionsRequests := store.Overrides().SkipPermissionRequests
@@ -548,6 +548,7 @@ func (app *App) setupEvents() {
 	setupSubscriber(ctx, app.serviceEventsWG, "mcp", mcp.SubscribeEvents, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "bash-progress", agenttools.SubscribeBashProgress, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "workflow-progress", agenttools.SubscribeWorkflowProgress, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "retry-progress", agent.SubscribeRetryProgress, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "workflow-status", agenttools.SubscribeWorkflowStatus, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "lsp", SubscribeLSPEvents, app.events)
 	if app.Skills != nil {

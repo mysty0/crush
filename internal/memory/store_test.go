@@ -46,6 +46,44 @@ func TestRememberAndRecall(t *testing.T) {
 	require.Contains(t, hits[0].Content, "CGO")
 }
 
+// TestRecallRelevanceFloor reproduces the "unrelated memory injected because it
+// shared a stray keyword" problem: a high-importance, strongly-worded but
+// off-topic memory that only brushes the query on a single common token must be
+// filtered out by the relevance floor, while a genuinely on-topic memory is
+// still recalled.
+func TestRecallRelevanceFloor(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := context.Background()
+	scope := "proj_x"
+
+	// Off-topic but high-importance. Shares only the stray token "config" with
+	// the query below.
+	_, _, err := s.Remember(ctx, RememberParams{
+		Scope:      scope,
+		Content:    "The Hyprland cursor config keeps use_cpu_buffer true so the mirror texture never freezes on this NVIDIA machine.",
+		Importance: 0.9,
+	})
+	require.NoError(t, err)
+
+	// On-topic memory the query is actually about.
+	_, _, err = s.Remember(ctx, RememberParams{
+		Scope:      scope,
+		Content:    "The RAID array descriptor stores the stripe size at byte offset forty in the config packet.",
+		Importance: 0.5,
+	})
+	require.NoError(t, err)
+
+	hits, err := s.Recall(ctx, []string{scope}, "raid array descriptor stripe size byte offset packet config", 6)
+	require.NoError(t, err)
+	require.NotEmpty(t, hits)
+	for _, h := range hits {
+		require.NotContains(t, h.Content, "Hyprland",
+			"off-topic memory brushing the query on one token must not clear the floor")
+	}
+	require.Contains(t, hits[0].Content, "RAID")
+}
+
 func TestRememberDedupes(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
@@ -118,6 +156,147 @@ func TestForgetByQuery(t *testing.T) {
 	n, err := s.Forget(ctx, scope, "golangci-lint linter")
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, n, 1)
+}
+
+func TestReinforceRelevance(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := context.Background()
+	scope := "proj_x"
+
+	m, _, err := s.Remember(ctx, RememberParams{Scope: scope, Content: "the deploy script lives in scripts/deploy.sh", Importance: 0.5})
+	require.NoError(t, err)
+
+	require.NoError(t, s.ReinforceRelevance(ctx, m.ID, true))
+	all, err := s.List(ctx, scope, 10)
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	require.InDelta(t, 0.5+relevanceConfirmDelta, all[0].Importance, 1e-9)
+
+	require.NoError(t, s.ReinforceRelevance(ctx, m.ID, false))
+	all, err = s.List(ctx, scope, 10)
+	require.NoError(t, err)
+	require.InDelta(t, 0.5+relevanceConfirmDelta+relevanceRejectDelta, all[0].Importance, 1e-9)
+}
+
+func TestReinforceRelevanceClampsToBounds(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := context.Background()
+	scope := "proj_x"
+
+	low, _, err := s.Remember(ctx, RememberParams{Scope: scope, Content: "a low-importance fact about widgets", Importance: 0.02})
+	require.NoError(t, err)
+	require.NoError(t, s.ReinforceRelevance(ctx, low.ID, false))
+	all, err := s.List(ctx, scope, 10)
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	require.Equal(t, 0.0, all[0].Importance, "importance must clamp at 0, never go negative")
+
+	high, _, err := s.Remember(ctx, RememberParams{Scope: scope, Content: "a high-importance fact about gadgets", Importance: 0.99})
+	require.NoError(t, err)
+	require.NoError(t, s.ReinforceRelevance(ctx, high.ID, true))
+	all, err = s.List(ctx, scope, 10)
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+	for _, m := range all {
+		if m.ID == high.ID {
+			require.Equal(t, 1.0, m.Importance, "importance must clamp at 1, never exceed it")
+		}
+	}
+}
+
+// judgeState is a test helper returning a memory's current judge_interval
+// and recalls_since_judge, so tests can assert on the backoff bookkeeping
+// directly instead of only inferring it indirectly through BumpJudgeCounter.
+func judgeState(t *testing.T, s *Store, id string) (interval, recalls int) {
+	t.Helper()
+	err := s.db.QueryRow(`SELECT judge_interval, recalls_since_judge FROM memories WHERE id=?`, id).Scan(&interval, &recalls)
+	require.NoError(t, err)
+	return interval, recalls
+}
+
+func TestBumpJudgeCounter(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := context.Background()
+	scope := "proj_x"
+
+	m, _, err := s.Remember(ctx, RememberParams{Scope: scope, Content: "the deploy script lives in scripts/deploy.sh", Importance: 0.5})
+	require.NoError(t, err)
+
+	// judge_interval starts at 1, so the very first bump is immediately due.
+	due, err := s.BumpJudgeCounter(ctx, m.ID)
+	require.NoError(t, err)
+	require.True(t, due, "a fresh memory's first recall must be due for judgment")
+
+	interval, recalls := judgeState(t, s, m.ID)
+	require.Equal(t, 1, interval)
+	require.Equal(t, 1, recalls)
+}
+
+func TestBumpJudgeCounterMissingMemoryIsNotDue(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	due, err := s.BumpJudgeCounter(context.Background(), "does-not-exist")
+	require.NoError(t, err, "a missing/superseded memory must not error, just report not-due")
+	require.False(t, due)
+}
+
+func TestReinforceRelevanceBackoffSchedule(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := context.Background()
+	scope := "proj_x"
+
+	m, _, err := s.Remember(ctx, RememberParams{Scope: scope, Content: "the deploy script lives in scripts/deploy.sh", Importance: 0.5})
+	require.NoError(t, err)
+
+	// First recall is due (interval starts at 1); confirm it.
+	due, err := s.BumpJudgeCounter(ctx, m.ID)
+	require.NoError(t, err)
+	require.True(t, due)
+	require.NoError(t, s.ReinforceRelevance(ctx, m.ID, true))
+
+	interval, recalls := judgeState(t, s, m.ID)
+	require.Equal(t, 2, interval, "a confirm must double the interval")
+	require.Equal(t, 0, recalls, "a judgment must reset the recall counter")
+
+	// Next recall (1 of 2 needed) must NOT be due yet.
+	due, err = s.BumpJudgeCounter(ctx, m.ID)
+	require.NoError(t, err)
+	require.False(t, due, "must not be due again until the doubled interval is reached")
+
+	// Second recall (2 of 2) reaches the interval: due again.
+	due, err = s.BumpJudgeCounter(ctx, m.ID)
+	require.NoError(t, err)
+	require.True(t, due)
+
+	// Reject this time: interval must reset to the minimum, not keep growing.
+	require.NoError(t, s.ReinforceRelevance(ctx, m.ID, false))
+	interval, recalls = judgeState(t, s, m.ID)
+	require.Equal(t, judgeIntervalMin, interval, "a reject must reset the interval to the minimum for a prompt re-test")
+	require.Equal(t, 0, recalls)
+}
+
+func TestReinforceRelevanceIntervalCapsAtMax(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := context.Background()
+	scope := "proj_x"
+
+	m, _, err := s.Remember(ctx, RememberParams{Scope: scope, Content: "the deploy script lives in scripts/deploy.sh", Importance: 0.5})
+	require.NoError(t, err)
+
+	// Repeatedly confirm past the point where doubling would exceed judgeIntervalMax.
+	for range 10 {
+		_, err := s.BumpJudgeCounter(ctx, m.ID)
+		require.NoError(t, err)
+		require.NoError(t, s.ReinforceRelevance(ctx, m.ID, true))
+	}
+
+	interval, _ := judgeState(t, s, m.ID)
+	require.Equal(t, judgeIntervalMax, interval, "interval must cap at judgeIntervalMax, never grow unbounded")
 }
 
 func TestEviction(t *testing.T) {

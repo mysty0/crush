@@ -21,14 +21,19 @@ import (
 var ErrPlanModeActive = errors.New("plan mode is active: do not modify anything. Investigate and then present a concise plan for the user to review and approve before exiting plan mode")
 
 // planModeBlockedTools lists the mutating tools that are blocked while plan
-// mode is active. Read-only tools (view, grep, glob, ls, lsp_*, fetch, etc.)
-// are intentionally absent so the agent can still research.
+// mode is active. Read-only tools (view, grep, glob, ls, lsp_*, fetch, Recall,
+// etc.) are intentionally absent so the agent can still research.
 var planModeBlockedTools = map[string]struct{}{
 	"Bash":      {},
 	"Edit":      {},
 	"MultiEdit": {},
 	"Write":     {},
 	"download":  {},
+	// Remember/Forget persist across every future session and get
+	// auto-injected into future turns -- that's a mutation just like a
+	// file write, so plan mode blocks it the same way.
+	"Remember": {},
+	"Forget":   {},
 }
 
 // PlanModeBlocksTool reports whether the named tool is blocked while plan mode

@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 
@@ -52,7 +53,15 @@ const (
 
 	DefaultAutoBackgroundAfter = 60 // Commands taking longer automatically become background jobs
 	MaxOutputLength            = 30000
-	BashNoOutput               = "no output"
+	// maxOutputBytes hard-caps the raw byte size of output considered for
+	// truncation, independent of display width. ansi.StringWidth treats
+	// NUL and other control/zero-width bytes as contributing no width, so
+	// content dominated by such bytes (e.g. a stray run of NULs in a log
+	// file) could otherwise report a tiny width and sail through the
+	// width check in TruncateOutput while still being megabytes in size —
+	// large enough on its own to trip provider request-size limits.
+	maxOutputBytes = 1_000_000
+	BashNoOutput   = "no output"
 )
 
 //go:embed bash.md.tpl
@@ -344,7 +353,9 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				return fantasy.ToolResponse{}, fmt.Errorf("error starting shell: %w", err)
 			}
 
-			// Wait for either completion, auto-background threshold, or context cancellation
+			// Wait for either completion, auto-background threshold,
+			// an on-demand Ctrl+B background request, or context
+			// cancellation.
 			ticker := time.NewTicker(100 * time.Millisecond)
 			defer ticker.Stop()
 
@@ -352,8 +363,11 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			autoBackgroundThreshold := time.Duration(autoBackgroundAfter) * time.Second
 			timeout := time.After(autoBackgroundThreshold)
 
+			bgTrigger, unregisterBackground := RegisterBackground(sessionID, call.ID, BackgroundKindBash)
+			defer unregisterBackground()
+
 			var stdout, stderr string
-			var done bool
+			var done, backgroundedOnDemand bool
 			var execErr error
 
 		waitLoop:
@@ -369,6 +383,15 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 					PublishBashProgress(sessionID, call.ID, formatOutput(stdout, stderr, nil))
 				case <-timeout:
 					stdout, stderr, done, execErr = bgShell.GetOutput()
+					break waitLoop
+				case <-bgTrigger.C():
+					// User pressed Ctrl+B twice: background this command
+					// immediately rather than waiting for the auto-background
+					// threshold. The shell is already running detached
+					// (started with context.Background() above), so this is
+					// purely a wait-loop exit -- nothing else to set up.
+					stdout, stderr, done, execErr = bgShell.GetOutput()
+					backgroundedOnDemand = true
 					break waitLoop
 				case <-ctx.Done():
 					// Incoming context was cancelled before we moved to background
@@ -418,7 +441,11 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				Background:       true,
 				ShellID:          bgShell.ID,
 			}
-			response := fmt.Sprintf("Command is taking longer than expected and has been moved to background.\n\nBackground shell ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", bgShell.ID)
+			reason := "Command is taking longer than expected and has been moved to background."
+			if backgroundedOnDemand {
+				reason = "Moved this command to the background at the user's request."
+			}
+			response := fmt.Sprintf("%s\n\nBackground shell ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", reason, bgShell.ID)
 			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 		},
 	)
@@ -463,6 +490,11 @@ func formatOutput(stdout, stderr string, execErr error) string {
 }
 
 func TruncateOutput(content string) string {
+	// Clamp raw byte size first so content whose byte length vastly
+	// outstrips its display width (e.g. long runs of NUL bytes) can't
+	// bypass the width check below.
+	content = clampBytes(content, maxOutputBytes)
+
 	if ansi.StringWidth(content) <= MaxOutputLength {
 		return content
 	}
@@ -473,6 +505,29 @@ func TruncateOutput(content string) string {
 
 	truncatedLinesCount := max(strings.Count(content, "\n")-strings.Count(start, "\n")-strings.Count(end, "\n"), 0)
 	return fmt.Sprintf("%s\n\n... [%d lines truncated] ...\n\n%s", start, truncatedLinesCount, end)
+}
+
+// clampBytes trims s to at most maxBytes bytes, keeping equal-sized prefix
+// and suffix halves and cutting on UTF-8 rune boundaries so both halves
+// remain valid strings. It's a no-op if s is already within budget.
+func clampBytes(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+
+	half := maxBytes / 2
+
+	startEnd := half
+	for startEnd > 0 && !utf8.RuneStart(s[startEnd]) {
+		startEnd--
+	}
+
+	tailStart := len(s) - half
+	for tailStart < len(s) && !utf8.RuneStart(s[tailStart]) {
+		tailStart++
+	}
+
+	return s[:startEnd] + s[tailStart:]
 }
 
 func truncateOutput(content string) string {

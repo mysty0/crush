@@ -223,3 +223,15 @@ func TestTruncateOutputEmoji(t *testing.T) {
 	require.True(t, utf8.ValidString(out), "truncated output must stay valid UTF-8")
 	require.Contains(t, out, "lines truncated")
 }
+
+func TestTruncateOutputZeroWidthBytes(t *testing.T) {
+	t.Parallel()
+	// A long run of NUL bytes has zero display width under
+	// ansi.StringWidth, so a width-only size check would let it through
+	// untouched even though it's megabytes in size. TruncateOutput must
+	// still clamp it down.
+	content := strings.Repeat("\x00", 20_000_000) + "small tail\n"
+	out := TruncateOutput(content)
+	require.Less(t, len(out), len(content))
+	require.True(t, utf8.ValidString(out), "truncated output must stay valid UTF-8")
+}

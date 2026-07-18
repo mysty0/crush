@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filetracker"
+	"github.com/charmbracelet/crush/internal/hashline"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/stretchr/testify/require"
@@ -131,6 +133,52 @@ func TestViewToolAllowsSmallSectionsOfLargeFiles(t *testing.T) {
 	var meta ViewResponseMetadata
 	require.NoError(t, json.Unmarshal([]byte(resp.Metadata), &meta))
 	require.Equal(t, "target line", meta.Content)
+}
+
+func TestViewToolHashlineAllowsWindowOfLargeFile(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	filePath := filepath.Join(workingDir, "large.txt")
+	lines := []string{strings.Repeat("a", MaxViewSize+1), "target line", "after target"}
+	require.NoError(t, os.WriteFile(filePath, []byte(strings.Join(lines, "\n")), 0o644))
+
+	store := hashline.NewStore()
+	permissions := &mockViewPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tool := NewViewTool(nil, permissions, mockFileTracker{}, nil, nil, config.EditModeHashline, store, false, 0, 0, workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	resp := runViewTool(t, tool, ctx, ViewParams{
+		FilePath: filePath,
+		Offset:   1,
+		Limit:    1,
+	})
+
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "target line")
+	require.NotContains(t, resp.Content, "Content section is too large")
+}
+
+func TestViewToolHashlineSkipsTagAboveSnapshotLimit(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	filePath := filepath.Join(workingDir, "huge.txt")
+	lines := []string{strings.Repeat("a", MaxSnapshotSize+1), "target line", "after target"}
+	require.NoError(t, os.WriteFile(filePath, []byte(strings.Join(lines, "\n")), 0o644))
+
+	store := hashline.NewStore()
+	permissions := &mockViewPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tool := NewViewTool(nil, permissions, mockFileTracker{}, nil, nil, config.EditModeHashline, store, false, 0, 0, workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	resp := runViewTool(t, tool, ctx, ViewParams{
+		FilePath: filePath,
+		Offset:   1,
+		Limit:    1,
+	})
+
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "target line")
+	require.Contains(t, resp.Content, "hashline editing is unavailable")
 }
 
 func TestViewToolBlocksOversizedReturnedSections(t *testing.T) {

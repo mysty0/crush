@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/ui/chat"
@@ -310,37 +311,68 @@ type subAgentEntry struct {
 	Prompt     string
 }
 
-// runningSubAgents returns the currently running (unfinished) "agent"
-// tool calls in the main chat, in display order.
+// runningSubAgents returns the currently running (unfinished) "agent" and
+// "agentic_fetch" tool calls in the main chat, in display order. Both
+// dispatch through the same runSubAgent path (see coordinator.runSubAgent)
+// and derive their child session ID the same way, so both are listed here;
+// they only differ enough to need separate tool-call param types
+// (agentic_fetch has no ResumeSessionID).
 func (m *UI) runningSubAgents() []subAgentEntry {
 	var entries []subAgentEntry
 	for _, item := range m.chat.Items() {
-		agentItem, ok := item.(*chat.AgentToolMessageItem)
-		if !ok || agentItem.Finished() {
-			continue
+		if entry, ok := m.subAgentEntryFor(item); ok {
+			entries = append(entries, entry)
 		}
-		toolItem, ok := item.(chat.ToolMessageItem)
-		if !ok {
-			continue
+	}
+	return entries
+}
+
+// subAgentEntryFor extracts a picker-list entry from a chat item if it is
+// an unfinished "agent" or "agentic_fetch" tool call, or returns ok=false
+// for anything else (including a finished one of either kind).
+func (m *UI) subAgentEntryFor(item chat.MessageItem) (subAgentEntry, bool) {
+	var (
+		toolItem chat.ToolMessageItem
+		prompt   string
+		resumeID string
+	)
+	switch v := item.(type) {
+	case *chat.AgentToolMessageItem:
+		if v.Finished() {
+			return subAgentEntry{}, false
 		}
-		tc := toolItem.ToolCall()
+		toolItem = v
 		var params agent.AgentParams
-		_ = json.Unmarshal([]byte(tc.Input), &params)
+		_ = json.Unmarshal([]byte(v.ToolCall().Input), &params)
+		prompt = params.Prompt
 		// A resumed call reuses an existing session (see
 		// AgentParams.ResumeSessionID) rather than the one derived from
 		// this tool call's own message/tool-call ID, which would be
 		// empty since no agent() dispatch created it.
-		sessionID := params.ResumeSessionID
-		if sessionID == "" {
-			sessionID = m.com.Workspace.CreateAgentToolSessionID(toolItem.MessageID(), tc.ID)
+		resumeID = params.ResumeSessionID
+	case *chat.AgenticFetchToolMessageItem:
+		if v.Finished() {
+			return subAgentEntry{}, false
 		}
-		entries = append(entries, subAgentEntry{
-			SessionID:  sessionID,
-			ToolCallID: tc.ID,
-			Prompt:     params.Prompt,
-		})
+		toolItem = v
+		var params agenttools.AgenticFetchParams
+		_ = json.Unmarshal([]byte(v.ToolCall().Input), &params)
+		prompt = params.Prompt
+		// agentic_fetch never resumes an existing session.
+	default:
+		return subAgentEntry{}, false
 	}
-	return entries
+
+	tc := toolItem.ToolCall()
+	sessionID := resumeID
+	if sessionID == "" {
+		sessionID = m.com.Workspace.CreateAgentToolSessionID(toolItem.MessageID(), tc.ID)
+	}
+	return subAgentEntry{
+		SessionID:  sessionID,
+		ToolCallID: tc.ID,
+		Prompt:     prompt,
+	}, true
 }
 
 // agentListEntryKind distinguishes a plain sub-agent entry from a

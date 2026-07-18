@@ -843,6 +843,133 @@ func TestPreparePrompt_OrphanedToolUseMixed(t *testing.T) {
 	require.Equal(t, 1, syntheticCount, "expected exactly one synthetic result for the orphaned call")
 }
 
+// TestPreparePrompt_DuplicateToolResult covers the self-heal path for
+// an already-corrupted session: two Tool-role messages in the DB both
+// claim to be the result for the same tool_call_id (e.g. from a
+// stuck-session reconcile pass racing a live run before the atomic
+// CreateToolResultIfAbsent guard existed). The API rejects a request
+// containing two tool_result blocks for one id, so preparePrompt must
+// keep only the first and drop the rest.
+func TestPreparePrompt_DuplicateToolResult(t *testing.T) {
+	env := testEnv(t)
+	sa := testSessionAgent(env, nil, nil, "test prompt")
+	agent := sa.(*sessionAgent)
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "test")
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ToolCall{
+				ID:       "call_dup",
+				Name:     "bash",
+				Input:    `{"command":"echo hi"}`,
+				Finished: true,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Two independent Tool messages both claim the same tool_call_id.
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "call_dup", Name: "bash", Content: "first"},
+		},
+	})
+	require.NoError(t, err)
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "call_dup", Name: "bash", Content: "second"},
+		},
+	})
+	require.NoError(t, err)
+
+	msgs, err := env.messages.List(ctx, sess.ID)
+	require.NoError(t, err)
+
+	history, _ := agent.preparePrompt(msgs, true)
+
+	var resultCount int
+	for _, msg := range history {
+		if msg.Role != fantasy.MessageRoleTool {
+			continue
+		}
+		for _, part := range msg.Content {
+			if tr, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](part); ok && tr.ToolCallID == "call_dup" {
+				resultCount++
+			}
+		}
+	}
+	require.Equal(t, 1, resultCount, "must keep exactly one tool_result for a duplicated tool_call_id")
+}
+
+func TestPreparePrompt_MergesParallelToolResults(t *testing.T) {
+	env := testEnv(t)
+	sa := testSessionAgent(env, nil, nil, "test prompt")
+	agent := sa.(*sessionAgent)
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "test")
+	require.NoError(t, err)
+
+	// An assistant turn with two parallel tool calls.
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ToolCall{ID: "call_a", Name: "view", Input: `{"path":"/a"}`, Finished: true},
+			message.ToolCall{ID: "call_b", Name: "view", Input: `{"path":"/b"}`, Finished: true},
+		},
+	})
+	require.NoError(t, err)
+
+	// Each parallel tool call's result is persisted as its own message, as
+	// OnToolResult does while results stream in (see agent.go).
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "call_a", Name: "view", Content: "content a"},
+		},
+	})
+	require.NoError(t, err)
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "call_b", Name: "view", Content: "content b"},
+		},
+	})
+	require.NoError(t, err)
+
+	msgs, err := env.messages.List(ctx, sess.ID)
+	require.NoError(t, err)
+
+	history, _ := agent.preparePrompt(msgs, true)
+
+	// Anthropic (and most providers) require every tool_result answering a
+	// batch of parallel tool_use calls to arrive in a single message
+	// immediately following the assistant turn. If the two tool messages
+	// above were kept separate, the second tool_use id would have no
+	// tool_result "immediately after" and the API would reject the request.
+	var toolMsgCount int
+	var ids []string
+	for _, msg := range history {
+		if msg.Role != fantasy.MessageRoleTool {
+			continue
+		}
+		toolMsgCount++
+		for _, part := range msg.Content {
+			if tr, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](part); ok {
+				ids = append(ids, tr.ToolCallID)
+			}
+		}
+	}
+	require.Equal(t, 1, toolMsgCount, "results for parallel tool calls must be merged into a single message")
+	require.ElementsMatch(t, []string{"call_a", "call_b"}, ids)
+}
+
 func TestWorkaroundProviderMediaLimitations_TextOnlyModel(t *testing.T) {
 	env := testEnv(t)
 	sa := testSessionAgent(env, nil, nil, "test prompt")

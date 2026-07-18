@@ -63,9 +63,11 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 		}
 	}
 
+	toolDescription := agenticFetchToolDescription + c.availableModelsDescription()
+
 	return fantasy.NewParallelAgentTool(
 		tools.AgenticFetchToolName,
-		agenticFetchToolDescription,
+		toolDescription,
 		func(ctx context.Context, params tools.AgenticFetchParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			validationResult, err := validateAgenticFetchParams(ctx, params)
 			if err != nil {
@@ -147,19 +149,29 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				return fantasy.ToolResponse{}, fmt.Errorf("error creating prompt: %s", err)
 			}
 
+			fetchModelCfg, err := c.resolveFetchModelSelection(params.Model)
+			if err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+
+			fetchModel, err := c.buildModelFromSelected(ctx, fetchModelCfg, true)
+			if err != nil {
+				return fantasy.ToolResponse{}, fmt.Errorf("error building fetch model: %s", err)
+			}
+
 			_, small, err := c.buildAgentModels(ctx, true)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("error building models: %s", err)
 			}
 
-			systemPrompt, err := promptTemplate.Build(ctx, small.Model.Provider(), small.Model.Model(), c.cfg)
+			systemPrompt, err := promptTemplate.Build(ctx, fetchModel.Model.Provider(), fetchModel.Model.Model(), c.cfg)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("error building system prompt: %s", err)
 			}
 
-			smallProviderCfg, ok := c.cfg.Config().Providers.Get(small.ModelCfg.Provider)
+			fetchProviderCfg, ok := c.cfg.Config().Providers.Get(fetchModel.ModelCfg.Provider)
 			if !ok {
-				return fantasy.ToolResponse{}, errors.New("small model provider not configured")
+				return fantasy.ToolResponse{}, errors.New("fetch model provider not configured")
 			}
 
 			webFetchTool := tools.NewWebFetchTool(tmpDir, client, c.webFetchOptions())
@@ -179,9 +191,9 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 			// the user's hooks N times per delegated turn.
 
 			agent := NewSessionAgent(SessionAgentOptions{
-				LargeModel:           small, // Use small model for both (fetch doesn't need large)
+				LargeModel:           fetchModel,
 				SmallModel:           small,
-				SystemPromptPrefix:   smallProviderCfg.SystemPromptPrefix,
+				SystemPromptPrefix:   fetchProviderCfg.SystemPromptPrefix,
 				SystemPrompt:         systemPrompt,
 				DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
 				IsYolo:               c.permissions.SkipRequests(),

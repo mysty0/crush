@@ -16,12 +16,14 @@ const LargeContentThreshold = 50000 // 50KB
 type AgenticFetchParams struct {
 	URL    string `json:"url,omitempty" description:"The URL to fetch content from (optional - if not provided, the agent will search the web)"`
 	Prompt string `json:"prompt" description:"The prompt describing what information to find or extract"`
+	Model  string `json:"model,omitempty" description:"Optional. The ID of the model to run this fetch on, chosen from the list of available models in this tool's description. Omit to use the default model (a Claude Sonnet model, chosen for a good balance of quality and cost for summarization/extraction tasks)."`
 }
 
 // AgenticFetchPermissionsParams defines the permission parameters for the agentic fetch tool.
 type AgenticFetchPermissionsParams struct {
 	URL    string `json:"url,omitempty"`
 	Prompt string `json:"prompt"`
+	Model  string `json:"model,omitempty"`
 }
 
 // WebFetchParams defines the parameters for the web_fetch tool.

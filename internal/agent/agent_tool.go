@@ -225,6 +225,85 @@ func (c *coordinator) resolveTaskModel(modelID string) (config.SelectedModel, bo
 	return config.SelectedModel{}, false
 }
 
+// resolveDefaultSonnetModel picks a Claude Sonnet model from an enabled
+// provider to use as agentic_fetch's default when the caller doesn't name
+// a model explicitly. It prefers the provider already backing the
+// configured large/small model slots (reusing an already-authenticated
+// client) and otherwise falls back to the first enabled provider that
+// exposes a Sonnet model. Returns false if no enabled provider has one.
+func (c *coordinator) resolveDefaultSonnetModel() (config.SelectedModel, bool) {
+	cfg := c.cfg.Config()
+
+	isSonnet := func(id, name string) bool {
+		return strings.Contains(strings.ToLower(id), "sonnet") ||
+			strings.Contains(strings.ToLower(name), "sonnet")
+	}
+
+	fromProvider := func(providerCfg config.ProviderConfig) (config.SelectedModel, bool) {
+		for _, m := range providerCfg.Models {
+			if isSonnet(m.ID, m.Name) {
+				return config.SelectedModel{
+					Provider:        providerCfg.ID,
+					Model:           m.ID,
+					MaxTokens:       m.DefaultMaxTokens,
+					ReasoningEffort: m.DefaultReasoningEffort,
+				}, true
+			}
+		}
+		return config.SelectedModel{}, false
+	}
+
+	for _, slot := range []config.SelectedModelType{config.SelectedModelTypeLarge, config.SelectedModelTypeSmall} {
+		m, ok := cfg.Models[slot]
+		if !ok {
+			continue
+		}
+		providerCfg, ok := cfg.Providers.Get(m.Provider)
+		if !ok {
+			continue
+		}
+		if selected, ok := fromProvider(providerCfg); ok {
+			return selected, true
+		}
+	}
+
+	for _, providerCfg := range cfg.EnabledProviders() {
+		if selected, ok := fromProvider(providerCfg); ok {
+			return selected, true
+		}
+	}
+
+	return config.SelectedModel{}, false
+}
+
+// resolveFetchModelSelection resolves the agentic_fetch tool's "model"
+// parameter into a SelectedModel. An explicit ID is validated against the
+// enabled providers (same resolution as the "agent" tool); an empty ID
+// defaults to a Claude Sonnet model if one is available on an enabled
+// provider, falling back to the configured small model otherwise.
+func (c *coordinator) resolveFetchModelSelection(modelID string) (config.SelectedModel, error) {
+	if modelID != "" {
+		selected, ok := c.resolveTaskModel(modelID)
+		if !ok {
+			return config.SelectedModel{}, fmt.Errorf(
+				"unknown model %q; choose one of the available model IDs: %s",
+				modelID, strings.Join(c.availableModelIDs(), ", "),
+			)
+		}
+		return selected, nil
+	}
+
+	if selected, ok := c.resolveDefaultSonnetModel(); ok {
+		return selected, nil
+	}
+
+	small, ok := c.cfg.Config().Models[config.SelectedModelTypeSmall]
+	if !ok {
+		return config.SelectedModel{}, errSmallModelNotSelected
+	}
+	return small, nil
+}
+
 // availableModelIDs returns the sorted, de-duplicated set of model IDs the
 // "agent" tool can dispatch to (every model on an enabled provider).
 func (c *coordinator) availableModelIDs() []string {

@@ -27,6 +27,11 @@ type KeyMap struct {
 		NewSession     key.Binding
 		AddAttachment  key.Binding
 		Cancel         key.Binding
+		// Background implements Ctrl+B's double-tap gesture: send
+		// whatever's currently blocking (a foreground bash command, or a
+		// synchronous sub-agent turn) to the background without
+		// canceling the turn. See UI.backgroundNow.
+		Background key.Binding
 		Tab            key.Binding
 		Details        key.Binding
 		TogglePills    key.Binding
@@ -174,6 +179,10 @@ func DefaultKeyMap() KeyMap {
 	km.Chat.Cancel = key.NewBinding(
 		key.WithKeys("esc", "alt+esc"),
 		key.WithHelp("esc", "cancel"),
+	)
+	km.Chat.Background = key.NewBinding(
+		key.WithKeys("ctrl+b"),
+		key.WithHelp("ctrl+b ctrl+b", "background"),
 	)
 	km.Chat.Tab = key.NewBinding(
 		key.WithKeys("tab"),

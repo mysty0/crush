@@ -84,3 +84,27 @@ func jaccard(a, b string) float64 {
 	}
 	return float64(inter) / float64(union)
 }
+
+// queryCoverage returns the fraction of the query's distinct meaningful tokens
+// that are present in content, in [0, 1]. A query token counts as covered when
+// it matches a content token exactly or by prefix in either direction, so
+// stem-like variants (render/renderbuffer, bundle/bundling) still count and the
+// check stays at least as permissive as the Porter-stemmed FTS match. Returns 1
+// for an empty query so it never filters on its own.
+func queryCoverage(query, content string) float64 {
+	qtoks := queryTokens(query)
+	if len(qtoks) == 0 {
+		return 1
+	}
+	ctoks := tokenSet(content)
+	covered := 0
+	for _, qt := range qtoks {
+		for ct := range ctoks {
+			if qt == ct || strings.HasPrefix(ct, qt) || strings.HasPrefix(qt, ct) {
+				covered++
+				break
+			}
+		}
+	}
+	return float64(covered) / float64(len(qtoks))
+}

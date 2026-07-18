@@ -84,6 +84,13 @@ const (
 	MaxViewSize      = 200 * 1024 // 200KB
 	DefaultReadLimit = 200
 	MaxLineLength    = 2000
+	// MaxSnapshotSize bounds the whole-file snapshot that hashline mode
+	// records to back a later Edit. It is a memory guardrail only: the
+	// snapshot text is never sent to the model, so it is far larger than
+	// MaxViewSize (which caps the content returned to the model). Files
+	// above this size are still readable, but hashline editing is
+	// unavailable for them.
+	MaxSnapshotSize = 5 * 1024 * 1024 // 5MB
 )
 
 type contentTooLargeError struct {
@@ -283,7 +290,8 @@ func NewViewTool(
 			waitForLSPDiagnostics(ctx, lspManager, filePath, 300*time.Millisecond)
 
 			var output string
-			if editMode == config.EditModeHashline && store != nil && !isSkillFile {
+			hashlineMode := editMode == config.EditModeHashline && store != nil && !isSkillFile
+			if hashlineMode && fileInfo.Size() <= MaxSnapshotSize {
 				out, herr := hashlineViewOutput(store, sessionID, absFilePath, relPath, isOutsideWorkDir, filePath, content, params.Offset, hasMore)
 				if herr != nil {
 					var tooLarge contentTooLargeError
@@ -302,6 +310,10 @@ func NewViewTool(
 						params.Offset+len(strings.Split(content, "\n")))
 				}
 				output += "\n</file>\n"
+				if hashlineMode {
+					output += fmt.Sprintf("\n(File is %d bytes, above the %d-byte hashline snapshot limit; shown without an edit tag, so hashline editing is unavailable for this file.)\n",
+						fileInfo.Size(), MaxSnapshotSize)
+				}
 				output += getDiagnostics(filePath, lspManager)
 			}
 			filetracker.RecordRead(ctx, sessionID, filePath)
@@ -347,8 +359,8 @@ func hashlineViewOutput(
 	if err != nil {
 		return "", fmt.Errorf("error reading file: %w", err)
 	}
-	if len(full) > MaxViewSize {
-		return "", contentTooLargeError{Size: len(full), Max: MaxViewSize}
+	if len(full) > MaxSnapshotSize {
+		return "", contentTooLargeError{Size: len(full), Max: MaxSnapshotSize}
 	}
 	lfText, _ := fsext.ToUnixLineEndings(string(full))
 

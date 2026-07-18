@@ -8,6 +8,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
@@ -74,6 +75,8 @@ func (c *blockingCoordinator) CancelSchedule(string)                         {}
 func (c *blockingCoordinator) ReconcileStuckSession(context.Context, string) (int, error) {
 	return 0, nil
 }
+
+func (c *blockingCoordinator) BackgroundNow(string) map[agenttools.BackgroundKind]int { return nil }
 
 // insertAgentWorkspace installs a synthetic workspace with the given
 // coordinator (or none) and a workspace run context, mirroring the

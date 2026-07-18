@@ -71,6 +71,14 @@ type PartialOutputSetter interface {
 	SetPartialOutput(output string)
 }
 
+// RetryStatusSetter is implemented by items (the assistant message) that can
+// display a live "Retrying N/M" indicator while an in-flight provider request
+// is being retried.
+type RetryStatusSetter interface {
+	SetRetryStatus(attempt, max int, reason string, retryAt time.Time)
+	ClearRetryStatus()
+}
+
 // MessageItem represents a [message.Message] item that can be displayed in the
 // UI and be part of a [list.List] identifiable by a unique ID.
 type MessageItem interface {

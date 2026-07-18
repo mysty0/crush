@@ -35,7 +35,7 @@ func newTestEnv(t *testing.T) testEnv {
 	q := db.New(conn)
 	sessions := session.NewService(q, conn)
 	// Disable debounce so message writes are synchronous and observable.
-	messages := message.NewService(q, message.WithDebounce(0))
+	messages := message.NewService(q, conn, message.WithDebounce(0))
 	hist := history.NewService(q, conn)
 
 	return testEnv{

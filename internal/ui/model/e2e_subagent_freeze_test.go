@@ -133,7 +133,7 @@ func TestE2E_SubAgentBashFreeze(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 	q := db.New(conn)
 	sessions := session.NewService(q, conn)
-	messages := message.NewService(q)
+	messages := message.NewService(q, conn)
 
 	// --- Real app wiring: session/message/bash-progress events fan
 	// into one broker exactly as production's setupEvents does. ---

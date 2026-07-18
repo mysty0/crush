@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/agent"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/history"
@@ -112,6 +113,15 @@ type Workspace interface {
 	// AgentCancelSubAgent cancels a currently-running sub-agent turn.
 	// It is a no-op if the sub-agent session is not currently busy.
 	AgentCancelSubAgent(subAgentSessionID string)
+	// AgentBackgroundNow implements the Ctrl+B keybinding: it signals
+	// every currently-blocking operation for sessionID (a foreground bash
+	// command, or a synchronous "agent"/"agentic_fetch" sub-agent turn)
+	// to detach and continue running in the background. It returns how
+	// many were fired, broken down by kind, so the UI can report a
+	// precise summary; a nil/empty result means nothing was blocking.
+	// Local (AppWorkspace) only -- a no-op returning nil in client/server
+	// mode.
+	AgentBackgroundNow(sessionID string) map[agenttools.BackgroundKind]int
 
 	// AgentRunningWorkflows returns a snapshot of every background
 	// workflow (dispatched via the "Workflow" tool), running or

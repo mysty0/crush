@@ -14,6 +14,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/message"
@@ -242,6 +243,8 @@ func (c *scriptedCoordinator) CancelSchedule(string)                         {}
 func (c *scriptedCoordinator) ReconcileStuckSession(context.Context, string) (int, error) {
 	return 0, nil
 }
+
+func (c *scriptedCoordinator) BackgroundNow(string) map[agenttools.BackgroundKind]int { return nil }
 
 // agentE2EHarness extends the SSE harness with a scripted coordinator
 // wired into the workspace's embedded app.App, so POST /agent drives a

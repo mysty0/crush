@@ -159,6 +159,13 @@ type Coordinator interface {
 	// left untouched, along with its descendants. Returns the number
 	// of tool calls that were reconciled.
 	ReconcileStuckSession(ctx context.Context, sessionID string) (int, error)
+	// BackgroundNow signals every currently-blocking operation for
+	// sessionID (a foreground bash command's wait, or a synchronous
+	// sub-agent/agentic_fetch turn dispatched via runSubAgent) to detach
+	// and continue running in the background. Returns how many were
+	// fired, broken down by kind, so the Ctrl+B keybinding can report a
+	// precise summary. A nil/empty result means nothing was blocking.
+	BackgroundNow(sessionID string) map[tools.BackgroundKind]int
 }
 
 type coordinator struct {
@@ -403,9 +410,11 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	beforeLoaded := c.skillTracker.LoadedNames()
 	var result *fantasy.AgentResult
 	originalErr := c.runWithUnauthorizedRetry(ctx, providerCfg, func() error {
-		var err error
-		result, err = run()
-		return err
+		return c.runWithStreamErrorRetry(ctx, func() error {
+			var err error
+			result, err = run()
+			return err
+		})
 	})
 	logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)
 
@@ -758,6 +767,7 @@ func (c *coordinator) buildAgentWithModel(ctx context.Context, prompt *prompt.Pr
 // shared constructor behind buildAgent and buildAgentWithModel.
 func (c *coordinator) newTaskAgent(ctx context.Context, prompt *prompt.Prompt, agent config.Agent, isSubAgent bool, primary, small Model) SessionAgent {
 	primaryProviderCfg, _ := c.cfg.Config().Providers.Get(primary.ModelCfg.Provider)
+	recallMemories, resetMemoryShown := c.buildMemoryRecall(isSubAgent, small)
 	result := NewSessionAgent(SessionAgentOptions{
 		LargeModel:           primary,
 		SmallModel:           small,
@@ -772,8 +782,13 @@ func (c *coordinator) newTaskAgent(ctx context.Context, prompt *prompt.Prompt, a
 		Notify:               c.notify,
 		RunComplete:          c.runComplete,
 		ActiveSkillsFor:      c.activeSkillsInjection,
-		RecallMemories:       c.buildMemoryRecall(isSubAgent),
-		OnSummarized:         c.loadedSkills.Bump,
+		RecallMemories:       recallMemories,
+		OnSummarized: func(sessionID string) {
+			c.loadedSkills.Bump(sessionID)
+			if resetMemoryShown != nil {
+				resetMemoryShown(sessionID)
+			}
+		},
 	})
 
 	c.readyWg.Go(func() error {
@@ -1595,6 +1610,11 @@ func (c *coordinator) CancelSubAgent(subAgentSessionID string) {
 	}
 }
 
+// BackgroundNow implements Coordinator.
+func (c *coordinator) BackgroundNow(sessionID string) map[tools.BackgroundKind]int {
+	return tools.BackgroundNow(sessionID)
+}
+
 // titleContextMaxChars caps how much conversation text is fed to title
 // generation. The most recent text is kept (tail slice) so the title reflects
 // where the session ended up, while keeping the request small and cheap.
@@ -1670,6 +1690,104 @@ func (c *coordinator) retryAfterUnauthorized(ctx context.Context, providerCfg co
 func (c *coordinator) isUnauthorized(err error) bool {
 	var providerErr *fantasy.ProviderError
 	return errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusUnauthorized
+}
+
+// unclassifiedStreamErrorPrefix is the literal error text the Anthropic SDK
+// produces when the SSE stream carries a mid-response "event: error" frame
+// (see anthropic-sdk-go's ssestream package). fantasy's Anthropic provider
+// cannot turn this into a *fantasy.ProviderError -- that requires an
+// *anthropic.Error, which the SDK only produces for HTTP-level failures --
+// so it reaches Crush as a bare, unclassified error that fantasy's own
+// per-request retry logic never retries.
+const unclassifiedStreamErrorPrefix = "received error while streaming: "
+
+// anthropicStreamErrorEvent is the JSON payload embedded in an Anthropic
+// mid-stream SSE "error" event.
+type anthropicStreamErrorEvent struct {
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// classifyUnclassifiedStreamError recognizes the subset of Anthropic
+// mid-stream SSE error types that are safe to retry (transient capacity or
+// rate-limit conditions) -- the same categories fantasy would treat as
+// retryable had the failure come back as an HTTP status instead of an SSE
+// frame. It returns ok=false for any error it does not recognize, including
+// non-transient error types (e.g. invalid_request_error), so callers only
+// retry when this returns ok=true.
+func classifyUnclassifiedStreamError(err error) (reason string, ok bool) {
+	if err == nil {
+		return "", false
+	}
+	payload, hasPrefix := strings.CutPrefix(err.Error(), unclassifiedStreamErrorPrefix)
+	if !hasPrefix {
+		return "", false
+	}
+	var event anthropicStreamErrorEvent
+	if jsonErr := json.Unmarshal([]byte(payload), &event); jsonErr != nil {
+		return "", false
+	}
+	switch event.Error.Type {
+	case "rate_limit_error":
+		return "Rate limited", true
+	case "overloaded_error":
+		return "Overloaded", true
+	case "api_error":
+		return "Server error", true
+	default:
+		return "", false
+	}
+}
+
+// runWithStreamErrorRetry executes fn, retrying with exponential backoff
+// when it fails with an error fantasy did not classify as retryable but
+// that Crush recognizes as a transient provider condition (see
+// classifyUnclassifiedStreamError). This covers, for example, an Anthropic
+// mid-stream SSE "error" event carrying rate_limit_error, overloaded_error,
+// or api_error: the Anthropic SDK surfaces these as a bare Go error rather
+// than a *fantasy.ProviderError, so fantasy's own per-request retry (which
+// requires that type) never engages and the turn would otherwise fail on
+// the very first hit -- reported to the user as a plain "Provider Error"
+// with no retry at all.
+//
+// Retries share the same providerMaxRetries ceiling and 2s/x2 backoff shape
+// as fantasy's internal retry, so the wait behaves the same from the
+// user's perspective. Unlike that internal retry, this one only runs after
+// the whole turn has already returned -- its assistant message is already
+// finalized as an error by the time Crush sees it -- so a retry here starts
+// a fresh turn rather than resuming the same in-flight message. That is the
+// same trade-off already accepted by runWithUnauthorizedRetry.
+func (c *coordinator) runWithStreamErrorRetry(ctx context.Context, fn func() error) error {
+	return retryStreamError(ctx, fn, providerMaxRetries, 2*time.Second, 2.0)
+}
+
+// retryStreamError is the delay-parameterized implementation behind
+// runWithStreamErrorRetry, split out so tests can drive the retry/backoff
+// logic with a negligible delay instead of the real multi-second backoff.
+func retryStreamError(ctx context.Context, fn func() error, maxRetries int, initialDelay time.Duration, backoffFactor float64) error {
+	delay := initialDelay
+	err := fn()
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if err == nil {
+			return nil
+		}
+		reason, retryable := classifyUnclassifiedStreamError(err)
+		if !retryable {
+			return err
+		}
+		slog.Warn("Provider stream error not classified as retryable by fantasy; retrying the turn",
+			"attempt", attempt, "max_retries", maxRetries, "reason", reason, "retry_delay", delay.String())
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return err
+		}
+		delay = time.Duration(float64(delay) * backoffFactor)
+		err = fn()
+	}
+	return err
 }
 
 func (c *coordinator) refreshOAuth2Token(ctx context.Context, providerCfg config.ProviderConfig) error {
@@ -1773,46 +1891,111 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		StartedAt:       time.Now(),
 		State:           SubAgentRunning,
 	})
-	defer func() {
-		go func() {
-			time.Sleep(subAgentLingerAfterFinish)
-			c.subAgents.remove(subSession.ID)
-		}()
+
+	// bgCtx detaches the actual run from the tool call's own context up
+	// front: if Ctrl+B backgrounds this sub-agent, it must keep running
+	// after runSubAgent returns, which a context tied to the (about to be
+	// discarded) tool-call context cannot do. A genuine turn cancellation
+	// (Esc) is re-propagated explicitly below via bgCancel, preserving
+	// today's "Esc kills everything" behavior for the common,
+	// non-backgrounded case.
+	bgCtx, bgCancel := context.WithCancel(context.WithoutCancel(ctx))
+
+	trigger, unregisterBackground := tools.RegisterBackground(params.SessionID, params.ToolCallID, tools.BackgroundKindSubAgent)
+	defer unregisterBackground()
+
+	resultCh := make(chan subAgentRunOutcome, 1)
+	go func() {
+		var result *fantasy.AgentResult
+		runErr := c.runWithUnauthorizedRetry(bgCtx, providerCfg, func() error {
+			var innerErr error
+			result, innerErr = params.Agent.Run(bgCtx, SessionAgentCall{
+				SessionID:        subSession.ID,
+				Prompt:           params.Prompt,
+				MaxOutputTokens:  maxTokens,
+				ProviderOptions:  getProviderOptions(model, providerCfg),
+				Temperature:      model.ModelCfg.Temperature,
+				TopP:             model.ModelCfg.TopP,
+				TopK:             model.ModelCfg.TopK,
+				FrequencyPenalty: model.ModelCfg.FrequencyPenalty,
+				PresencePenalty:  model.ModelCfg.PresencePenalty,
+				NonInteractive:   true,
+			})
+			return innerErr
+		})
+		resultCh <- subAgentRunOutcome{result: result, err: runErr}
 	}()
 
-	// Run the agent
-	run := func() (*fantasy.AgentResult, error) {
-		return params.Agent.Run(ctx, SessionAgentCall{
-			SessionID:        subSession.ID,
-			Prompt:           params.Prompt,
-			MaxOutputTokens:  maxTokens,
-			ProviderOptions:  getProviderOptions(model, providerCfg),
-			Temperature:      model.ModelCfg.Temperature,
-			TopP:             model.ModelCfg.TopP,
-			TopK:             model.ModelCfg.TopK,
-			FrequencyPenalty: model.ModelCfg.FrequencyPenalty,
-			PresencePenalty:  model.ModelCfg.PresencePenalty,
-			NonInteractive:   true,
-		})
+	select {
+	case out := <-resultCh:
+		bgCancel()
+		return c.completeSubAgentSync(ctx, params, subSession, model, out)
+
+	case <-trigger.C():
+		// Detach: return immediately and let the run finish in the
+		// background. bgCtx is deliberately left alone here (not
+		// canceled) -- that is the whole point of backgrounding.
+		go func() {
+			out := <-resultCh
+			bgCancel()
+			c.completeSubAgentBackgrounded(params, subSession, model, out)
+		}()
+		return fantasy.NewTextResponse(fmt.Sprintf(
+			"Moved the sub-agent to the background (session %s). I'll follow up in this conversation once it finishes -- check on it any time with AgentProgress(session_id=%q).",
+			subSession.ID, subSession.ID,
+		)), nil
+
+	case <-ctx.Done():
+		// The parent turn's own context was canceled (e.g. Esc) before
+		// Ctrl+B fired -- propagate the cancellation into the sub-agent
+		// (via bgCancel) rather than letting it run forever detached, and
+		// wait for it to actually unwind before returning, matching the
+		// blocking behavior a plain synchronous call already had.
+		bgCancel()
+		out := <-resultCh
+		c.subAgents.finish(subSession.ID, SubAgentFailed, ctx.Err().Error())
+		c.lingerSubAgentRemoval(subSession.ID)
+		_ = out
+		return fantasy.ToolResponse{}, ctx.Err()
 	}
-	var result *fantasy.AgentResult
-	err = c.runWithUnauthorizedRetry(ctx, providerCfg, func() error {
-		var runErr error
-		result, runErr = run()
-		return runErr
-	})
+}
+
+// subAgentRunOutcome carries a sub-agent turn's result off the goroutine
+// that runs it, to whichever select case in runSubAgent (or the detached
+// backgrounded-completion goroutine) ends up consuming it.
+type subAgentRunOutcome struct {
+	result *fantasy.AgentResult
+	err    error
+}
+
+// lingerSubAgentRemoval keeps a finished sub-agent visible in the
+// registry (and thus AgentList) for subAgentLingerAfterFinish before
+// dropping it, mirroring workflowLingerAfterFinish.
+func (c *coordinator) lingerSubAgentRemoval(sessionID string) {
+	go func() {
+		time.Sleep(subAgentLingerAfterFinish)
+		c.subAgents.remove(sessionID)
+	}()
+}
+
+// completeSubAgentSync finishes a sub-agent turn that ran to completion
+// (or failed) before the tool call itself returned -- the common,
+// non-backgrounded case. It formats the same response a direct,
+// unbackgrounded runSubAgent always returned.
+func (c *coordinator) completeSubAgentSync(ctx context.Context, params subAgentParams, subSession session.Session, model Model, out subAgentRunOutcome) (fantasy.ToolResponse, error) {
 	// Notify only if still unauthorized after retry.
-	if err != nil && c.isUnauthorized(err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
+	if out.err != nil && c.isUnauthorized(out.err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
 		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
 			Type:       notify.TypeReAuthenticate,
 			ProviderID: model.ModelCfg.Provider,
 		})
 	}
-	if err != nil {
-		c.subAgents.finish(subSession.ID, SubAgentFailed, err.Error())
+	if out.err != nil {
+		c.subAgents.finish(subSession.ID, SubAgentFailed, out.err.Error())
+		c.lingerSubAgentRemoval(subSession.ID)
 		return fantasy.NewTextErrorResponse(fmt.Sprintf(
 			"Failed to generate response: %s\n\nThe sub-agent's progress up to this point is preserved in session %q. Retry the agent tool with resume_session_id=%q to continue from where it left off instead of starting over.",
-			err, subSession.ID, subSession.ID,
+			out.err, subSession.ID, subSession.ID,
 		)), nil
 	}
 
@@ -1828,11 +2011,65 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 	}
 
 	c.subAgents.finish(subSession.ID, SubAgentDone, "")
-	output := subAgentOutput(result)
+	c.lingerSubAgentRemoval(subSession.ID)
+	output := subAgentOutput(out.result)
 	if output == "" {
 		return fantasy.NewTextErrorResponse("Sub-agent completed but produced no text output."), nil
 	}
 	return fantasy.NewTextResponse(output), nil
+}
+
+// completeSubAgentBackgrounded finishes a sub-agent turn that was detached
+// via Ctrl+B, after runSubAgent has already returned its "moved to the
+// background" response. Since there is no tool call left to return a
+// result through, the outcome is queued back into the parent session as a
+// follow-up user message instead -- the same mechanism finishWorkflow uses
+// for background workflows completing.
+func (c *coordinator) completeSubAgentBackgrounded(params subAgentParams, subSession session.Session, model Model, out subAgentRunOutcome) {
+	if out.err != nil && c.isUnauthorized(out.err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
+		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+			Type:       notify.TypeReAuthenticate,
+			ProviderID: model.ModelCfg.Provider,
+		})
+	}
+
+	var prompt string
+	if out.err != nil {
+		c.subAgents.finish(subSession.ID, SubAgentFailed, out.err.Error())
+		prompt = fmt.Sprintf(
+			"The backgrounded sub-agent (session %s) failed: %s\n\nIts progress up to this point is preserved. Retry the agent tool with resume_session_id=%q to continue from where it left off.",
+			subSession.ID, out.err, subSession.ID,
+		)
+	} else {
+		// Best-effort, mirroring completeSubAgentSync: a cost-tracking
+		// failure must not discard the sub-agent's output.
+		if err := c.updateParentSessionCost(context.Background(), subSession.ID, params.SessionID); err != nil {
+			slog.Warn(
+				"Failed to update parent session cost",
+				"child_session", subSession.ID,
+				"parent_session", params.SessionID,
+				"error", err,
+			)
+		}
+		c.subAgents.finish(subSession.ID, SubAgentDone, "")
+		output := subAgentOutput(out.result)
+		if output == "" {
+			output = "(no text output)"
+		}
+		prompt = fmt.Sprintf("The backgrounded sub-agent (session %s) finished:\n\n%s", subSession.ID, output)
+	}
+	c.lingerSubAgentRemoval(subSession.ID)
+
+	// Queue the completion back into the coder session. Coordinator.Run
+	// enqueues behind any active turn or pending user messages, so this
+	// never interrupts the user -- it fires when the session is idle,
+	// exactly like a typed follow-up (see finishWorkflow for the same
+	// pattern with background workflows).
+	go func() {
+		if _, runErr := c.Run(context.Background(), params.SessionID, prompt); runErr != nil {
+			slog.Warn("Failed to queue backgrounded sub-agent completion", "session", params.SessionID, "error", runErr)
+		}
+	}()
 }
 
 // subAgentLingerAfterFinish is how long a finished sub-agent remains

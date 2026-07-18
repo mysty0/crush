@@ -2,6 +2,7 @@ package chat
 
 import (
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/ui/styles"
@@ -41,6 +42,60 @@ func TestAssistantMessageItemExpandable(t *testing.T) {
 	require.False(t, exp.ToggleExpanded(),
 		"second toggle must report collapsed (cycle closed)")
 	require.Equal(t, thinkingCollapsed, item.thinkingViewMode)
+}
+
+// TestAssistantMessageItemRetryStatus verifies the live retry indicator: a
+// bare (still-spinning) assistant message shows "Retrying N/M · reason · Ns"
+// while a provider request is being retried, and clears once the retry ends.
+func TestAssistantMessageItemRetryStatus(t *testing.T) {
+	t.Parallel()
+
+	sty := styles.CharmtonePantera()
+	msg := &message.Message{ID: "m-retry", Role: message.Assistant}
+	item := NewAssistantMessageItem(&sty, msg).(*AssistantMessageItem)
+
+	require.True(t, item.isSpinning(), "a bare assistant message must be spinning")
+	require.NotContains(t, item.retryLabel(), "Rate limited",
+		"no retry status yet")
+
+	item.SetRetryStatus(3, 5, "Rate limited", time.Now().Add(12*time.Second))
+	require.Equal(t, 3, item.retryAttempt)
+	label := item.retryLabel()
+	require.Contains(t, label, "Retrying 3/5")
+	require.Contains(t, label, "Rate limited")
+	require.Regexp(t, `· \d+s$`, label)
+	// renderSpinning must not panic and must produce output while retrying.
+	require.NotEmpty(t, ansi.Strip(item.renderSpinning()))
+
+	item.ClearRetryStatus()
+	require.Equal(t, 0, item.retryAttempt)
+}
+
+// TestAssistantSpinnerHintAndStopwatch verifies the spinner shows an explicit
+// "Working" hint and grows a live elapsed stopwatch once the wait passes the
+// threshold.
+func TestAssistantSpinnerHintAndStopwatch(t *testing.T) {
+	t.Parallel()
+
+	sty := styles.CharmtonePantera()
+	item := NewAssistantMessageItem(&sty, &message.Message{ID: "m-work", Role: message.Assistant}).(*AssistantMessageItem)
+
+	// Fresh loader: hint present, no stopwatch yet.
+	item.spinStartedAt = time.Now()
+	require.Equal(t, "Working", item.withElapsed("Working"))
+
+	// Past the threshold: hint grows a stopwatch.
+	item.spinStartedAt = time.Now().Add(-12 * time.Second)
+	require.Regexp(t, `^Working · \d+s$`, item.withElapsed("Working"))
+}
+
+func TestFormatElapsed(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "12s", formatElapsed(12*time.Second))
+	require.Equal(t, "59s", formatElapsed(59*time.Second))
+	require.Equal(t, "1m05s", formatElapsed(65*time.Second))
+	require.Equal(t, "2m30s", formatElapsed(150*time.Second))
 }
 
 // TestAssistantMessageItemExpandableEmptyThinkingNoOp guards the B2

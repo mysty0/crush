@@ -52,6 +52,16 @@ type Service interface {
 	// copy keeps the original ordering; unlike Create it does not append a
 	// synthetic Finish part.
 	Copy(ctx context.Context, sessionID string, src Message) (Message, error)
+	// CreateToolResultIfAbsent atomically checks whether a tool result
+	// for result.ToolCallID already exists anywhere in sessionID and,
+	// if not, creates a Tool message containing it. The check and the
+	// insert happen inside a single SQL transaction (SQLite is
+	// configured to take the write lock immediately on BEGIN), so two
+	// callers racing to reconcile the same orphaned tool call --
+	// including from separate OS processes sharing the same database
+	// file -- cannot both write a result for the same tool_call_id.
+	// Returns created=false with no error if a result already existed.
+	CreateToolResultIfAbsent(ctx context.Context, sessionID string, result ToolResult) (msg Message, created bool, err error)
 	Update(ctx context.Context, message Message) error
 	Get(ctx context.Context, id string) (Message, error)
 	List(ctx context.Context, sessionID string) ([]Message, error)
@@ -109,6 +119,7 @@ type pendingState struct {
 type service struct {
 	*pubsub.Broker[Message]
 	q        db.Querier
+	db       *sql.DB
 	debounce time.Duration
 
 	mu      sync.Mutex
@@ -127,10 +138,11 @@ func WithDebounce(d time.Duration) ServiceOption {
 	}
 }
 
-func NewService(q db.Querier, opts ...ServiceOption) Service {
+func NewService(q db.Querier, conn *sql.DB, opts ...ServiceOption) Service {
 	s := &service{
 		Broker:   pubsub.NewBroker[Message](),
 		q:        q,
+		db:       conn,
 		debounce: defaultUpdateDebounce,
 		pending:  make(map[string]*pendingState),
 	}
@@ -199,6 +211,62 @@ func (s *service) Create(ctx context.Context, sessionID string, params CreateMes
 	// concurrent modifications to the Parts slice.
 	s.Publish(pubsub.CreatedEvent, message.Clone())
 	return message, nil
+}
+
+// CreateToolResultIfAbsent implements [Service.CreateToolResultIfAbsent].
+func (s *service) CreateToolResultIfAbsent(ctx context.Context, sessionID string, result ToolResult) (Message, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Message{}, false, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	qtx := db.New(tx)
+
+	dbMsgs, err := qtx.ListMessagesBySession(ctx, sessionID)
+	if err != nil {
+		return Message{}, false, err
+	}
+	for _, dbMsg := range dbMsgs {
+		if dbMsg.Role != string(Tool) {
+			continue
+		}
+		existing, err := s.fromDBItem(dbMsg)
+		if err != nil {
+			return Message{}, false, err
+		}
+		for _, tr := range existing.ToolResults() {
+			if tr.ToolCallID == result.ToolCallID {
+				return Message{}, false, nil
+			}
+		}
+	}
+
+	partsJSON, err := marshalParts([]ContentPart{result, Finish{Reason: "stop"}})
+	if err != nil {
+		return Message{}, false, err
+	}
+	dbMessage, err := qtx.CreateMessage(ctx, db.CreateMessageParams{
+		ID:        uuid.New().String(),
+		SessionID: sessionID,
+		Role:      string(Tool),
+		Parts:     string(partsJSON),
+	})
+	if err != nil {
+		return Message{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Message{}, false, fmt.Errorf("committing transaction: %w", err)
+	}
+
+	msg, err := s.fromDBItem(dbMessage)
+	if err != nil {
+		return Message{}, false, err
+	}
+	// Clone the message before publishing to avoid race conditions with
+	// concurrent modifications to the Parts slice.
+	s.Publish(pubsub.CreatedEvent, msg.Clone())
+	return msg, true, nil
 }
 
 // Copy inserts src into sessionID preserving its parts and timestamps.

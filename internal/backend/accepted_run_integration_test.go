@@ -50,7 +50,7 @@ func newRealCoordinator(t *testing.T) (*gatedCoordinator, session.Service, messa
 
 	q := db.New(conn)
 	sessions := session.NewService(q, conn)
-	messages := message.NewService(q)
+	messages := message.NewService(q, conn)
 
 	coord, err := agenttest.NewCoordinator(t.Context(), t.TempDir(), sessions, messages)
 	require.NoError(t, err)

@@ -57,6 +57,13 @@ const (
 	largeContextWindowThreshold = 200_000
 	largeContextWindowBuffer    = 20_000
 	smallContextWindowRatio     = 0.2
+
+	// providerMaxRetries caps how many times a single provider request
+	// (e.g. rate limited or hit a transient 5xx) is retried with
+	// exponential backoff before the turn fails. fantasy respects
+	// Retry-After/Retry-After-Ms response headers when present, so a
+	// long rate-limit window is honored rather than hammered.
+	providerMaxRetries = 5
 )
 
 var userAgent = cmp.Or(
@@ -179,9 +186,11 @@ type sessionAgent struct {
 	// survive summarization. May be nil.
 	activeSkillsFor func(sessionID string) string
 	// recallMemories returns a block of long-term memories relevant to the
-	// given query (the current user prompt), or "" when memory is disabled or
-	// nothing matches. Called each turn so recall is automatic. May be nil.
-	recallMemories func(ctx context.Context, query string) string
+	// given query (the current user prompt) for a session, or "" when memory
+	// is disabled, nothing matches, or every match was already injected
+	// earlier in that session. Called each turn so recall is automatic. May
+	// be nil.
+	recallMemories func(ctx context.Context, sessionID, query string) string
 	// onSummarized is invoked after a successful summarization so callers
 	// can re-establish per-session context (e.g. re-inject active skills
 	// that the summary compacted away). May be nil.
@@ -245,8 +254,9 @@ type SessionAgentOptions struct {
 	// skills so they persist across turns. May be nil.
 	ActiveSkillsFor func(sessionID string) string
 	// RecallMemories returns a block of long-term memories relevant to the
-	// current user prompt, injected automatically each turn. May be nil.
-	RecallMemories func(ctx context.Context, query string) string
+	// current user prompt for a session, injected automatically each turn.
+	// May be nil.
+	RecallMemories func(ctx context.Context, sessionID, query string) string
 	// OnSummarized is invoked after a successful summarization. May be nil.
 	OnSummarized func(sessionID string)
 }
@@ -703,6 +713,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		fantasy.WithSystemPrompt(systemPrompt),
 		fantasy.WithTools(agentTools...),
 		fantasy.WithUserAgent(userAgent),
+		fantasy.WithMaxRetries(providerMaxRetries),
 	)
 
 	sessionLock := sync.Mutex{}
@@ -820,6 +831,26 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	if call.MaxOutputTokens > 0 {
 		maxOutputTokens = &call.MaxOutputTokens
 	}
+	// retryAttempt counts provider retries for the in-flight request so the
+	// UI can show a live "retrying N/M" indicator and the final error can
+	// report how many retries were exhausted. fantasy retries each request
+	// (each step) separately but shares this one OnRetry callback, so the
+	// count is reset by clearRetryProgress whenever the request makes forward
+	// progress (streamed content or a finished step).
+	var retryAttempt int
+	clearRetryProgress := func() {
+		if retryAttempt == 0 {
+			return
+		}
+		retryAttempt = 0
+		if currentAssistant != nil {
+			PublishRetryProgress(RetryProgressEvent{
+				SessionID: call.SessionID,
+				MessageID: currentAssistant.ID,
+				Done:      true,
+			})
+		}
+	}
 	result, err = agent.Stream(genCtx, fantasy.AgentStreamCall{
 		Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
 		Files:            files,
@@ -882,7 +913,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			// message still sits after the cached prefix so per-turn variation
 			// does not churn the prompt cache.
 			if a.recallMemories != nil && call.Prompt != "" {
-				if block := a.recallMemories(callContext, call.Prompt); block != "" {
+				if block := a.recallMemories(callContext, call.SessionID, call.Prompt); block != "" {
 					prepared.Messages = append(prepared.Messages, fantasy.NewUserMessage(block))
 				}
 			}
@@ -928,6 +959,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			return callContext, prepared, err
 		},
 		OnReasoningStart: func(id string, reasoning fantasy.ReasoningContent) error {
+			clearRetryProgress()
 			currentAssistant.AppendReasoningContent(reasoning.Text)
 			return a.messages.Update(genCtx, *currentAssistant)
 		},
@@ -956,6 +988,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			return a.messages.Update(genCtx, *currentAssistant)
 		},
 		OnTextDelta: func(id string, text string) error {
+			clearRetryProgress()
 			// Strip leading newline from initial text content. This is is
 			// particularly important in non-interactive mode where leading
 			// newlines are very visible.
@@ -967,6 +1000,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			return a.messages.Update(genCtx, *currentAssistant)
 		},
 		OnToolInputStart: func(id string, toolName string) error {
+			clearRetryProgress()
 			toolCall := message.ToolCall{
 				ID:               id,
 				Name:             toolName,
@@ -980,6 +1014,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		},
 		OnRetry: func(err *fantasy.ProviderError, delay time.Duration) {
 			slog.Warn("Provider request failed, retrying", providerRetryLogFields(err, delay)...)
+			retryAttempt++
+			if currentAssistant != nil {
+				PublishRetryProgress(RetryProgressEvent{
+					SessionID:  call.SessionID,
+					MessageID:  currentAssistant.ID,
+					Attempt:    retryAttempt,
+					MaxRetries: providerMaxRetries,
+					RetryAt:    time.Now().Add(delay),
+					Reason:     retryReason(err),
+				})
+			}
 		},
 		OnToolCall: func(tc fantasy.ToolCallContent) error {
 			input, wasSanitized := sanitizeToolInput(tc.ToolName, tc.ToolCallID, tc.Input)
@@ -1015,6 +1060,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			return createMsgErr
 		},
 		OnStepFinish: func(stepResult fantasy.StepResult) error {
+			clearRetryProgress()
 			for _, w := range stepResult.Warnings {
 				slog.Warn("Provider warning", "type", w.Type, "message", w.Message)
 			}
@@ -1061,7 +1107,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					finishReason = message.FinishReasonError
 					finishMessage = "Empty response"
 					finishDetails = fmt.Sprintf("The model returned no content and reported finish reason %q. This usually means the provider dropped the response; try again.", stepResult.FinishReason)
-					slog.Warn("Model returned an empty response",
+					slog.Warn(
+						"Model returned an empty response",
 						"session_id", call.SessionID,
 						"finish_reason", stepResult.FinishReason,
 					)
@@ -1236,6 +1283,27 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			)
 		} else {
 			currentAssistant.AddFinish(message.FinishReasonError, defaultTitle, err.Error())
+		}
+		// If the request exhausted its retries, note how many were spent on
+		// the error and clear any live retry indicator now that the turn has
+		// ended. Cancellation is excluded: it aborts retries rather than
+		// exhausting them.
+		if retryAttempt > 0 && !isCancelErr {
+			if fp := currentAssistant.FinishPart(); fp != nil && fp.Reason == message.FinishReasonError {
+				suffix := fmt.Sprintf("Gave up after %d/%d retries.", retryAttempt, providerMaxRetries)
+				details := suffix
+				if fp.Details != "" {
+					details = fp.Details + "\n\n" + suffix
+				}
+				currentAssistant.AddFinish(fp.Reason, fp.Message, details)
+			}
+		}
+		if retryAttempt > 0 {
+			PublishRetryProgress(RetryProgressEvent{
+				SessionID: call.SessionID,
+				MessageID: currentAssistant.ID,
+				Done:      true,
+			})
 		}
 		// Note: we use the cleanup context here because the genCtx has been
 		// cancelled.
@@ -1421,6 +1489,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		largeModel.Model,
 		fantasy.WithSystemPrompt(string(summaryPrompt)),
 		fantasy.WithUserAgent(userAgent),
+		fantasy.WithMaxRetries(providerMaxRetries),
 	)
 	summaryMessage, err := a.messages.Create(ctx, sessionID, message.CreateMessageParams{
 		Role:             message.Assistant,
@@ -1586,6 +1655,7 @@ If not, please feel free to ignore. Again do not mention this message to the use
 	// without a result).
 	knownToolCallIDs := make(map[string]struct{})
 	knownToolResultIDs := make(map[string]struct{})
+	seenToolResultIDs := make(map[string]struct{})
 	for _, m := range msgs {
 		switch m.Role {
 		case message.Assistant:
@@ -1608,7 +1678,24 @@ If not, please feel free to ignore. Again do not mention this message to the use
 			continue
 		}
 		if m.Role == message.Tool {
-			if msg, ok := filterOrphanedToolResults(m, knownToolCallIDs); ok {
+			msg, ok := filterOrphanedToolResults(m, knownToolCallIDs, seenToolResultIDs)
+			if !ok {
+				continue
+			}
+			// Anthropic (and most providers) require every tool_result
+			// answering a batch of parallel tool_use calls to arrive in a
+			// single message immediately following the assistant turn that
+			// issued them. Each tool result is persisted as its own DB
+			// message as results stream in (see OnToolResult), so when a
+			// step makes more than one tool call, replaying them verbatim
+			// would split their results across consecutive tool messages --
+			// only the first tool_use id would have an "immediately after"
+			// result, and the API rejects the rest as orphaned. Coalesce
+			// consecutive tool-role entries in history into one message to
+			// match what the API expects.
+			if n := len(history); n > 0 && history[n-1].Role == fantasy.MessageRoleTool {
+				history[n-1].Content = append(history[n-1].Content, msg.Content...)
+			} else {
 				history = append(history, msg)
 			}
 			continue
@@ -1660,11 +1747,17 @@ func filterFileParts(parts []fantasy.MessagePart) []fantasy.MessagePart {
 }
 
 // filterOrphanedToolResults converts a tool message to a fantasy.Message,
-// dropping any tool result parts whose tool_call_id has no matching tool call
-// in the known set. An orphaned result causes API validation to fail on every
-// subsequent turn, permanently locking the session. Returns the filtered
-// message and true if at least one valid part remains.
-func filterOrphanedToolResults(m message.Message, knownToolCallIDs map[string]struct{}) (fantasy.Message, bool) {
+// dropping any tool result parts whose tool_call_id has no matching tool
+// call in the known set, and any that duplicate a tool_call_id already
+// seen earlier in the history. Anthropic's API rejects a request
+// containing either case: an orphaned result causes validation to fail
+// on every subsequent turn (permanently locking the session), and a
+// duplicate causes the same failure -- both of which can happen if a
+// concurrent process's stuck-session reconciliation raced a live run
+// and wrote its own synthetic result for the same tool_call_id.
+// Returns the filtered message and true if at least one valid part
+// remains.
+func filterOrphanedToolResults(m message.Message, knownToolCallIDs, seenToolResultIDs map[string]struct{}) (fantasy.Message, bool) {
 	aiMsgs := m.ToAIMessage()
 	if len(aiMsgs) == 0 {
 		return fantasy.Message{}, false
@@ -1676,14 +1769,22 @@ func filterOrphanedToolResults(m message.Message, knownToolCallIDs map[string]st
 			validParts = append(validParts, part)
 			continue
 		}
-		if _, known := knownToolCallIDs[tr.ToolCallID]; known {
-			validParts = append(validParts, part)
-		} else {
+		if _, known := knownToolCallIDs[tr.ToolCallID]; !known {
 			slog.Warn(
 				"Dropping orphaned tool result with no matching tool call",
 				"tool_call_id", tr.ToolCallID,
 			)
+			continue
 		}
+		if _, seen := seenToolResultIDs[tr.ToolCallID]; seen {
+			slog.Warn(
+				"Dropping duplicate tool result for a tool call that already has one",
+				"tool_call_id", tr.ToolCallID,
+			)
+			continue
+		}
+		seenToolResultIDs[tr.ToolCallID] = struct{}{}
+		validParts = append(validParts, part)
 	}
 	if len(validParts) == 0 {
 		return fantasy.Message{}, false
@@ -1794,6 +1895,7 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 			fantasy.WithSystemPrompt(string(p)+"\n /no_think"),
 			fantasy.WithMaxOutputTokens(tok),
 			fantasy.WithUserAgent(userAgent),
+			fantasy.WithMaxRetries(providerMaxRetries),
 		)
 	}
 
@@ -2322,6 +2424,25 @@ func providerRetryLogFields(err *fantasy.ProviderError, delay time.Duration) []a
 		fields = append(fields, "message", err.Message)
 	}
 	return fields
+}
+
+// retryReason returns a short, human-readable cause for a provider retry,
+// suitable for a compact UI indicator (e.g. "Rate limited"). It falls back to
+// the provider error title or a generic label when no better detail exists.
+func retryReason(err *fantasy.ProviderError) string {
+	if err == nil {
+		return "Connection issue"
+	}
+	switch {
+	case err.StatusCode == http.StatusTooManyRequests:
+		return "Rate limited"
+	case err.StatusCode >= 500:
+		return "Server error"
+	case err.Title != "":
+		return stringext.Capitalize(err.Title)
+	default:
+		return "Provider error"
+	}
 }
 
 // sanitizeToolInput validates tool call JSON from the provider.

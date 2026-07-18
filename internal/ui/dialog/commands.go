@@ -2,6 +2,7 @@ package dialog
 
 import (
 	"os"
+	"runtime"
 	"strings"
 
 	"charm.land/bubbles/v2/help"
@@ -548,6 +549,13 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		transparentLabel = "Enable Background Color"
 	}
 	commands = append(commands, NewCommandItem(c.com.Styles, "toggle_transparent", transparentLabel, "", ActionToggleTransparentBackground{}))
+
+	// Restart (relaunch the current executable in place, resuming this
+	// session) relies on syscall.Exec, which has no Windows equivalent
+	// yet -- only offer it where it actually works.
+	if runtime.GOOS != "windows" {
+		commands = append(commands, NewCommandItem(c.com.Styles, "restart", "Restart Crush (reload binary)", "", ActionRestart{}))
+	}
 
 	commands = append(
 		commands,

@@ -8,6 +8,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
@@ -64,6 +65,8 @@ func (c *errorCoordinator) CancelSchedule(string)                         {}
 func (c *errorCoordinator) ReconcileStuckSession(context.Context, string) (int, error) {
 	return 0, nil
 }
+
+func (c *errorCoordinator) BackgroundNow(string) map[agenttools.BackgroundKind]int { return nil }
 
 // insertRunCompleteWorkspace installs a workspace backed by a real
 // app.App (so the runCompletions broker exists) with the given

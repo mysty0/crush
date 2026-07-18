@@ -22,7 +22,7 @@ func TestRunShellCommand_SkipsPersistenceForMissingSession(t *testing.T) {
 
 	q := db.New(conn)
 	sessions := session.NewService(q, conn)
-	messages := message.NewService(q)
+	messages := message.NewService(q, conn)
 
 	b, _ := newTestBackend(t)
 	ws := &Workspace{

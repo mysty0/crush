@@ -108,12 +108,27 @@ crush --continue
 	RunE: func(cmd *cobra.Command, args []string) error {
 		sessionID, _ := cmd.Flags().GetString("session")
 		continueLast, _ := cmd.Flags().GetBool("continue")
+		debugFlag, _ := cmd.Flags().GetBool("debug")
+		dataDir, _ := cmd.Flags().GetString("data-dir")
+		yolo, _ := cmd.Flags().GetBool("yolo")
 
 		ws, cleanup, err := setupWorkspaceWithProgressBar(cmd)
 		if err != nil {
 			return err
 		}
-		defer cleanup()
+		// cleanupOnce guards against running cleanup twice: the restart
+		// path below calls it explicitly (syscall.Exec never returns on
+		// success, so a deferred call would simply never fire and any
+		// buffered writes app.Shutdown flushes would be lost), while the
+		// deferred call here still covers every other return path.
+		var cleanedUp bool
+		cleanupOnce := func() {
+			if !cleanedUp {
+				cleanedUp = true
+				cleanup()
+			}
+		}
+		defer cleanupOnce()
 
 		if sessionID != "" {
 			sess, err := resolveWorkspaceSessionID(cmd.Context(), ws, sessionID)
@@ -142,6 +157,19 @@ crush --continue
 			event.Error(err)
 			slog.Error("TUI run error", "error", err)
 			return errors.New("Crush crashed. If metrics are enabled, we were notified about it. If you'd like to report it, please copy the stacktrace above and open an issue at https://github.com/charmbracelet/crush/issues/new?template=bug.yml") //nolint:staticcheck
+		}
+
+		if restartSessionID, ok := model.RestartRequested(); ok {
+			cleanupOnce()
+			if err := restartProcess(restartArgs{
+				Debug:     debugFlag,
+				Host:      clientHost,
+				DataDir:   dataDir,
+				Yolo:      yolo,
+				SessionID: restartSessionID,
+			}); err != nil {
+				return fmt.Errorf("failed to restart: %w", err)
+			}
 		}
 		return nil
 	},

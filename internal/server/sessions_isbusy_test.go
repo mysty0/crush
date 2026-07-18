@@ -10,6 +10,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/message"
@@ -71,6 +72,8 @@ func (s *stubCoordinator) CancelSchedule(string)                         {}
 func (s *stubCoordinator) ReconcileStuckSession(context.Context, string) (int, error) {
 	return 0, nil
 }
+
+func (s *stubCoordinator) BackgroundNow(string) map[agenttools.BackgroundKind]int { return nil }
 
 // stubSessions is a minimal session.Service that returns a fixed list
 // (and supports Get by ID). All other methods return zero values; the

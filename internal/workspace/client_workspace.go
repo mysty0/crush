@@ -288,6 +288,13 @@ func (w *ClientWorkspace) AgentCancelSubAgent(subAgentSessionID string) {
 	// errSubAgentChatClientUnsupported.
 }
 
+// Ctrl+B backgrounding is an in-process (AppWorkspace) feature; the
+// client/server protocol does not yet surface it, so it is a no-op in
+// client mode (honestly reported as "nothing to background").
+func (w *ClientWorkspace) AgentBackgroundNow(sessionID string) map[agenttools.BackgroundKind]int {
+	return nil
+}
+
 // Background workflows are an in-process (AppWorkspace) feature; the
 // client/server protocol does not yet surface the workflow registry, so
 // these are no-ops in client mode.

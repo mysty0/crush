@@ -55,8 +55,12 @@ type (
 	ActionExternalEditor    struct{}
 	ActionToggleYoloMode    struct{}
 	ActionTogglePlanMode    struct{}
-	ActionRegenerateTitle   struct{}
-	ActionRenameSession     struct {
+	// ActionRestart is a message to relaunch the current executable in
+	// place (Unix exec), resuming the same session. Used to pick up a
+	// rebuilt/updated binary on disk without losing session state.
+	ActionRestart         struct{}
+	ActionRegenerateTitle struct{}
+	ActionRenameSession   struct {
 		// Title is the new title. When empty the UI opens an input prompt to
 		// collect it; once entered, the action is re-dispatched with Title set.
 		Title string

@@ -46,7 +46,7 @@ func newTestService(t *testing.T, opts ...ServiceOption) (Service, string) {
 	sess, err := sessions.Create(t.Context(), "test")
 	require.NoError(t, err)
 
-	svc := NewService(q, opts...)
+	svc := NewService(q, conn, opts...)
 	return svc, sess.ID
 }
 
@@ -500,7 +500,7 @@ func TestFlush_WaitsForInFlightWrite(t *testing.T) {
 		started: make(chan struct{}),
 	}
 	// Short debounce so the timer fires quickly.
-	svc := NewService(slow, WithDebounce(10*time.Millisecond))
+	svc := NewService(slow, conn, WithDebounce(10*time.Millisecond))
 
 	msg, err := svc.Create(t.Context(), sess.ID, CreateMessageParams{Role: Assistant})
 	require.NoError(t, err)
@@ -563,7 +563,7 @@ func TestFlushAll_WaitsForInFlightWrite(t *testing.T) {
 		release: make(chan struct{}),
 		started: make(chan struct{}),
 	}
-	svc := NewService(slow, WithDebounce(10*time.Millisecond))
+	svc := NewService(slow, conn, WithDebounce(10*time.Millisecond))
 
 	msg, err := svc.Create(t.Context(), sess.ID, CreateMessageParams{Role: Assistant})
 	require.NoError(t, err)
@@ -654,7 +654,7 @@ func TestUpdate_StructuralFlushUsesMustDeliver(t *testing.T) {
 			// Replace the default broker with a tiny buffer + short
 			// must-deliver timeout so we can fully saturate from a
 			// single sender and observe drops without long waits.
-			svc := NewService(q, WithDebounce(time.Hour))
+			svc := NewService(q, conn, WithDebounce(time.Hour))
 			impl := svc.(*service)
 			impl.Shutdown()
 			impl.Broker = pubsub.NewBrokerWithOptions[Message](1)
@@ -692,4 +692,96 @@ func TestUpdate_StructuralFlushUsesMustDeliver(t *testing.T) {
 				"structural terminal event must not be silently dropped via lossy Publish")
 		})
 	}
+}
+
+func TestCreateToolResultIfAbsent_CreatesOnFirstCall(t *testing.T) {
+	t.Parallel()
+	svc, sessID := newTestService(t)
+
+	msg, created, err := svc.CreateToolResultIfAbsent(t.Context(), sessID, ToolResult{
+		ToolCallID: "call_1",
+		Name:       "bash",
+		Content:    "boom",
+		IsError:    true,
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+	require.Equal(t, Tool, msg.Role)
+	results := msg.ToolResults()
+	require.Len(t, results, 1)
+	require.Equal(t, "call_1", results[0].ToolCallID)
+}
+
+func TestCreateToolResultIfAbsent_SkipsWhenAlreadyPresent(t *testing.T) {
+	t.Parallel()
+	svc, sessID := newTestService(t)
+
+	_, created, err := svc.CreateToolResultIfAbsent(t.Context(), sessID, ToolResult{
+		ToolCallID: "call_1",
+		Name:       "bash",
+		Content:    "first writer",
+		IsError:    true,
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+
+	_, created, err = svc.CreateToolResultIfAbsent(t.Context(), sessID, ToolResult{
+		ToolCallID: "call_1",
+		Name:       "bash",
+		Content:    "second writer",
+		IsError:    true,
+	})
+	require.NoError(t, err)
+	require.False(t, created, "a second writer for the same tool_call_id must not create a duplicate")
+
+	msgs, err := svc.List(t.Context(), sessID)
+	require.NoError(t, err)
+	var toolMsgs int
+	for _, m := range msgs {
+		if m.Role == Tool {
+			toolMsgs++
+		}
+	}
+	require.Equal(t, 1, toolMsgs, "only one tool_result message must exist for the tool_call_id")
+}
+
+// TestCreateToolResultIfAbsent_ConcurrentRace simulates two callers (e.g.
+// a live run's OnToolResult callback and a concurrent stuck-session
+// reconcile pass) racing to write a result for the same tool_call_id.
+// Exactly one must win; the API-facing session state must never end up
+// with two tool_result blocks sharing an ID.
+func TestCreateToolResultIfAbsent_ConcurrentRace(t *testing.T) {
+	t.Parallel()
+	svc, sessID := newTestService(t)
+
+	const n = 8
+	var wg sync.WaitGroup
+	var createdCount atomic.Int32
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, created, err := svc.CreateToolResultIfAbsent(t.Context(), sessID, ToolResult{
+				ToolCallID: "call_1",
+				Name:       "bash",
+				Content:    "racer",
+				IsError:    true,
+			})
+			require.NoError(t, err)
+			if created {
+				createdCount.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	require.Equal(t, int32(1), createdCount.Load(), "exactly one racer must win the write")
+
+	msgs, err := svc.List(t.Context(), sessID)
+	require.NoError(t, err)
+	var toolResultCount int
+	for _, m := range msgs {
+		toolResultCount += len(m.ToolResults())
+	}
+	require.Equal(t, 1, toolResultCount, "no duplicate tool_result blocks for the same tool_call_id")
 }
