@@ -264,6 +264,13 @@ func (w *AppWorkspace) AgentRunningWorkflows() []agent.WorkflowStatus {
 	return w.app.AgentCoordinator.RunningWorkflows()
 }
 
+func (w *AppWorkspace) AgentTasks(parentSessionID string) []agent.TaskStatus {
+	if w.app.AgentCoordinator == nil {
+		return nil
+	}
+	return w.app.AgentCoordinator.Tasks(parentSessionID)
+}
+
 func (w *AppWorkspace) AgentWorkflowStatus(workflowSessionID string) (agent.WorkflowStatus, bool) {
 	if w.app.AgentCoordinator == nil {
 		return agent.WorkflowStatus{}, false

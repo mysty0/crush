@@ -140,6 +140,10 @@ type Workspace interface {
 	// AgentCancelSchedule stops a scheduled task by its task ID. It is
 	// a no-op if the task is unknown or already stopped.
 	AgentCancelSchedule(taskID string)
+	// AgentTasks returns the unified list of background tasks
+	// (sub-agents, workflows, scheduled tasks) owned by
+	// parentSessionID, for the UI's task picker.
+	AgentTasks(parentSessionID string) []agent.TaskStatus
 	// AgentReconcileStuckSession scans a session and its descendant
 	// sub-agent/workflow sessions for tool calls left unfinished by an
 	// interrupted run (e.g. the app was closed or crashed mid-turn)

@@ -148,6 +148,10 @@ type Coordinator interface {
 	// CancelSchedule stops a scheduled task by its task ID. It is a
 	// no-op if the task is unknown or already stopped.
 	CancelSchedule(taskID string)
+	// Tasks returns the unified list of background tasks (sub-agents,
+	// workflows, scheduled tasks) owned by parentSessionID, for the UI's
+	// task picker. See TaskStatus.
+	Tasks(parentSessionID string) []TaskStatus
 	// ReconcileStuckSession scans sessionID and every descendant
 	// session (sub-agent and workflow sessions reachable through the
 	// session tree) for tool calls left unfinished by a run that

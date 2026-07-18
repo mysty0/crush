@@ -400,43 +400,78 @@ type agentListEntry struct {
 	// (canceled, expired, or reached max_runs), so selecting it
 	// doesn't attempt a redundant cancel.
 	Stopped bool
-	Kind    agentListEntryKind
+	// Prompt is the sub-agent's full (untruncated) task prompt, used for
+	// the banner when its full view is opened. Empty for other kinds.
+	Prompt string
+	Kind   agentListEntryKind
 }
 
 // agentListEntries returns the picker list's entries: "Main" first,
-// then one entry per running sub-agent, one per background workflow,
-// and one per scheduled task (ScheduleCron/ScheduleWakeup).
+// then one row per background task (sub-agent, workflow, scheduled
+// task) owned by the current session, sourced from the unified task
+// registry (agent.TaskStatus) rather than in-chat tool items -- so a
+// backgrounded sub-agent whose tool call already returned still shows
+// and stays selectable until its session finishes.
 func (m *UI) agentListEntries() []agentListEntry {
 	entries := make([]agentListEntry, 0, 1)
 	entries = append(entries, agentListEntry{Label: "Main"})
-	for _, sa := range m.runningSubAgents() {
-		label := ansi.Truncate(sa.Prompt, maxAgentListPromptLength, "…")
-		entries = append(entries, agentListEntry{
-			Label:      label,
-			SessionID:  sa.SessionID,
-			ToolCallID: sa.ToolCallID,
-			Kind:       agentListKindSubAgent,
-		})
-	}
-	for _, wf := range m.runningWorkflows() {
-		label := ansi.Truncate(workflowListLabel(wf), maxAgentListPromptLength, "…")
-		entries = append(entries, agentListEntry{
-			Label:      label,
-			SessionID:  wf.SessionID,
-			ToolCallID: wf.ToolCallID,
-			Kind:       agentListKindWorkflow,
-		})
-	}
-	for _, s := range m.runningSchedules() {
-		label := ansi.Truncate(scheduleListLabel(s), maxAgentListPromptLength, "…")
-		entries = append(entries, agentListEntry{
-			Label:   label,
-			TaskID:  s.ID,
-			Stopped: s.State != agent.ScheduleActive,
-			Kind:    agentListKindSchedule,
-		})
+	for _, t := range m.backgroundTasks() {
+		// Sub-agents are shown running-only (their result lands in chat
+		// on completion); workflows and schedules keep their terminal
+		// row so the ✓/✗/⊘ marker stays visible briefly.
+		if isSubAgentKind(t.Ref.Kind) && t.State != agent.TaskRunning {
+			continue
+		}
+		entries = append(entries, taskListEntry(t))
 	}
 	return entries
+}
+
+// isSubAgentKind reports whether a task kind is an agent-tool sub-agent
+// (the "agent" or "agentic_fetch" tools), both opened as a sub-agent view.
+func isSubAgentKind(k agent.TaskKind) bool {
+	return k == agent.TaskKindSubAgent || k == agent.TaskKindAgenticFetch
+}
+
+// backgroundTasks returns the unified background-task list for the
+// current session, guarding against a nil Workspace (some tests
+// construct a bare UI) and an empty session.
+func (m *UI) backgroundTasks() []agent.TaskStatus {
+	if m.com == nil || m.com.Workspace == nil || m.session.ID == "" {
+		return nil
+	}
+	return m.com.Workspace.AgentTasks(m.session.ID)
+}
+
+// taskListEntry maps a unified TaskStatus to a picker row, reusing the
+// per-kind label formatters (which read the concrete Detail).
+func taskListEntry(t agent.TaskStatus) agentListEntry {
+	switch {
+	case t.Ref.Kind == agent.TaskKindWorkflow:
+		wf, _ := t.Detail.(agent.WorkflowStatus)
+		return agentListEntry{
+			Label:      ansi.Truncate(workflowListLabel(wf), maxAgentListPromptLength, "…"),
+			SessionID:  t.Ref.ID,
+			ToolCallID: t.ToolCallID,
+			Kind:       agentListKindWorkflow,
+		}
+	case t.Ref.Kind == agent.TaskKindSchedule:
+		s, _ := t.Detail.(agent.ScheduledTaskStatus)
+		return agentListEntry{
+			Label:   ansi.Truncate(scheduleListLabel(s), maxAgentListPromptLength, "…"),
+			TaskID:  t.Ref.ID,
+			Stopped: t.State == agent.TaskStopped,
+			Kind:    agentListKindSchedule,
+		}
+	default: // subagent / agentic_fetch
+		return agentListEntry{
+			Label:      ansi.Truncate(t.Label, maxAgentListPromptLength, "…"),
+			SessionID:  t.Ref.ID,
+			ToolCallID: t.ToolCallID,
+			Prompt:     t.Label,
+			Kind:       agentListKindSubAgent,
+		}
+	}
 }
 
 // workflowListLabel builds the picker-row label for a background
@@ -485,7 +520,7 @@ func (m *UI) agentListAreaHeight() int {
 	if !m.hasSession() {
 		return 0
 	}
-	if len(m.runningSubAgents()) == 0 && len(m.runningWorkflows()) == 0 && len(m.runningSchedules()) == 0 {
+	if len(m.backgroundTasks()) == 0 {
 		return 0
 	}
 	return len(m.agentListEntries()) + 1
@@ -606,15 +641,7 @@ func (m *UI) confirmAgentListSelection() tea.Cmd {
 		// Already viewing this sub-agent.
 		return nil
 	}
-	// Find the matching sub-agent's prompt for the banner.
-	prompt := ""
-	for _, sa := range m.runningSubAgents() {
-		if sa.SessionID == entry.SessionID {
-			prompt = sa.Prompt
-			break
-		}
-	}
-	return m.enterSubAgentView(entry.SessionID, entry.ToolCallID, prompt)
+	return m.enterSubAgentView(entry.SessionID, entry.ToolCallID, entry.Prompt)
 }
 
 // renderAgentList renders the agent picker list.
