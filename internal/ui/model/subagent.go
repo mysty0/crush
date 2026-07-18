@@ -384,6 +384,7 @@ const (
 	agentListKindSubAgent agentListEntryKind = iota
 	agentListKindWorkflow
 	agentListKindSchedule
+	agentListKindBash
 )
 
 // agentListEntry is one row in the agent picker list.
@@ -463,6 +464,13 @@ func taskListEntry(t agent.TaskStatus) agentListEntry {
 			Stopped: t.State == agent.TaskStopped,
 			Kind:    agentListKindSchedule,
 		}
+	case t.Ref.Kind == agent.TaskKindBash:
+		return agentListEntry{
+			Label:   ansi.Truncate(bashListLabel(t), maxAgentListPromptLength, "…"),
+			TaskID:  t.Ref.ID,
+			Stopped: t.State != agent.TaskRunning,
+			Kind:    agentListKindBash,
+		}
 	default: // subagent / agentic_fetch
 		return agentListEntry{
 			Label:      ansi.Truncate(t.Label, maxAgentListPromptLength, "…"),
@@ -491,6 +499,19 @@ func workflowListLabel(wf agent.WorkflowStatus) string {
 		label += " · " + wf.Args
 	}
 	return label
+}
+
+// bashListLabel builds the picker-row label for a background bash job,
+// e.g. "◇ bash · npm run build" with a state marker.
+func bashListLabel(t agent.TaskStatus) string {
+	marker := "◇"
+	switch t.State {
+	case agent.TaskDone:
+		marker = "✓"
+	case agent.TaskFailed:
+		marker = "✗"
+	}
+	return marker + " bash · " + t.Label
 }
 
 // scheduleListLabel builds the picker-row label for a scheduled task,
@@ -626,6 +647,21 @@ func (m *UI) confirmAgentListSelection() tea.Cmd {
 			return util.ReportInfo(fmt.Sprintf("%s is already stopped.", entry.TaskID))
 		}
 		return m.openScheduleCancelDialog(entry.TaskID)
+	}
+	if entry.Kind == agentListKindBash {
+		// Bash jobs have no session; open the tail-output view (2b).
+		// Until that lands, surface a concise status so the row is not
+		// a dead end.
+		stdout, stderr, done, ok := m.com.Workspace.AgentBackgroundJobOutput(entry.TaskID)
+		if !ok {
+			return util.ReportInfo(fmt.Sprintf("Background job %s is no longer available.", entry.TaskID))
+		}
+		state := "running"
+		if done {
+			state = "finished"
+		}
+		n := len(stdout) + len(stderr)
+		return util.ReportInfo(fmt.Sprintf("Background job %s: %s (%d bytes of output).", entry.TaskID, state, n))
 	}
 	if entry.SessionID == "" {
 		// "Main" selected.

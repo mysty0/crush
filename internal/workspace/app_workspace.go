@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -265,10 +266,58 @@ func (w *AppWorkspace) AgentRunningWorkflows() []agent.WorkflowStatus {
 }
 
 func (w *AppWorkspace) AgentTasks(parentSessionID string) []agent.TaskStatus {
-	if w.app.AgentCoordinator == nil {
-		return nil
+	var tasks []agent.TaskStatus
+	if w.app.AgentCoordinator != nil {
+		tasks = w.app.AgentCoordinator.Tasks(parentSessionID)
 	}
-	return w.app.AgentCoordinator.Tasks(parentSessionID)
+	// Background bash jobs live in the shell manager (not the agent
+	// coordinator), so the workspace -- which can see both -- is where
+	// they join the unified task list. Filtered to this session.
+	for _, j := range shell.GetBackgroundShellManager().Statuses() {
+		if j.SessionID != parentSessionID {
+			continue
+		}
+		tasks = append(tasks, bashJobTaskStatus(j))
+	}
+	slices.SortFunc(tasks, func(a, b agent.TaskStatus) int {
+		return a.StartedAt.Compare(b.StartedAt)
+	})
+	return tasks
+}
+
+// bashJobTaskStatus projects a background bash job into the unified
+// task projection.
+func bashJobTaskStatus(j shell.BackgroundJobStatus) agent.TaskStatus {
+	label := j.Description
+	if label == "" {
+		label = j.Command
+	}
+	state := agent.TaskRunning
+	if j.Done {
+		state = agent.TaskDone
+		if j.Err != nil {
+			state = agent.TaskFailed
+		}
+	}
+	return agent.TaskStatus{
+		Ref:          agent.TaskRef{Kind: agent.TaskKindBash, ID: j.ID},
+		OwnerSession: j.SessionID,
+		Label:        label,
+		State:        state,
+		StartedAt:    j.StartedAt,
+		Detail:       j,
+	}
+}
+
+// AgentBackgroundJobOutput returns the current stdout/stderr and
+// done-state of a background bash job, for the task-list output view.
+func (w *AppWorkspace) AgentBackgroundJobOutput(jobID string) (stdout, stderr string, done bool, ok bool) {
+	bs, found := shell.GetBackgroundShellManager().Get(jobID)
+	if !found {
+		return "", "", false, false
+	}
+	out, errOut, isDone, _ := bs.GetOutput()
+	return out, errOut, isDone, true
 }
 
 func (w *AppWorkspace) AgentWorkflowStatus(workflowSessionID string) (agent.WorkflowStatus, bool) {

@@ -309,6 +309,10 @@ func (w *ClientWorkspace) AgentRunningSchedules() []agent.ScheduledTaskStatus { 
 func (w *ClientWorkspace) AgentCancelSchedule(string)                         {}
 func (w *ClientWorkspace) AgentTasks(string) []agent.TaskStatus               { return nil }
 
+func (w *ClientWorkspace) AgentBackgroundJobOutput(string) (string, string, bool, bool) {
+	return "", "", false, false
+}
+
 // errRewindClientUnsupported is returned by the client/server workspace
 // because rewind is not yet plumbed through the HTTP protocol. Rewind is
 // available in the default in-process (AppWorkspace) mode.

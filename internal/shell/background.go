@@ -55,6 +55,7 @@ func (sb *syncBuffer) String() string {
 // BackgroundShell represents a shell running in the background.
 type BackgroundShell struct {
 	ID          string
+	SessionID   string
 	Command     string
 	Description string
 	Shell       *Shell
@@ -65,6 +66,7 @@ type BackgroundShell struct {
 	stderr      *syncBuffer
 	done        chan struct{}
 	exitErr     error
+	startedAt   time.Time
 	completedAt atomic.Int64 // Unix timestamp when job completed (0 if still running)
 }
 
@@ -95,7 +97,7 @@ func GetBackgroundShellManager() *BackgroundShellManager {
 }
 
 // Start creates and starts a new background shell with the given command.
-func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, blockFuncs []BlockFunc, onBlocked BlockedFunc, command string, description string) (*BackgroundShell, error) {
+func (m *BackgroundShellManager) Start(ctx context.Context, sessionID, workingDir string, blockFuncs []BlockFunc, onBlocked BlockedFunc, command string, description string) (*BackgroundShell, error) {
 	// Check job limit
 	if m.shells.Len() >= MaxBackgroundJobs {
 		return nil, fmt.Errorf("maximum number of background jobs (%d) reached. Please terminate or wait for some jobs to complete", MaxBackgroundJobs)
@@ -113,6 +115,8 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 
 	bgShell := &BackgroundShell{
 		ID:          id,
+		SessionID:   sessionID,
+		startedAt:   time.Now(),
 		Command:     command,
 		Description: description,
 		WorkingDir:  workingDir,
@@ -151,6 +155,37 @@ func (m *BackgroundShellManager) Remove(id string) error {
 		return fmt.Errorf("background shell not found: %s", id)
 	}
 	return nil
+}
+
+// BackgroundJobStatus is a value snapshot of one background job, for
+// callers (e.g. the UI's task list) that need to enumerate jobs without
+// touching the live *BackgroundShell.
+type BackgroundJobStatus struct {
+	ID          string
+	SessionID   string
+	Command     string
+	Description string
+	StartedAt   time.Time
+	Done        bool
+	Err         error
+}
+
+// Statuses returns a value snapshot of every tracked background job.
+func (m *BackgroundShellManager) Statuses() []BackgroundJobStatus {
+	var out []BackgroundJobStatus
+	for _, bs := range m.shells.Seq2() {
+		_, _, done, err := bs.GetOutput()
+		out = append(out, BackgroundJobStatus{
+			ID:          bs.ID,
+			SessionID:   bs.SessionID,
+			Command:     bs.Command,
+			Description: bs.Description,
+			StartedAt:   bs.startedAt,
+			Done:        done,
+			Err:         err,
+		})
+	}
+	return out
 }
 
 // Kill terminates a background shell by ID. It cancels the shell's context

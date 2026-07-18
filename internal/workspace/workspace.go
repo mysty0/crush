@@ -144,6 +144,10 @@ type Workspace interface {
 	// (sub-agents, workflows, scheduled tasks) owned by
 	// parentSessionID, for the UI's task picker.
 	AgentTasks(parentSessionID string) []agent.TaskStatus
+	// AgentBackgroundJobOutput returns the current stdout/stderr and
+	// done-state of a background bash job by ID, for the task-list
+	// output view. ok is false if no such job exists.
+	AgentBackgroundJobOutput(jobID string) (stdout, stderr string, done, ok bool)
 	// AgentReconcileStuckSession scans a session and its descendant
 	// sub-agent/workflow sessions for tool calls left unfinished by an
 	// interrupted run (e.g. the app was closed or crashed mid-turn)
