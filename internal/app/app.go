@@ -56,6 +56,16 @@ type UpdateAvailableMsg struct {
 	IsDevelopment  bool
 }
 
+// ProviderModelsFallbackMsg is sent once at startup for each
+// OAuth-subscription provider whose live model-discovery call failed
+// during config load, so the model picker's list may be missing newly
+// released models (e.g. Gemini 3.1). It exists so the fallback isn't
+// silent -- see config.Config.OAuthModelWarnings and
+// App.reportOAuthModelWarnings.
+type ProviderModelsFallbackMsg struct {
+	Warning string
+}
+
 type App struct {
 	Sessions    session.Service
 	Messages    message.Service
@@ -146,6 +156,10 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 
 	// Check for updates in the background.
 	go app.checkForUpdates(ctx)
+
+	// Surface any OAuth-subscription provider model-discovery fallback
+	// (see seedOAuthProviders/config.Load) as a one-time startup toast.
+	go app.reportOAuthModelWarnings(ctx, store.Config().OAuthModelWarnings)
 
 	go mcp.Initialize(ctx, app.Permissions, store)
 
@@ -737,6 +751,30 @@ func (app *App) Shutdown() {
 		}
 	}
 	wg.Wait()
+}
+
+// reportOAuthModelWarnings surfaces, as a startup toast, any warning
+// recorded while seeding OAuth-subscription providers (config.Load) --
+// typically a live model-discovery call failing and Crush silently
+// falling back to a smaller, static model list that may be missing
+// newly released models. warnings were already collected synchronously
+// during config load, well before the TUI subscribes to Events(), so
+// this waits briefly (mirroring checkForUpdates' natural network-call
+// delay) to avoid publishing before anything is listening.
+func (app *App) reportOAuthModelWarnings(ctx context.Context, warnings []string) {
+	if len(warnings) == 0 {
+		return
+	}
+	select {
+	case <-time.After(500 * time.Millisecond):
+	case <-ctx.Done():
+		return
+	}
+	msg := warnings[0]
+	if len(warnings) > 1 {
+		msg = strings.Join(warnings, " Also: ")
+	}
+	app.SendEvent(ProviderModelsFallbackMsg{Warning: msg})
 }
 
 // checkForUpdates checks for available updates.

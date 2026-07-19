@@ -837,6 +837,14 @@ type Config struct {
 	Hooks map[string][]HookConfig `json:"hooks,omitempty" jsonschema:"description=User-defined shell commands that fire on hook events (e.g. PreToolUse)"`
 
 	Agents map[string]Agent `json:"-"`
+
+	// OAuthModelWarnings collects human-readable warnings recorded
+	// while seeding OAuth-subscription providers (see
+	// seedOAuthProviders) whenever a live model-discovery call failed
+	// and Crush fell back to a smaller, static model list -- so the
+	// UI can surface a one-time startup toast instead of the fallback
+	// being invisible. Transient in-memory state, never persisted.
+	OAuthModelWarnings []string `json:"-"`
 }
 
 // cloneForWrite returns a copy of c that the store's typed field mutators

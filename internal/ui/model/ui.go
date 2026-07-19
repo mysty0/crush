@@ -1308,6 +1308,14 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			TTL:  ttl,
 		})
 		cmds = append(cmds, clearInfoMsgCmd(ttl))
+	case app.ProviderModelsFallbackMsg:
+		ttl := 10 * time.Second
+		m.status.SetInfoMsg(util.InfoMsg{
+			Type: util.InfoTypeWarn,
+			Msg:  msg.Warning,
+			TTL:  ttl,
+		})
+		cmds = append(cmds, clearInfoMsgCmd(ttl))
 	case util.ClearStatusMsg:
 		m.status.ClearInfoMsg()
 	case completions.CompletionItemsLoadedMsg:

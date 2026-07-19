@@ -207,32 +207,34 @@ var (
 	modelsCache   = map[string]modelsCacheEntry{}
 )
 
-// CachedModels returns Models but never fails: on error it logs at debug
-// level and returns DefaultModels. Successful results are memoized per
-// access token for a short TTL (see modelsCacheTTL) to avoid refetching
-// on every config load.
-func CachedModels(ctx context.Context, accessToken, projectID string, id Identity) []catwalk.Model {
+// CachedModels returns Models, always with a usable model list even on
+// failure (falling back to DefaultModels), but also returns the error
+// so a caller can surface a "using a limited default list" warning
+// instead of the failure being invisible. Successful results are
+// memoized per access token for a short TTL (see modelsCacheTTL) to
+// avoid refetching on every config load.
+func CachedModels(ctx context.Context, accessToken, projectID string, id Identity) ([]catwalk.Model, error) {
 	now := time.Now()
 
 	modelsCacheMu.Lock()
 	if entry, ok := modelsCache[accessToken]; ok && now.Before(entry.expires) {
 		models := entry.models
 		modelsCacheMu.Unlock()
-		return models
+		return models, nil
 	}
 	modelsCacheMu.Unlock()
 
 	models, err := Models(ctx, accessToken, projectID, id)
 	if err != nil {
-		slog.Debug("geminicli: falling back to default models", "error", err)
+		slog.Warn("Gemini CLI live model discovery failed; falling back to the default model list (may be missing newly released models)", "error", err)
 		// Models already returns DefaultModels on failure; do not cache
 		// the fallback so a later call can retry discovery.
-		return models
+		return models, err
 	}
 
 	modelsCacheMu.Lock()
 	modelsCache[accessToken] = modelsCacheEntry{models: models, expires: now.Add(modelsCacheTTL)}
 	modelsCacheMu.Unlock()
 
-	return models
+	return models, nil
 }

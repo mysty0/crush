@@ -110,14 +110,17 @@ func TestModelsErrorReturnsDefaults(t *testing.T) {
 	require.Equal(t, DefaultModels(), models)
 }
 
-// TestCachedModelsFallsBackOnFailure covers CachedModels never returning
-// an error, falling back to the static list on a transport failure.
+// TestCachedModelsFallsBackOnFailure covers CachedModels falling back to
+// the static list on a transport failure while still reporting the
+// error, so a caller can surface a "using defaults" warning instead of
+// the failure being invisible.
 func TestCachedModelsFallsBackOnFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	url := srv.URL
 	srv.Close()
 	withCodeAssistEndpoint(t, url)
 
-	models := CachedModels(context.Background(), "tok-cache", "proj-1", GeminiCLIIdentity)
+	models, err := CachedModels(context.Background(), "tok-cache", "proj-1", GeminiCLIIdentity)
+	require.Error(t, err)
 	require.Equal(t, DefaultModels(), models)
 }

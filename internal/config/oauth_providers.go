@@ -3,6 +3,7 @@ package config
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -53,8 +54,14 @@ func (c *Config) seedOAuthProviders(ctx context.Context) {
 				projectID = pc.OAuthExtra["project_id"]
 			}
 			mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			pc.Models = geminicli.CachedModels(mctx, pc.OAuthToken.AccessToken, projectID, geminicli.GeminiCLIIdentity)
+			models, err := geminicli.CachedModels(mctx, pc.OAuthToken.AccessToken, projectID, geminicli.GeminiCLIIdentity)
 			cancel()
+			pc.Models = models
+			if err != nil {
+				c.OAuthModelWarnings = append(c.OAuthModelWarnings, fmt.Sprintf(
+					"%s: using a limited default model list (live model discovery failed: %s)", pc.Name, err,
+				))
+			}
 		}
 		pc.AutoDiscoverModels = &disableDiscovery
 		c.Providers.Set(geminicli.ProviderID, pc)
@@ -74,8 +81,14 @@ func (c *Config) seedOAuthProviders(ctx context.Context) {
 				projectID = pc.OAuthExtra["project_id"]
 			}
 			mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			pc.Models = geminicli.CachedModels(mctx, pc.OAuthToken.AccessToken, projectID, antigravity.Identity)
+			models, err := geminicli.CachedModels(mctx, pc.OAuthToken.AccessToken, projectID, antigravity.Identity)
 			cancel()
+			pc.Models = models
+			if err != nil {
+				c.OAuthModelWarnings = append(c.OAuthModelWarnings, fmt.Sprintf(
+					"%s: using a limited default model list (live model discovery failed: %s)", pc.Name, err,
+				))
+			}
 		}
 		pc.AutoDiscoverModels = &disableDiscovery
 		c.Providers.Set(antigravity.ProviderID, pc)
