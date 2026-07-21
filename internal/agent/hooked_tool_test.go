@@ -99,6 +99,61 @@ func TestHookedTool_SilentDoesNotStampApproval(t *testing.T) {
 	require.False(t, granted)
 }
 
+func TestHookedTool_ForcePromptStampsForcePrompt(t *testing.T) {
+	t.Parallel()
+
+	inner := &fakeTool{name: "Edit", resp: fantasy.NewTextResponse("ok")}
+	runner := newRunner(t, `echo '{"force_prompt":true,"reason":"sensitive file"}'`)
+	tool := newHookedTool(inner, runner)
+
+	_, err := tool.Run(t.Context(), fantasy.ToolCall{ID: "call-4", Name: "Edit"})
+	require.NoError(t, err)
+	require.True(t, inner.called)
+
+	// Even under yolo mode, a force_prompt stamp must make the permission
+	// service reach the real interactive prompt instead of auto-granting,
+	// the same way TestHookedTool_SilentDoesNotStampApproval proves a
+	// missing stamp reaches the prompt: a canceled context with nothing
+	// resolving the request surfaces as an error rather than a grant.
+	svc := permission.NewPermissionService(t.TempDir(), true, nil) // yolo mode
+	ctx, cancel := context.WithCancel(inner.gotCtx)
+	cancel()
+	granted, err := svc.Request(ctx, permission.CreatePermissionRequest{
+		SessionID:  "s1",
+		ToolCallID: "call-4",
+		ToolName:   "Edit",
+		Action:     "edit",
+		Path:       t.TempDir(),
+	})
+	require.Error(t, err, "force_prompt must bypass yolo mode and reach the prompt path")
+	require.False(t, granted)
+}
+
+func TestHookedTool_ForcePromptWinsOverAllow(t *testing.T) {
+	t.Parallel()
+
+	inner := &fakeTool{name: "Edit", resp: fantasy.NewTextResponse("ok")}
+	runner := newRunner(t, `echo '{"decision":"allow","force_prompt":true,"reason":"contradictory hook"}'`)
+	tool := newHookedTool(inner, runner)
+
+	_, err := tool.Run(t.Context(), fantasy.ToolCall{ID: "call-5", Name: "Edit"})
+	require.NoError(t, err)
+	require.True(t, inner.called)
+
+	svc := permission.NewPermissionService(t.TempDir(), true, nil) // yolo mode
+	ctx, cancel := context.WithCancel(inner.gotCtx)
+	cancel()
+	granted, err := svc.Request(ctx, permission.CreatePermissionRequest{
+		SessionID:  "s1",
+		ToolCallID: "call-5",
+		ToolName:   "Edit",
+		Action:     "edit",
+		Path:       t.TempDir(),
+	})
+	require.Error(t, err, "force_prompt must take precedence even when the same hook also said allow")
+	require.False(t, granted)
+}
+
 func TestHookedTool_DenySkipsInnerTool(t *testing.T) {
 	t.Parallel()
 

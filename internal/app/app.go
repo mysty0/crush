@@ -765,6 +765,9 @@ func (app *App) reportOAuthModelWarnings(ctx context.Context, warnings []string)
 	if len(warnings) == 0 {
 		return
 	}
+	for _, w := range warnings {
+		slog.Warn("OAuth provider model seeding warning: " + w)
+	}
 	select {
 	case <-time.After(500 * time.Millisecond):
 	case <-ctx.Done():

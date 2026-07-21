@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -52,9 +53,9 @@ func (s *stubCoordinator) ClearQueue(string)                 {}
 func (s *stubCoordinator) Summarize(context.Context, string) error {
 	return nil
 }
-func (s *stubCoordinator) Model() agent.Model                            { return agent.Model{} }
-func (s *stubCoordinator) UpdateModels(context.Context) error            { return nil }
-func (s *stubCoordinator) GenerateTitle(context.Context, string, string) {}
+func (s *stubCoordinator) Model() agent.Model                                  { return agent.Model{} }
+func (s *stubCoordinator) UpdateModels(context.Context) error                  { return nil }
+func (s *stubCoordinator) GenerateTitle(context.Context, string, string) error { return nil }
 
 func (s *stubCoordinator) RegenerateTitle(context.Context, string) error { return nil }
 
@@ -74,6 +75,14 @@ func (s *stubCoordinator) ReconcileStuckSession(context.Context, string) (int, e
 }
 
 func (s *stubCoordinator) BackgroundNow(string) map[agenttools.BackgroundKind]int { return nil }
+
+func (s *stubCoordinator) Tasks(string) []agent.TaskStatus { return nil }
+
+func (s *stubCoordinator) SubscribeTasks(context.Context) <-chan pubsub.Event[agent.TaskStatusEvent] {
+	ch := make(chan pubsub.Event[agent.TaskStatusEvent])
+	close(ch)
+	return ch
+}
 
 // stubSessions is a minimal session.Service that returns a fixed list
 // (and supports Get by ID). All other methods return zero values; the

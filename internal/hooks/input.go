@@ -97,6 +97,7 @@ func parseStdout(stdout string) HookResult {
 		Version      int             `json:"version"`
 		Decision     string          `json:"decision"`
 		Halt         bool            `json:"halt"`
+		ForcePrompt  bool            `json:"force_prompt"`
 		Reason       string          `json:"reason"`
 		Context      json.RawMessage `json:"context"`
 		UpdatedInput json.RawMessage `json:"updated_input"`
@@ -114,9 +115,10 @@ func parseStdout(stdout string) HookResult {
 	}
 
 	result := HookResult{
-		Halt:    parsed.Halt,
-		Reason:  parsed.Reason,
-		Context: parseContext(parsed.Context),
+		Halt:        parsed.Halt,
+		ForcePrompt: parsed.ForcePrompt,
+		Reason:      parsed.Reason,
+		Context:     parseContext(parsed.Context),
 	}
 	result.Decision = parseDecision(parsed.Decision)
 	result.UpdatedInput = rawToString(parsed.UpdatedInput)

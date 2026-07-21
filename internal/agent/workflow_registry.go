@@ -120,6 +120,7 @@ func (r *workflowRegistry) register(status WorkflowStatus, cancel context.Cancel
 		status: status,
 		cancel: cancel,
 	})
+	publishTaskStatus(status.ParentSessionID, TaskRef{Kind: TaskKindWorkflow, ID: status.SessionID})
 }
 
 // mutate applies fn to the workflow's status under the entry, storing
@@ -182,6 +183,9 @@ func (r *workflowRegistry) finish(sessionID string, state WorkflowRunState, summ
 			w.status.Phases[i].Active = false
 		}
 	})
+	if status, ok := r.get(sessionID); ok {
+		publishTaskStatus(status.ParentSessionID, TaskRef{Kind: TaskKindWorkflow, ID: sessionID})
+	}
 }
 
 // cancel invokes the workflow's cancel func. It is a no-op if the
@@ -208,6 +212,19 @@ func (r *workflowRegistry) list() []WorkflowStatus {
 	var out []WorkflowStatus
 	for _, w := range r.entries.Seq2() {
 		out = append(out, w.status)
+	}
+	return out
+}
+
+// listByParent returns workflows started by the given parent session,
+// matching the filtering contract of subAgentRegistry.list and
+// scheduleRegistry.list.
+func (r *workflowRegistry) listByParent(parentSessionID string) []WorkflowStatus {
+	var out []WorkflowStatus
+	for _, wf := range r.list() {
+		if wf.ParentSessionID == parentSessionID {
+			out = append(out, wf)
+		}
 	}
 	return out
 }

@@ -92,6 +92,28 @@ func TestAggregation(t *testing.T) {
 		require.Equal(t, DecisionDeny, agg.Decision)
 		require.Equal(t, "stop", agg.Reason)
 	})
+
+	t.Run("force_prompt is sticky across results", func(t *testing.T) {
+		t.Parallel()
+		agg := aggregate([]HookResult{
+			{Decision: DecisionAllow},
+			{ForcePrompt: true, Reason: "sensitive pattern"},
+		}, "{}")
+		require.True(t, agg.ForcePrompt)
+		require.Contains(t, agg.Reason, "sensitive pattern")
+		// Decision is untouched by force_prompt: it isn't a decision.
+		require.Equal(t, DecisionAllow, agg.Decision)
+	})
+
+	t.Run("force_prompt with deny only records reason once", func(t *testing.T) {
+		t.Parallel()
+		agg := aggregate([]HookResult{
+			{Decision: DecisionDeny, ForcePrompt: true, Reason: "blocked"},
+		}, "{}")
+		require.True(t, agg.ForcePrompt)
+		require.Equal(t, DecisionDeny, agg.Decision)
+		require.Equal(t, "blocked", agg.Reason)
+	})
 }
 
 func TestParseStdout(t *testing.T) {
@@ -115,6 +137,14 @@ func TestParseStdout(t *testing.T) {
 		r := parseStdout(`{"decision":"deny","reason":"not allowed"}`)
 		require.Equal(t, DecisionDeny, r.Decision)
 		require.Equal(t, "not allowed", r.Reason)
+	})
+
+	t.Run("force_prompt field", func(t *testing.T) {
+		t.Parallel()
+		r := parseStdout(`{"force_prompt":true,"reason":"confirm this"}`)
+		require.True(t, r.ForcePrompt)
+		require.Equal(t, "confirm this", r.Reason)
+		require.Equal(t, DecisionNone, r.Decision)
 	})
 
 	t.Run("malformed JSON", func(t *testing.T) {

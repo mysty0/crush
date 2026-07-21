@@ -27,6 +27,7 @@ type HookMetadata struct {
 	HookCount    int        `json:"hook_count"`
 	Decision     string     `json:"decision"`
 	Halt         bool       `json:"halt,omitempty"`
+	ForcePrompt  bool       `json:"force_prompt,omitempty"`
 	Reason       string     `json:"reason,omitempty"`
 	InputRewrite bool       `json:"input_rewrite,omitempty"`
 	Hooks        []HookInfo `json:"hooks,omitempty"`
@@ -38,6 +39,7 @@ type HookInfo struct {
 	Matcher      string `json:"matcher,omitempty"`
 	Decision     string `json:"decision"`
 	Halt         bool   `json:"halt,omitempty"`
+	ForcePrompt  bool   `json:"force_prompt,omitempty"`
 	Reason       string `json:"reason,omitempty"`
 	InputRewrite bool   `json:"input_rewrite,omitempty"`
 }
@@ -67,8 +69,16 @@ func (d Decision) String() string {
 
 // HookResult holds the parsed output of a single hook execution.
 type HookResult struct {
-	Decision     Decision
-	Halt         bool   // If true, halt the whole turn.
+	Decision Decision
+	Halt     bool // If true, halt the whole turn.
+	// ForcePrompt, when true, forces this tool call through the real,
+	// interactive permission prompt -- bypassing yolo mode, allowlists,
+	// a hook's own "allow" decision, sub-agent auto-approval, and any
+	// prior "allow for session" grant. Unlike Halt/Decision it is not
+	// itself a decision: it only takes effect when the aggregated
+	// decision is not deny/halt (a denied or halted call never reaches
+	// the permission prompt at all).
+	ForcePrompt  bool
 	Reason       string // Deny or halt reason (same field, different audience).
 	Context      string
 	UpdatedInput string // Shallow-merge patch against tool_input (opaque JSON).
@@ -78,9 +88,10 @@ type HookResult struct {
 type AggregateResult struct {
 	Decision     Decision
 	Halt         bool       // Any hook requested halt.
+	ForcePrompt  bool       // Any hook requested a forced interactive prompt.
 	HookCount    int        // Number of hooks that ran.
 	Hooks        []HookInfo // Info about each hook that ran (config order).
-	Reason       string     // Concatenated deny/halt reasons (newline-separated).
+	Reason       string     // Concatenated deny/halt/force_prompt reasons (newline-separated).
 	Context      string     // Concatenated context from all hooks.
 	UpdatedInput string     // Merged tool_input JSON (empty if no patches).
 }
@@ -93,12 +104,13 @@ type AggregateResult struct {
 // ones on colliding keys.
 func aggregate(results []HookResult, origToolInput string) AggregateResult {
 	var (
-		decision Decision
-		halt     bool
-		reasons  []string
-		contexts []string
-		merged   = origToolInput
-		anyPatch = false
+		decision    Decision
+		halt        bool
+		forcePrompt bool
+		reasons     []string
+		contexts    []string
+		merged      = origToolInput
+		anyPatch    = false
 	)
 	for _, r := range results {
 		switch r.Decision {
@@ -122,6 +134,14 @@ func aggregate(results []HookResult, origToolInput string) AggregateResult {
 				reasons = append(reasons, r.Reason)
 			}
 		}
+		if r.ForcePrompt {
+			forcePrompt = true
+			if r.Reason != "" && r.Decision != DecisionDeny && !r.Halt {
+				// Avoid double-adding a reason already recorded above for
+				// a result that also denied or halted.
+				reasons = append(reasons, r.Reason)
+			}
+		}
 		if r.Context != "" {
 			contexts = append(contexts, r.Context)
 		}
@@ -141,9 +161,10 @@ func aggregate(results []HookResult, origToolInput string) AggregateResult {
 	}
 
 	agg := AggregateResult{
-		Decision:  decision,
-		Halt:      halt,
-		HookCount: len(results),
+		Decision:    decision,
+		Halt:        halt,
+		ForcePrompt: forcePrompt,
+		HookCount:   len(results),
 	}
 	if anyPatch {
 		agg.UpdatedInput = merged

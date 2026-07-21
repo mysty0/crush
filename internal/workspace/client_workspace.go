@@ -309,6 +309,16 @@ func (w *ClientWorkspace) AgentRunningSchedules() []agent.ScheduledTaskStatus { 
 func (w *ClientWorkspace) AgentCancelSchedule(string)                         {}
 func (w *ClientWorkspace) AgentTasks(string) []agent.TaskStatus               { return nil }
 
+// AgentSubscribeTasks returns an already-closed, empty channel: the
+// client/server protocol does not yet surface the task-status event
+// stream, and ranging over a nil channel would block forever, which
+// would be wrong for a stub.
+func (w *ClientWorkspace) AgentSubscribeTasks(context.Context) <-chan pubsub.Event[agent.TaskStatusEvent] {
+	ch := make(chan pubsub.Event[agent.TaskStatusEvent])
+	close(ch)
+	return ch
+}
+
 func (w *ClientWorkspace) AgentBackgroundJobOutput(string) (string, string, bool, bool) {
 	return "", "", false, false
 }

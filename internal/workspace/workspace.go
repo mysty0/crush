@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/rewind"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
@@ -144,6 +145,12 @@ type Workspace interface {
 	// (sub-agents, workflows, scheduled tasks) owned by
 	// parentSessionID, for the UI's task picker.
 	AgentTasks(parentSessionID string) []agent.TaskStatus
+	// AgentSubscribeTasks returns a channel that receives status-change
+	// events for every kind of background task (sub-agents, workflows,
+	// scheduled tasks), so a subscriber can watch the unified task
+	// list update without polling. Local (AppWorkspace) only -- a
+	// closed, empty channel in client/server mode.
+	AgentSubscribeTasks(ctx context.Context) <-chan pubsub.Event[agent.TaskStatusEvent]
 	// AgentBackgroundJobOutput returns the current stdout/stderr and
 	// done-state of a background bash job by ID, for the task-list
 	// output view. ok is false if no such job exists.

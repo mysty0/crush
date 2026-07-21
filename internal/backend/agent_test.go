@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -59,7 +60,7 @@ func (c *blockingCoordinator) ClearQueue(string)                                
 func (c *blockingCoordinator) Summarize(context.Context, string) error              { return nil }
 func (c *blockingCoordinator) Model() agent.Model                                   { return agent.Model{} }
 func (c *blockingCoordinator) UpdateModels(context.Context) error                   { return nil }
-func (c *blockingCoordinator) GenerateTitle(context.Context, string, string)        {}
+func (c *blockingCoordinator) GenerateTitle(context.Context, string, string) error  { return nil }
 func (c *blockingCoordinator) RegenerateTitle(context.Context, string) error        { return nil }
 func (c *blockingCoordinator) SendToSubAgent(context.Context, string, string) error { return nil }
 
@@ -77,6 +78,14 @@ func (c *blockingCoordinator) ReconcileStuckSession(context.Context, string) (in
 }
 
 func (c *blockingCoordinator) BackgroundNow(string) map[agenttools.BackgroundKind]int { return nil }
+
+func (c *blockingCoordinator) Tasks(string) []agent.TaskStatus { return nil }
+
+func (c *blockingCoordinator) SubscribeTasks(context.Context) <-chan pubsub.Event[agent.TaskStatusEvent] {
+	ch := make(chan pubsub.Event[agent.TaskStatusEvent])
+	close(ch)
+	return ch
+}
 
 // insertAgentWorkspace installs a synthetic workspace with the given
 // coordinator (or none) and a workspace run context, mirroring the

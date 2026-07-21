@@ -73,9 +73,19 @@ func newSubAgentRegistry() *subAgentRegistry {
 	return &subAgentRegistry{entries: csync.NewMap[string, *runningSubAgent]()}
 }
 
+// taskKind returns the TaskKind a sub-agent status projects to,
+// mirroring asTaskStatus's kind mapping.
+func (s SubAgentStatus) taskKind() TaskKind {
+	if s.ToolName == "agentic_fetch" {
+		return TaskKindAgenticFetch
+	}
+	return TaskKindSubAgent
+}
+
 // register adds a newly-dispatched sub-agent.
 func (r *subAgentRegistry) register(status SubAgentStatus) {
 	r.entries.Set(status.SessionID, &runningSubAgent{status: status})
+	publishTaskStatus(status.ParentSessionID, TaskRef{Kind: status.taskKind(), ID: status.SessionID})
 }
 
 // finish marks a sub-agent's terminal state. No-op if the sub-agent is
@@ -89,6 +99,7 @@ func (r *subAgentRegistry) finish(sessionID string, state SubAgentState, errMsg 
 	e.status.Error = errMsg
 	e.status.FinishedAt = time.Now()
 	r.entries.Set(sessionID, e)
+	publishTaskStatus(e.status.ParentSessionID, TaskRef{Kind: e.status.taskKind(), ID: sessionID})
 }
 
 // get returns a snapshot of one sub-agent's status.

@@ -377,7 +377,7 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 	// Seed the OAuth-only providers (Codex, Gemini CLI) whose fixed wire
 	// configuration is not persisted, so they are treated as fully
 	// configured and skip custom-provider discovery below.
-	c.seedOAuthProviders(ctx)
+	c.seedOAuthProviders(ctx, store)
 
 	// Discover models concurrently for custom providers that need it.
 	// A provider needs discovery when discover_models is explicitly true,

@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -49,7 +50,7 @@ func (c *errorCoordinator) ClearQueue(string)                                   
 func (c *errorCoordinator) Summarize(context.Context, string) error              { return nil }
 func (c *errorCoordinator) Model() agent.Model                                   { return agent.Model{} }
 func (c *errorCoordinator) UpdateModels(context.Context) error                   { return nil }
-func (c *errorCoordinator) GenerateTitle(context.Context, string, string)        {}
+func (c *errorCoordinator) GenerateTitle(context.Context, string, string) error  { return nil }
 func (c *errorCoordinator) RegenerateTitle(context.Context, string) error        { return nil }
 func (c *errorCoordinator) SendToSubAgent(context.Context, string, string) error { return nil }
 
@@ -67,6 +68,14 @@ func (c *errorCoordinator) ReconcileStuckSession(context.Context, string) (int, 
 }
 
 func (c *errorCoordinator) BackgroundNow(string) map[agenttools.BackgroundKind]int { return nil }
+
+func (c *errorCoordinator) Tasks(string) []agent.TaskStatus { return nil }
+
+func (c *errorCoordinator) SubscribeTasks(context.Context) <-chan pubsub.Event[agent.TaskStatusEvent] {
+	ch := make(chan pubsub.Event[agent.TaskStatusEvent])
+	close(ch)
+	return ch
+}
 
 // insertRunCompleteWorkspace installs a workspace backed by a real
 // app.App (so the runCompletions broker exists) with the given

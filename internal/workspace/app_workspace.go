@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/rewind"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
@@ -161,7 +162,9 @@ func (w *AppWorkspace) AgentRunShellCommand(ctx context.Context, sessionID, comm
 	// Generate a title from the shell command if it was the first message.
 	if isFirstMessage && w.app.AgentCoordinator != nil {
 		titleCtx := context.WithoutCancel(ctx)
-		w.app.AgentCoordinator.GenerateTitle(titleCtx, sessionID, "$ "+command)
+		if err := w.app.AgentCoordinator.GenerateTitle(titleCtx, sessionID, "$ "+command); err != nil {
+			slog.Warn("Failed to generate session title from shell command", "error", err, "command", command)
+		}
 	}
 
 	return proto.ShellCommandResponse{
@@ -263,6 +266,19 @@ func (w *AppWorkspace) AgentRunningWorkflows() []agent.WorkflowStatus {
 		return nil
 	}
 	return w.app.AgentCoordinator.RunningWorkflows()
+}
+
+// AgentSubscribeTasks implements Workspace. It guards against a nil
+// AgentCoordinator (e.g. workspace still initializing) by returning an
+// already-closed channel, so a caller ranging over it terminates
+// immediately instead of blocking forever.
+func (w *AppWorkspace) AgentSubscribeTasks(ctx context.Context) <-chan pubsub.Event[agent.TaskStatusEvent] {
+	if w.app.AgentCoordinator == nil {
+		ch := make(chan pubsub.Event[agent.TaskStatusEvent])
+		close(ch)
+		return ch
+	}
+	return w.app.AgentCoordinator.SubscribeTasks(ctx)
 }
 
 func (w *AppWorkspace) AgentTasks(parentSessionID string) []agent.TaskStatus {

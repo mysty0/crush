@@ -128,6 +128,7 @@ func (r *Runner) Run(ctx context.Context, eventName, sessionID, toolName, toolIn
 			Matcher:      h.Matcher,
 			Decision:     results[i].Decision.String(),
 			Halt:         results[i].Halt,
+			ForcePrompt:  results[i].ForcePrompt,
 			Reason:       results[i].Reason,
 			InputRewrite: results[i].UpdatedInput != "",
 		}

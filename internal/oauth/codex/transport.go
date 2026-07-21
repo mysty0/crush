@@ -48,8 +48,9 @@ func (t *AuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	req.Header.Set(headerAuthorization, "Bearer "+t.AccessToken)
 	req.Header.Set(headerAccountID, DecodeAccountID(t.AccessToken))
-	req.Header.Set(headerOpenAIBeta, openAIBetaResponses)
-	req.Header.Set(headerOriginator, originator)
+req.Header.Set(headerOpenAIBeta, openAIBetaResponses)
+req.Header.Set(headerOriginator, originator)
+req.Header.Set("User-Agent", "codex_cli_rs/1.0.0 (Linux; x86_64)")
 
 	return base.RoundTrip(req)
 }

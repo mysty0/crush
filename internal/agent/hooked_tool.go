@@ -76,10 +76,16 @@ func (h *hookedTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.To
 		call.Input = result.UpdatedInput
 	}
 
-	// An explicit allow from a hook pre-approves the permission prompt for
-	// this tool call. Deny is already handled above; silence falls through
-	// to the normal permission flow.
-	if result.Decision == hooks.DecisionAllow {
+	// force_prompt takes precedence over an explicit allow from the same
+	// (or another) hook: it demands the real interactive prompt run for
+	// this call, bypassing yolo mode, allowlists, hook pre-approval,
+	// sub-agent auto-approval, and any prior "allow for session" grant
+	// (see permission.WithForcePrompt). An explicit allow from a hook
+	// pre-approves the permission prompt instead. Deny/halt is already
+	// handled above; silence falls through to the normal permission flow.
+	if result.ForcePrompt {
+		ctx = permission.WithForcePrompt(ctx, call.ID, result.Reason)
+	} else if result.Decision == hooks.DecisionAllow {
 		ctx = permission.WithHookApproval(ctx, call.ID)
 	}
 
@@ -105,6 +111,7 @@ func buildHookMetadata(result hooks.AggregateResult) hooks.HookMetadata {
 		HookCount:    result.HookCount,
 		Decision:     result.Decision.String(),
 		Halt:         result.Halt,
+		ForcePrompt:  result.ForcePrompt,
 		Reason:       result.Reason,
 		InputRewrite: result.UpdatedInput != "",
 		Hooks:        result.Hooks,

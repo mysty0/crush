@@ -533,17 +533,30 @@ func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey a
 //     time. A process that acquires the lock after a peer rotated finds the
 //     peer's fresh token on disk and adopts it instead of exchanging.
 func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, providerID string) error {
-	key := fmt.Sprintf("%d\x00%s", scope, providerID)
+	return s.refreshOAuthToken(ctx, scope, providerID, true)
+}
+
+// refreshOAuthTokenNoReload refreshes and persists an OAuth token without
+// reloading config from disk. It is used during initial config load while
+// writeMu is already held by the loader.
+func (s *ConfigStore) refreshOAuthTokenNoReload(ctx context.Context, scope Scope, providerID string) error {
+	return s.refreshOAuthToken(ctx, scope, providerID, false)
+}
+
+func (s *ConfigStore) refreshOAuthToken(ctx context.Context, scope Scope, providerID string, reload bool) error {
+	key := fmt.Sprintf("%d/%s", scope, providerID)
 	_, err, _ := s.refreshSF.Do(key, func() (any, error) {
-		return nil, s.refreshOAuthTokenLocked(ctx, scope, providerID)
+		return nil, s.refreshOAuthTokenLocked(ctx, scope, providerID, reload)
 	})
 	return err
 }
 
 // refreshOAuthTokenLocked performs the cross-process single-flighted
 // refresh. It is invoked through refreshSF, so at most one goroutine per
-// provider runs it at a time within this process.
-func (s *ConfigStore) refreshOAuthTokenLocked(ctx context.Context, scope Scope, providerID string) error {
+// provider runs it at a time within this process. When reload is false,
+// the refreshed token is persisted without triggering an auto-reload; this
+// is only for initial config load, where the caller already owns writeMu.
+func (s *ConfigStore) refreshOAuthTokenLocked(ctx context.Context, scope Scope, providerID string, reload bool) error {
 	cfg := s.Config()
 	providerConfig, exists := cfg.Providers.Get(providerID)
 	if !exists {
@@ -604,10 +617,15 @@ func (s *ConfigStore) refreshOAuthTokenLocked(ctx context.Context, scope Scope, 
 	}
 	cfg.Providers.Set(providerID, providerConfig)
 
-	if err := s.SetConfigFields(scope, map[string]any{
+	fields := map[string]any{
 		fmt.Sprintf("providers.%s.api_key", providerID): refreshedToken.AccessToken,
 		fmt.Sprintf("providers.%s.oauth", providerID):   refreshedToken,
-	}); err != nil {
+	}
+	if reload {
+		if err := s.SetConfigFields(scope, fields); err != nil {
+			return fmt.Errorf("failed to persist refreshed token: %w", err)
+		}
+	} else if err := s.writeConfigFields(scope, fields); err != nil {
 		return fmt.Errorf("failed to persist refreshed token: %w", err)
 	}
 	return nil

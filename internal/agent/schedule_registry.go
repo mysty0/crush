@@ -115,6 +115,7 @@ func (r *scheduleRegistry) register(status ScheduledTaskStatus, cancel context.C
 		cancel:     cancel,
 		reschedule: make(chan wakeupRequest, 1),
 	})
+	publishTaskStatus(status.OriginSessionID, TaskRef{Kind: TaskKindSchedule, ID: status.ID})
 }
 
 // get returns a snapshot of a task's status.
@@ -167,6 +168,7 @@ func (r *scheduleRegistry) stop(id, reason string) {
 	if e.cancel != nil {
 		e.cancel()
 	}
+	publishTaskStatus(e.status.OriginSessionID, TaskRef{Kind: TaskKindSchedule, ID: id})
 }
 
 // requestReschedule delivers a ScheduleWakeup(task_id=...) call's

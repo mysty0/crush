@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -81,9 +82,9 @@ func (s *runCoordinator) ClearQueue(string)                 {}
 func (s *runCoordinator) Summarize(context.Context, string) error {
 	return nil
 }
-func (s *runCoordinator) Model() agent.Model                            { return agent.Model{} }
-func (s *runCoordinator) UpdateModels(context.Context) error            { return nil }
-func (s *runCoordinator) GenerateTitle(context.Context, string, string) {}
+func (s *runCoordinator) Model() agent.Model                                  { return agent.Model{} }
+func (s *runCoordinator) UpdateModels(context.Context) error                  { return nil }
+func (s *runCoordinator) GenerateTitle(context.Context, string, string) error { return nil }
 
 func (s *runCoordinator) RegenerateTitle(context.Context, string) error { return nil }
 
@@ -103,6 +104,14 @@ func (s *runCoordinator) ReconcileStuckSession(context.Context, string) (int, er
 }
 
 func (s *runCoordinator) BackgroundNow(string) map[agenttools.BackgroundKind]int { return nil }
+
+func (s *runCoordinator) Tasks(string) []agent.TaskStatus { return nil }
+
+func (s *runCoordinator) SubscribeTasks(context.Context) <-chan pubsub.Event[agent.TaskStatusEvent] {
+	ch := make(chan pubsub.Event[agent.TaskStatusEvent])
+	close(ch)
+	return ch
+}
 
 func (s *runCoordinator) capturedCtx() context.Context {
 	s.mu.Lock()

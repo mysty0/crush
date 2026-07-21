@@ -150,15 +150,12 @@ func (c *coordinator) Tasks(parentSessionID string) []TaskStatus {
 	for _, sa := range c.subAgents.list(parentSessionID) {
 		// Workflow-dispatched sub-agents are represented by their
 		// parent workflow row, not as top-level tasks.
-		if sa.ToolName == "Workflow" {
+		if sa.ToolName == WorkflowToolName {
 			continue
 		}
 		out = append(out, sa.asTaskStatus())
 	}
-	for _, wf := range c.workflows.list() {
-		if wf.ParentSessionID != parentSessionID {
-			continue
-		}
+	for _, wf := range c.workflows.listByParent(parentSessionID) {
 		out = append(out, wf.asTaskStatus())
 	}
 	for _, s := range c.schedules.list(parentSessionID) {

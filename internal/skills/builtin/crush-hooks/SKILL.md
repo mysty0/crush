@@ -87,13 +87,12 @@ ends the whole turn (user takes over). Default to deny — reach for halt only
 when letting the agent retry is itself the problem (e.g. secrets detected,
 policy violation).
 
-**JSON envelope (exit 0):**
-
 ```json
 {
   "version": 1,
   "decision": "allow",
   "halt": false,
+  "force_prompt": false,
   "reason": "...",
   "context": "Extra info for the model",
   "updated_input": {"command": "rewritten"}
@@ -105,12 +104,30 @@ policy violation).
   (or `null`) when you only want to inject context or rewrite input without
   also auto-approving the call.
 - **`halt: true`**: ends the turn (same as exit 49).
-- **`reason`**: shown to the model on deny; to model and user on halt.
+- **`force_prompt: true`**: forces the real, interactive permission prompt to
+  run for this call — the opposite of `"allow"`. Bypasses yolo mode,
+  `--allowed-tools`, a hook's own `"allow"`, sub-agent auto-approval, and any
+  prior "allow for session" grant. No persistent bypass exists: it asks every
+  time the pattern matches. Use it to flag sensitive calls (e.g. `Edit`/`Write`
+  touching a secrets file) that should never be silently approved.
+- **`reason`**: shown to the model on deny/halt; shown to the user in the
+  prompt when force_prompt is set.
 - **`context`**: string **or array of strings**. Appended to what the model
   sees. Empty entries are dropped.
 - **`updated_input`**: **shallow-merge patch** against `tool_input`, not a
   replacement. Keys you include overwrite; keys you don't are preserved.
   Nested objects are replaced wholesale, not deep-merged. Ignored on deny/halt.
+
+## Aggregation (Multiple Hooks)
+
+Composed in **config order**:
+
+- `deny` > `allow` > no opinion. First deny decides; subsequent allows don't override.
+- `halt` is sticky: any hook halting ends the turn.
+- `force_prompt` is sticky too, and wins over any `"allow"` (even from the same
+  hook) — but has no effect once the call is already denied/halted.
+- `reason` and `context` concatenate in config order (newline-joined).
+- `updated_input` patches shallow-merge sequentially; later patches win on colliding keys.
 
 ## Aggregation (Multiple Hooks)
 
@@ -144,6 +161,27 @@ Config: `{"matcher": "^bash$", "command": "./hooks/no-rm-rf.sh"}`
 ```
 
 Every `view`/`ls`/`grep`/`glob` call now runs without prompting.
+
+### Force confirmation for sensitive edits
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$CRUSH_TOOL_INPUT_FILE_PATH" in
+  *.env|*secrets*|*/.aws/credentials)
+    echo '{"force_prompt": true, "reason": "sensitive path"}'
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+```
+
+Config: `{"matcher": "^(Edit|MultiEdit|Write)$", "command": "./hooks/confirm-sensitive-writes.sh"}`
+
+Always shows the real permission prompt for matching paths, even under
+`--yolo`, an allowlist entry, or a prior "allow for session" grant.
 
 ### Inject context without auto-approving
 

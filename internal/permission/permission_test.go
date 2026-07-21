@@ -257,6 +257,129 @@ func TestPermissionService_HookApproval(t *testing.T) {
 	})
 }
 
+func TestPermissionService_ForcePrompt(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bypasses yolo mode", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", true, nil) // skip=true (yolo)
+
+		events := service.Subscribe(t.Context())
+		ctx := WithForcePrompt(t.Context(), "call-1", "sensitive pattern")
+
+		var (
+			wg      sync.WaitGroup
+			granted bool
+			err     error
+		)
+		wg.Go(func() {
+			granted, err = service.Request(ctx, CreatePermissionRequest{
+				SessionID:   "s1",
+				ToolCallID:  "call-1",
+				ToolName:    "Edit",
+				Action:      "edit",
+				Description: "edit .env",
+				Path:        "/tmp",
+			})
+		})
+
+		event := <-events
+		assert.Contains(t, event.Payload.Description, "sensitive pattern",
+			"the hook's reason should be folded into the prompt description")
+		service.Grant(event.Payload)
+		wg.Wait()
+		require.NoError(t, err)
+		assert.True(t, granted)
+	})
+
+	t.Run("bypasses the allowlist", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, []string{"Edit"})
+
+		events := service.Subscribe(t.Context())
+		ctx := WithForcePrompt(t.Context(), "call-2", "")
+
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			_, _ = service.Request(ctx, CreatePermissionRequest{
+				SessionID:  "s1",
+				ToolCallID: "call-2",
+				ToolName:   "Edit",
+				Action:     "edit",
+				Path:       "/tmp",
+			})
+		})
+
+		event := <-events
+		service.Deny(event.Payload)
+		wg.Wait()
+	})
+
+	t.Run("bypasses a prior allow-for-session grant", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
+
+		// First call: grant persistently for the session.
+		first := CreatePermissionRequest{
+			SessionID:  "s1",
+			ToolCallID: "call-3a",
+			ToolName:   "Edit",
+			Action:     "edit",
+			Path:       "/tmp",
+		}
+		events := service.Subscribe(t.Context())
+		var wg1 sync.WaitGroup
+		wg1.Go(func() {
+			_, _ = service.Request(t.Context(), first)
+		})
+		event := <-events
+		service.GrantPersistent(event.Payload)
+		wg1.Wait()
+
+		// Second call, same session/tool/action/path: without force_prompt
+		// this would auto-grant from the persistent memo. With force_prompt,
+		// it must still publish a real request.
+		ctx := WithForcePrompt(t.Context(), "call-3b", "always confirm this")
+		var (
+			wg2     sync.WaitGroup
+			granted bool
+		)
+		wg2.Go(func() {
+			granted, _ = service.Request(ctx, CreatePermissionRequest{
+				SessionID:  "s1",
+				ToolCallID: "call-3b",
+				ToolName:   "Edit",
+				Action:     "edit",
+				Path:       "/tmp",
+			})
+		})
+		event2 := <-events
+		assert.Equal(t, "call-3b", event2.Payload.ToolCallID,
+			"a forced prompt must still publish a real request instead of auto-granting from the session memo")
+		service.Deny(event2.Payload)
+		wg2.Wait()
+		assert.False(t, granted)
+	})
+
+	t.Run("scoped to the stamped tool call ID", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", true, nil) // yolo mode
+
+		// Stamped for call-x, but the actual request is for call-y -- yolo
+		// mode should apply normally since the stamp doesn't match.
+		ctx := WithForcePrompt(t.Context(), "call-x", "reason")
+		granted, err := service.Request(ctx, CreatePermissionRequest{
+			SessionID:  "s1",
+			ToolCallID: "call-y",
+			ToolName:   "Edit",
+			Action:     "edit",
+			Path:       "/tmp",
+		})
+		require.NoError(t, err)
+		assert.True(t, granted, "yolo mode should apply when the force-prompt stamp doesn't match this call")
+	})
+}
+
 func TestPermissionService_SequentialProperties(t *testing.T) {
 	t.Run("Sequential permission requests with persistent grants", func(t *testing.T) {
 		service := NewPermissionService("/tmp", false, []string{})

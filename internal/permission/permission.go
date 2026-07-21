@@ -3,6 +3,7 @@ package permission
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -64,6 +65,42 @@ func hookApproved(ctx context.Context, toolCallID string) bool {
 	}
 	v, _ := ctx.Value(hookApprovalKey{}).(string)
 	return v == toolCallID
+}
+
+// forcePromptKey is the unexported context key used to mark a tool call
+// as requiring the real interactive permission prompt, set by a
+// PreToolUse hook's force_prompt output field.
+type forcePromptKey struct{}
+
+// forcePromptValue carries the tool call ID a forced prompt applies to
+// (so it can't leak across calls sharing a context) plus the hook's
+// reason, surfaced to the user in the prompt.
+type forcePromptValue struct {
+	toolCallID string
+	reason     string
+}
+
+// WithForcePrompt returns a context that marks the given tool call as
+// requiring the real, interactive permission prompt -- bypassing yolo
+// mode, allowlists, hook pre-approval, sub-agent auto-approval, and any
+// prior "allow for session" grant. Used by a PreToolUse hook that wants
+// a sensitive pattern (e.g. editing a secrets file) confirmed by the
+// user every time, even when the session would otherwise never prompt.
+func WithForcePrompt(ctx context.Context, toolCallID, reason string) context.Context {
+	return context.WithValue(ctx, forcePromptKey{}, forcePromptValue{toolCallID: toolCallID, reason: reason})
+}
+
+// forcePrompted reports whether the context carries a forced-prompt
+// marker for the given tool call ID, returning the hook's reason if so.
+func forcePrompted(ctx context.Context, toolCallID string) (reason string, forced bool) {
+	if toolCallID == "" {
+		return "", false
+	}
+	v, ok := ctx.Value(forcePromptKey{}).(forcePromptValue)
+	if !ok || v.toolCallID != toolCallID {
+		return "", false
+	}
+	return v.reason, true
 }
 
 type CreatePermissionRequest struct {
@@ -230,26 +267,36 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		}
 	}
 
-	if s.skip.Load() {
-		return true, nil
-	}
+	// A PreToolUse hook can force this call through the real interactive
+	// prompt via its force_prompt output field (see WithForcePrompt).
+	// When set, every auto-approval shortcut below -- yolo mode, the
+	// allowlist, a hook's own "allow", sub-agent auto-approval, and any
+	// prior "allow for session" grant -- is skipped so the user is
+	// always asked, with the hook's reason folded into the prompt.
+	forcedReason, forced := forcePrompted(ctx, opts.ToolCallID)
 
-	// Check if the tool/action combination is in the allowlist
-	commandKey := opts.ToolName + ":" + opts.Action
-	if slices.Contains(s.allowedTools, commandKey) || slices.Contains(s.allowedTools, opts.ToolName) {
-		return true, nil
-	}
+	if !forced {
+		if s.skip.Load() {
+			return true, nil
+		}
 
-	// A PreToolUse hook that returned decision=allow stamps the context
-	// with the tool call ID. Treat that as a pre-approval and skip the
-	// prompt entirely. We still publish a granted notification so the UI
-	// and audit subscribers see the outcome.
-	if hookApproved(ctx, opts.ToolCallID) {
-		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
-			ToolCallID: opts.ToolCallID,
-			Granted:    true,
-		})
-		return true, nil
+		// Check if the tool/action combination is in the allowlist
+		commandKey := opts.ToolName + ":" + opts.Action
+		if slices.Contains(s.allowedTools, commandKey) || slices.Contains(s.allowedTools, opts.ToolName) {
+			return true, nil
+		}
+
+		// A PreToolUse hook that returned decision=allow stamps the context
+		// with the tool call ID. Treat that as a pre-approval and skip the
+		// prompt entirely. We still publish a granted notification so the UI
+		// and audit subscribers see the outcome.
+		if hookApproved(ctx, opts.ToolCallID) {
+			s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+				ToolCallID: opts.ToolCallID,
+				Granted:    true,
+			})
+			return true, nil
+		}
 	}
 
 	s.requestMu.Lock()
@@ -260,16 +307,18 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		ToolCallID: opts.ToolCallID,
 	})
 
-	s.autoApproveSessionsMu.RLock()
-	autoApprove := s.autoApproveSessions[opts.SessionID]
-	s.autoApproveSessionsMu.RUnlock()
+	if !forced {
+		s.autoApproveSessionsMu.RLock()
+		autoApprove := s.autoApproveSessions[opts.SessionID]
+		s.autoApproveSessionsMu.RUnlock()
 
-	if autoApprove {
-		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
-			ToolCallID: opts.ToolCallID,
-			Granted:    true,
-		})
-		return true, nil
+		if autoApprove {
+			s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+				ToolCallID: opts.ToolCallID,
+				Granted:    true,
+			})
+			return true, nil
+		}
 	}
 
 	fileInfo, err := os.Stat(opts.Path)
@@ -285,28 +334,36 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 	if dir == "." {
 		dir = s.workingDir
 	}
+
+	description := opts.Description
+	if forced && forcedReason != "" {
+		description = fmt.Sprintf("%s\n\nA PreToolUse hook flagged this call for confirmation: %s", description, forcedReason)
+	}
+
 	permission := PermissionRequest{
 		ID:          uuid.New().String(),
 		Path:        dir,
 		SessionID:   opts.SessionID,
 		ToolCallID:  opts.ToolCallID,
 		ToolName:    opts.ToolName,
-		Description: opts.Description,
+		Description: description,
 		Action:      opts.Action,
 		Params:      opts.Params,
 	}
 
-	if _, ok := s.sessionPermissions.Get(PermissionKey{
-		SessionID: permission.SessionID,
-		ToolName:  permission.ToolName,
-		Action:    permission.Action,
-		Path:      permission.Path,
-	}); ok {
-		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
-			ToolCallID: opts.ToolCallID,
-			Granted:    true,
-		})
-		return true, nil
+	if !forced {
+		if _, ok := s.sessionPermissions.Get(PermissionKey{
+			SessionID: permission.SessionID,
+			ToolName:  permission.ToolName,
+			Action:    permission.Action,
+			Path:      permission.Path,
+		}); ok {
+			s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+				ToolCallID: opts.ToolCallID,
+				Granted:    true,
+			})
+			return true, nil
+		}
 	}
 
 	s.activeRequestMu.Lock()

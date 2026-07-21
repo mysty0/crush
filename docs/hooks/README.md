@@ -32,6 +32,8 @@ forward.
   called. For example: "remember to run gofumpt after editing Go files"
 - Auto-approve tools: skip the permission prompt for bash commands that
   you know are safe
+- Force confirmation: always show the real permission prompt for a sensitive
+  pattern (e.g. editing a secrets file), even under `--yolo`
 - Log certain tool calls
 
 …And lots more. Show us what you're building!
@@ -249,6 +251,9 @@ return { decision = "allow" }
 -- halt the whole turn
 return { halt = true, reason = "secret detected" }
 
+-- force the real interactive prompt, bypassing yolo/allowlist/prior grants
+return { force_prompt = true, reason = "sensitive path" }
+
 -- inject context without deciding
 return { context = "remember to run the linter" }
 
@@ -393,7 +398,8 @@ the input, or still deny/halt with a reason:
   "version": 1, // Output envelope version. Optional; defaults to 1.
   "decision": "allow", // "allow", "deny", or null. Omit for no opinion.
   "halt": false, // If true, halts the turn entirely.
-  "reason": "LGTM", // Shown when denying or halting.
+  "force_prompt": false, // If true, always show the real interactive prompt.
+  "reason": "LGTM", // Shown when denying, halting, or forcing a prompt.
   "context": "Scrubbed secrets", // String or array of strings. Appended to what the model sees.
   "updated_input": { "command": "…" }, // Shallow-merged into the tool's input before execution.
 }
@@ -409,6 +415,17 @@ bypasses the permission prompt entirely. Silence (no `decision`, or
 normal permission flow. Use `"allow"` when you want to auto-approve; omit it
 when you only want to inject context or rewrite input without also vouching
 for the call.
+
+`force_prompt: true` is the opposite of `"allow"`: it **forces** the real,
+interactive permission prompt to run for this call, bypassing yolo mode
+(`--yolo`/skip-permissions), `--allowed-tools` allowlist entries, a hook's own
+`"allow"` decision, sub-agent auto-approval, and any prior "allow for session"
+grant. Use it to flag a pattern that should never be silently approved -- e.g.
+an `Edit`/`Write` call that touches a secrets file -- regardless of how
+permissive the rest of the session is. `reason` is folded into what the user
+sees in the prompt. There is no persistent bypass for a forced prompt: it asks
+every single time the pattern matches, even if the user chose "allow for
+session" on an earlier, unrelated call to the same tool.
 
 `updated_input` is a shallow-merge patch. Keys you include overwrite matching
 keys in `tool_input`; keys you don't include are preserved. If the model called
@@ -543,6 +560,46 @@ case "$CRUSH_TOOL_INPUT_COMMAND" in
     ;;
 esac
 ```
+
+### Always confirm sensitive file edits
+
+Even under `--yolo` (or any prior "allow for session" click), force a real
+confirmation prompt whenever `Edit`, `MultiEdit`, or `Write` touches a
+sensitive path -- secrets, env files, CI config, whatever your project
+considers dangerous to change unattended:
+
+```jsonc
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Edit|MultiEdit|Write)$",
+        "command": "./hooks/confirm-sensitive-writes.sh",
+      },
+    ],
+  },
+}
+```
+
+`hooks/confirm-sensitive-writes.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$CRUSH_TOOL_INPUT_FILE_PATH" in
+  *.env|*.env.*|*secrets*|*/.aws/credentials|*id_rsa*)
+    echo '{"force_prompt": true, "reason": "This path looks sensitive -- please confirm."}'
+    ;;
+  *)
+    exit 0 # Silent -- normal permission flow applies.
+    ;;
+esac
+```
+
+This still respects a genuine `deny` from another hook (deny always wins),
+but no `--yolo`, allowlist entry, or earlier "allow for session" click can
+silently approve a matching write -- the user is asked every time.
 
 ### Inject context into file writes
 
@@ -756,6 +813,12 @@ Extends the common envelope:
   // sees the error and may try something else.
   "decision": "allow",
 
+  // bool. If true, forces the real interactive permission prompt to run,
+  // bypassing yolo mode, allowlists, a hook's own "allow", sub-agent
+  // auto-approval, and any prior "allow for session" grant. No persistent
+  // bypass exists for a forced prompt -- it always asks.
+  "force_prompt": false,
+
   // object. Shallow-merge patch against tool_input. Nested objects are
   // replaced wholesale, not deep-merged.
   "updated_input": {
@@ -798,6 +861,11 @@ PreToolUse-specific rules:
 5. `updated_input` patches shallow-merge sequentially against the original
    `tool_input`. Later patches override earlier ones on colliding keys. Patches
    are **ignored** if the final decision is deny or halt.
+6. `force_prompt` is sticky, like `halt`: if any hook sets it, the real
+   interactive prompt always runs for that call, no matter what any other
+   hook's `decision` was -- it wins even over an `"allow"` from the same or
+   another hook. It has no effect if the aggregated decision is already
+   `deny`/`halt`, since a blocked call never reaches the permission prompt.
 
 ### Environment variables
 

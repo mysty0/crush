@@ -25,7 +25,7 @@ func TestFetchUsage(t *testing.T) {
 		require.Equal(t, "Bearer "+access, r.Header.Get("Authorization"))
 		require.Equal(t, "acct-usage", r.Header.Get("chatgpt-account-id"))
 		require.Equal(t, "responses=experimental", r.Header.Get("OpenAI-Beta"))
-		require.Equal(t, "pi", r.Header.Get("originator"))
+		require.Equal(t, "codex_cli_rs", r.Header.Get("originator"))
 		require.Equal(t, "application/json", r.Header.Get("Accept"))
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{

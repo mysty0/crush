@@ -43,7 +43,7 @@ func TestAuthTransport_SetsHeaders(t *testing.T) {
 	require.Equal(t, "Bearer "+access, stub.req.Header.Get("Authorization"))
 	require.Equal(t, "acct-777", stub.req.Header.Get("chatgpt-account-id"))
 	require.Equal(t, "responses=experimental", stub.req.Header.Get("OpenAI-Beta"))
-	require.Equal(t, "pi", stub.req.Header.Get("originator"))
+	require.Equal(t, "codex_cli_rs", stub.req.Header.Get("originator"))
 
 	// The original request must not be mutated.
 	require.Empty(t, req.Header.Get("Authorization"))

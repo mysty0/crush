@@ -19,11 +19,12 @@ func TestModels_CodexPath(t *testing.T) {
 	})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/codex/models", r.URL.Path)
+require.Equal(t, "/codex/models", r.URL.Path)
+require.Equal(t, "client_version=1.0.0", r.URL.RawQuery)
 		require.Equal(t, "Bearer "+access, r.Header.Get("Authorization"))
 		require.Equal(t, "acct-models", r.Header.Get("chatgpt-account-id"))
 		require.Equal(t, "responses=experimental", r.Header.Get("OpenAI-Beta"))
-		require.Equal(t, "pi", r.Header.Get("originator"))
+		require.Equal(t, "codex_cli_rs", r.Header.Get("originator"))
 		require.Equal(t, "application/json", r.Header.Get("Accept"))
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -165,7 +166,8 @@ func TestCachedModels_FallsBackOnFailure(t *testing.T) {
 	accountAPIBaseURL = url
 	defer func() { accountAPIBaseURL = old }()
 
-	models := CachedModels(context.Background(), access)
+	models, err := CachedModels(context.Background(), access)
+	require.Error(t, err)
 	require.Equal(t, DefaultModels(), models)
 }
 

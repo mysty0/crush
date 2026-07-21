@@ -31,9 +31,9 @@ const (
 	// scope is the set of OAuth scopes requested for a Codex login.
 	scope = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 
-	// originator identifies the client on authorization and inference
-	// requests.
-	originator = "pi"
+// originator identifies the client on authorization and inference
+// requests.
+originator = "codex_cli_rs"
 
 	// callbackPort is the fixed loopback port for the browser flow.
 	// OpenAI rejects any other redirect URI, so port fallback is

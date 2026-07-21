@@ -217,15 +217,15 @@ func (c *scriptedCoordinator) CancelAll() {
 	}
 }
 
-func (c *scriptedCoordinator) IsBusy() bool                                  { return false }
-func (c *scriptedCoordinator) IsSessionBusy(string) bool                     { return false }
-func (c *scriptedCoordinator) QueuedPrompts(string) int                      { return 0 }
-func (c *scriptedCoordinator) QueuedPromptsList(string) []string             { return nil }
-func (c *scriptedCoordinator) ClearQueue(string)                             {}
-func (c *scriptedCoordinator) Summarize(context.Context, string) error       { return nil }
-func (c *scriptedCoordinator) Model() agent.Model                            { return agent.Model{} }
-func (c *scriptedCoordinator) UpdateModels(context.Context) error            { return nil }
-func (c *scriptedCoordinator) GenerateTitle(context.Context, string, string) {}
+func (c *scriptedCoordinator) IsBusy() bool                                        { return false }
+func (c *scriptedCoordinator) IsSessionBusy(string) bool                           { return false }
+func (c *scriptedCoordinator) QueuedPrompts(string) int                            { return 0 }
+func (c *scriptedCoordinator) QueuedPromptsList(string) []string                   { return nil }
+func (c *scriptedCoordinator) ClearQueue(string)                                   {}
+func (c *scriptedCoordinator) Summarize(context.Context, string) error             { return nil }
+func (c *scriptedCoordinator) Model() agent.Model                                  { return agent.Model{} }
+func (c *scriptedCoordinator) UpdateModels(context.Context) error                  { return nil }
+func (c *scriptedCoordinator) GenerateTitle(context.Context, string, string) error { return nil }
 
 func (c *scriptedCoordinator) RegenerateTitle(context.Context, string) error { return nil }
 
@@ -245,6 +245,14 @@ func (c *scriptedCoordinator) ReconcileStuckSession(context.Context, string) (in
 }
 
 func (c *scriptedCoordinator) BackgroundNow(string) map[agenttools.BackgroundKind]int { return nil }
+
+func (c *scriptedCoordinator) Tasks(string) []agent.TaskStatus { return nil }
+
+func (c *scriptedCoordinator) SubscribeTasks(context.Context) <-chan pubsub.Event[agent.TaskStatusEvent] {
+	ch := make(chan pubsub.Event[agent.TaskStatusEvent])
+	close(ch)
+	return ch
+}
 
 // agentE2EHarness extends the SSE harness with a scripted coordinator
 // wired into the workspace's embedded app.App, so POST /agent drives a

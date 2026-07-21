@@ -194,7 +194,7 @@ func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
 func searchFiles(ctx context.Context, pattern, rootPath, include string, limit int) ([]grepMatch, bool, error) {
 	matches, err := searchWithRipgrep(ctx, pattern, rootPath, include)
 	if err != nil {
-		matches, err = searchFilesWithRegex(pattern, rootPath, include)
+		matches, err = searchFilesWithRegex(ctx, pattern, rootPath, include)
 		if err != nil {
 			return nil, false, err
 		}
@@ -281,7 +281,7 @@ type ripgrepMatch struct {
 	} `json:"data"`
 }
 
-func searchFilesWithRegex(pattern, rootPath, include string) ([]grepMatch, error) {
+func searchFilesWithRegex(ctx context.Context, pattern, rootPath, include string) ([]grepMatch, error) {
 	matches := []grepMatch{}
 
 	// Use cached regex compilation
@@ -303,6 +303,13 @@ func searchFilesWithRegex(pattern, rootPath, include string) ([]grepMatch, error
 	walker := fsext.NewFastGlobWalker(rootPath)
 
 	err = filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+		// Abort promptly on cancellation (e.g. the run's timeout or a user
+		// cancel) so a walk over a large tree does not run to completion
+		// after the caller has given up.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if err != nil {
 			return nil // Skip errors
 		}
@@ -313,6 +320,14 @@ func searchFilesWithRegex(pattern, rootPath, include string) ([]grepMatch, error
 				return filepath.SkipDir
 			}
 			return nil // Continue into directory
+		}
+
+		// Only search regular files. Opening a FIFO, socket, or device
+		// (e.g. a container's control pipe under the search root) would
+		// block forever in a raw Read that cannot observe context
+		// cancellation, wedging the whole turn.
+		if !info.Mode().IsRegular() {
+			return nil
 		}
 
 		// Use walker's shouldSkip method for files
