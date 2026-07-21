@@ -7,3 +7,5 @@ The `mode` parameter controls what the sub-agent can do:
 - `write`: an agent that can additionally edit files and run shell commands to carry out a self-contained task end to end. Use it only when the task requires making changes. It cannot launch further sub-agents.
 
 If a sub-agent call fails or is interrupted (e.g. a canceled tool call), the error message includes that session's ID. Retry the same task with `resume_session_id` set to that ID to continue from where it left off — with the full prior message history and progress intact — instead of starting over from scratch.
+
+Set `background: true` to start the sub-agent and return immediately instead of waiting for it to finish. Its result is delivered later as a follow-up message in this conversation; check on progress any time with `AgentList` or `AgentProgress(session_id)`.

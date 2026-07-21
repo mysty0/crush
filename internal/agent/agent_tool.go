@@ -23,6 +23,7 @@ type AgentParams struct {
 	Model           string `json:"model,omitempty" description:"Optional. The ID of the model to run this task on, chosen from the list of available models in this tool's description. Omit to use the default model. Prefer a more capable model for hard, reasoning-heavy tasks and a smaller, faster model for routine or well-scoped tasks."`
 	Mode            string `json:"mode,omitempty" description:"Optional. \"read\" (default) launches a read-only agent that can only search and read files. \"write\" launches an agent that can also edit files and run shell commands to carry out the task. Use \"write\" only when the task requires making changes."`
 	ResumeSessionID string `json:"resume_session_id,omitempty" description:"Optional. Continue a previous sub-agent session instead of starting a new one -- e.g. after a failed or interrupted call, using the session ID from its error message. The prompt is delivered as a follow-up in that session, with its full prior history and progress intact. Omit to start a fresh sub-agent."`
+	Background      bool   `json:"background,omitempty" description:"Optional. If true, start the sub-agent and return immediately instead of waiting for it to finish. Its result is delivered later as a follow-up message in this conversation; check on it any time with AgentList or AgentProgress(session_id)."`
 }
 
 const (
@@ -144,6 +145,7 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 				SessionTitle:    "New Agent Session",
 				ResumeSessionID: params.ResumeSessionID,
 				ToolName:        AgentToolName,
+				Background:      params.Background,
 			})
 		},
 	), nil

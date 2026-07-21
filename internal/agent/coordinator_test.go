@@ -73,6 +73,13 @@ func newTestCoordinator(t *testing.T, env fakeEnv, providerID string, providerCf
 		sessions:  env.sessions,
 		messages:  env.messages,
 		subAgents: newSubAgentRegistry(),
+		// currentAgent is a minimal non-nil stand-in so a backgrounded
+		// sub-agent's completion (which queues a follow-up via
+		// coordinator.Run -> UpdateModels -> currentAgent.SetModels)
+		// doesn't panic on a nil interface; UpdateModels still fails
+		// gracefully right after with errCoderAgentNotConfigured since
+		// no agent config is set up here.
+		currentAgent: &mockSessionAgent{},
 	}
 }
 
@@ -397,6 +404,58 @@ func TestRunSubAgent(t *testing.T) {
 		require.NoError(t, err)
 		assert.InDelta(t, 0.05, updated.Cost, 1e-9)
 	})
+}
+
+// TestRunSubAgent_Background verifies that Background:true detaches the
+// sub-agent immediately: runSubAgent must return before the underlying
+// agent run finishes, with a response describing the backgrounded
+// session, and the sub-agent registry must already show it as running.
+// The eventual completion path (completeSubAgentBackgrounded queuing a
+// follow-up message via coordinator.Run) is exercised by the same,
+// pre-existing machinery the Ctrl+B background trigger already uses --
+// it is intentionally not driven to completion here, since that would
+// require a fully wired coordinator (see agenttest.NewCoordinator)
+// rather than this package's minimal unit-test coordinator.
+func TestRunSubAgent_Background(t *testing.T) {
+	const providerID = "test-provider"
+	providerCfg := config.ProviderConfig{ID: providerID}
+
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+	parentSession, err := env.sessions.Create(t.Context(), "Parent")
+	require.NoError(t, err)
+
+	// release is deliberately never closed: the mock agent's run stays
+	// blocked for the lifetime of the test so it can never reach
+	// completeSubAgentBackgrounded, which would otherwise attempt to
+	// queue a follow-up through this test's incompletely-wired
+	// coordinator.
+	release := make(chan struct{})
+	agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+		<-release
+		return agentResultWithText("background done"), nil
+	})
+
+	resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		Agent:          agent,
+		SessionID:      parentSession.ID,
+		AgentMessageID: "msg-1",
+		ToolCallID:     "call-1",
+		Prompt:         "test",
+		SessionTitle:   "Test",
+		ToolName:       AgentToolName,
+		Background:     true,
+	})
+	require.NoError(t, err)
+	assert.False(t, resp.IsError)
+	assert.Contains(t, resp.Content, "background")
+
+	// The tool call must return before the agent's run has even
+	// finished -- the mock agent is still blocked on release.
+	statuses := coord.subAgents.list(parentSession.ID)
+	require.Len(t, statuses, 1)
+	assert.Equal(t, SubAgentRunning, statuses[0].State)
 }
 
 func TestRunSubAgent_Resume(t *testing.T) {

@@ -81,14 +81,22 @@ var copilotResponsesModels = map[string]bool{
 	"gpt-5-mini":    true,
 }
 
-// OpenCode models that user Anthropic Messages API instead of Chat Completions.
+// OpenCode models that use the Anthropic Messages API instead of Chat Completions.
 var opencodeMessagesModels = map[string]bool{
 	"qwen3.7-max": true,
 }
 
+// defaultLegacyThinkBudgetTokens is the reasoning token budget applied for
+// Anthropic/Bedrock models when the legacy boolean Think toggle is on but
+// no discrete reasoning level has been chosen yet.
+const defaultLegacyThinkBudgetTokens = 2000
+
+// defaultLegacyThinkLevel is the reasoning level applied for Google models
+// when the legacy boolean Think toggle is on but no discrete reasoning
+// level has been chosen yet.
+const defaultLegacyThinkLevel = "low"
+
 type Coordinator interface {
-	// INFO: (kujtim) this is not used yet we will use this when we have multiple agents
-	// SetMainAgent(string)
 	Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error)
 	// RunAccepted runs a call that was already accepted via
 	// BeginAccepted on the fire-and-forget dispatch path. The handle is
@@ -113,7 +121,9 @@ type Coordinator interface {
 	Summarize(context.Context, string) error
 	Model() Model
 	UpdateModels(ctx context.Context) error
-	GenerateTitle(ctx context.Context, sessionID, prompt string)
+	// GenerateTitle generates a session title using the current agent. It
+	// returns errCoderAgentNotConfigured if no agent is configured.
+	GenerateTitle(ctx context.Context, sessionID, prompt string) error
 	// RegenerateTitle re-runs AI title generation for a session using its
 	// first user message. It returns an error if the session has no user
 	// message to title from.
@@ -152,6 +162,14 @@ type Coordinator interface {
 	// workflows, scheduled tasks) owned by parentSessionID, for the UI's
 	// task picker. See TaskStatus.
 	Tasks(parentSessionID string) []TaskStatus
+	// SubscribeTasks returns a channel that receives status-change
+	// events for every kind of background task (sub-agents,
+	// workflows, scheduled tasks) across every registry, so a
+	// subscriber can watch the unified task list update without
+	// polling. The broker is package-level, so every coordinator
+	// instance shares the same event stream (no per-instance
+	// filtering).
+	SubscribeTasks(ctx context.Context) <-chan pubsub.Event[TaskStatusEvent]
 	// ReconcileStuckSession scans sessionID and every descendant
 	// session (sub-agent and workflow sessions reachable through the
 	// session tree) for tool calls left unfinished by a run that
@@ -362,7 +380,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 		return nil, errModelProviderNotConfigured
 	}
 
-	mergedOptions, temp, topP, topK, freqPenalty, presPenalty := mergeCallOptions(model, providerCfg)
+	callOpts := mergeCallOptions(model, providerCfg)
 
 	if err := c.refreshTokenIfExpired(ctx, providerCfg); err != nil {
 		// NOTE(@andreynering): We don't return here because the event handling to ask the user to reauthenticate
@@ -401,12 +419,12 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 			Prompt:           prompt,
 			Attachments:      attachments,
 			MaxOutputTokens:  maxTokens,
-			ProviderOptions:  mergedOptions,
-			Temperature:      temp,
-			TopP:             topP,
-			TopK:             topK,
-			FrequencyPenalty: freqPenalty,
-			PresencePenalty:  presPenalty,
+			ProviderOptions:  callOpts.Options,
+			Temperature:      callOpts.Temperature,
+			TopP:             callOpts.TopP,
+			TopK:             callOpts.TopK,
+			FrequencyPenalty: callOpts.FrequencyPenalty,
+			PresencePenalty:  callOpts.PresencePenalty,
 			OnComplete:       onComplete,
 			Accepted:         accept,
 		})
@@ -550,11 +568,15 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 			parsed, err := openai.ParseResponsesOptions(mergedOptions)
 			if err == nil {
 				options[openai.Name] = parsed
+			} else {
+				slog.Warn("Failed to parse provider options", "provider", openai.Name, "error", err)
 			}
 		} else {
 			parsed, err := openai.ParseOptions(mergedOptions)
 			if err == nil {
 				options[openai.Name] = parsed
+			} else {
+				slog.Warn("Failed to parse provider options", "provider", openai.Name, "error", err)
 			}
 		}
 	case anthropic.Name, bedrock.Name:
@@ -588,7 +610,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 				} else if model.ModelCfg.ReasoningEffort == "" && model.ModelCfg.Think {
 					// Legacy boolean toggle with no discrete level
 					// selected yet: preserve prior default budget.
-					mergedOptions["thinking"] = map[string]any{"budget_tokens": 2000}
+					mergedOptions["thinking"] = map[string]any{"budget_tokens": defaultLegacyThinkBudgetTokens}
 				}
 			}
 		}
@@ -596,6 +618,8 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		parsed, err := anthropic.ParseOptions(mergedOptions)
 		if err == nil {
 			options[anthropic.Name] = parsed
+		} else {
+			slog.Warn("Failed to parse provider options", "provider", anthropic.Name, "error", err)
 		}
 
 	case openrouter.Name:
@@ -609,6 +633,8 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		parsed, err := openrouter.ParseOptions(mergedOptions)
 		if err == nil {
 			options[openrouter.Name] = parsed
+		} else {
+			slog.Warn("Failed to parse provider options", "provider", openrouter.Name, "error", err)
 		}
 	case vercel.Name:
 		_, hasReasoning := mergedOptions["reasoning"]
@@ -621,6 +647,8 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		parsed, err := vercel.ParseOptions(mergedOptions)
 		if err == nil {
 			options[vercel.Name] = parsed
+		} else {
+			slog.Warn("Failed to parse provider options", "provider", vercel.Name, "error", err)
 		}
 	case google.Name:
 		_, hasReasoning := mergedOptions["thinking_config"]
@@ -629,7 +657,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 			if level == "" && model.ModelCfg.Think {
 				// Legacy boolean toggle with no discrete level selected
 				// yet: preserve the old always-on behavior.
-				level = "low"
+				level = defaultLegacyThinkLevel
 			}
 			if strings.HasPrefix(model.CatwalkCfg.ID, "gemini-2") {
 				// Gemini 2.x controls thinking via a numeric token
@@ -657,6 +685,8 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		parsed, err := google.ParseOptions(mergedOptions)
 		if err == nil {
 			options[google.Name] = parsed
+		} else {
+			slog.Warn("Failed to parse provider options", "provider", google.Name, "error", err)
 		}
 	case openaicompat.Name, hyper.Name:
 		extraBody := make(map[string]any)
@@ -716,6 +746,8 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		parsed, err := openaicompat.ParseOptions(mergedOptions)
 		if err == nil {
 			options[openaicompat.Name] = parsed
+		} else {
+			slog.Warn("Failed to parse provider options", "provider", openaicompat.Name, "error", err)
 		}
 	default:
 		// Known custom providers (litellm, ollama, omlx) are
@@ -724,6 +756,8 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 			parsed, err := openaicompat.ParseOptions(mergedOptions)
 			if err == nil {
 				options[openaicompat.Name] = parsed
+			} else {
+				slog.Warn("Failed to parse provider options", "provider", openaicompat.Name, "error", err)
 			}
 		}
 	}
@@ -731,14 +765,29 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 	return options
 }
 
-func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64) {
-	modelOptions := getProviderOptions(model, cfg)
-	temp := cmp.Or(model.ModelCfg.Temperature, model.CatwalkCfg.Options.Temperature)
-	topP := cmp.Or(model.ModelCfg.TopP, model.CatwalkCfg.Options.TopP)
-	topK := cmp.Or(model.ModelCfg.TopK, model.CatwalkCfg.Options.TopK)
-	freqPenalty := cmp.Or(model.ModelCfg.FrequencyPenalty, model.CatwalkCfg.Options.FrequencyPenalty)
-	presPenalty := cmp.Or(model.ModelCfg.PresencePenalty, model.CatwalkCfg.Options.PresencePenalty)
-	return modelOptions, temp, topP, topK, freqPenalty, presPenalty
+// callParams holds the resolved provider options and sampling parameters
+// for a single agent call, as computed by mergeCallOptions. Using a named
+// struct (rather than a positional tuple of same-typed values) avoids a
+// silent transposition bug between Temperature, TopP, FrequencyPenalty,
+// and PresencePenalty.
+type callParams struct {
+	Options          fantasy.ProviderOptions
+	Temperature      *float64
+	TopP             *float64
+	TopK             *int64
+	FrequencyPenalty *float64
+	PresencePenalty  *float64
+}
+
+func mergeCallOptions(model Model, cfg config.ProviderConfig) callParams {
+	return callParams{
+		Options:          getProviderOptions(model, cfg),
+		Temperature:      cmp.Or(model.ModelCfg.Temperature, model.CatwalkCfg.Options.Temperature),
+		TopP:             cmp.Or(model.ModelCfg.TopP, model.CatwalkCfg.Options.TopP),
+		TopK:             cmp.Or(model.ModelCfg.TopK, model.CatwalkCfg.Options.TopK),
+		FrequencyPenalty: cmp.Or(model.ModelCfg.FrequencyPenalty, model.CatwalkCfg.Options.FrequencyPenalty),
+		PresencePenalty:  cmp.Or(model.ModelCfg.PresencePenalty, model.CatwalkCfg.Options.PresencePenalty),
+	}
 }
 
 func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, agent config.Agent, isSubAgent bool) (SessionAgent, error) {
@@ -990,10 +1039,17 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	filteredTools = wrapToolsWithPlanMode(filteredTools, c.permissions)
 
 	// Tag tool-originated errors so a tool failure that halts the run is
-	// reported distinctly instead of as a generic provider error. This is
-	// the outermost wrapper so it also captures errors from the hook and
-	// plan-mode decorators.
+	// reported distinctly instead of as a generic provider error. This
+	// wraps the hook and plan-mode decorators so it also captures their
+	// errors.
 	filteredTools = wrapToolsWithErrorTagging(filteredTools)
+
+	// Guarantee that a run cancellation always returns control to the user,
+	// even if a tool ignores context cancellation or is wedged in a
+	// blocking syscall. This must be the outermost wrapper so it races the
+	// whole decorator chain (hooks, plan mode, error tagging, tool) against
+	// the run context.
+	filteredTools = wrapToolsWithCancellation(filteredTools)
 
 	return filteredTools, nil
 }
@@ -1066,6 +1122,17 @@ func (c *coordinator) buildModelFromSelected(ctx context.Context, modelCfg confi
 	}, nil
 }
 
+// debugHTTPClient returns an HTTP client that logs request/response
+// traffic when debug mode is enabled in config, or nil otherwise. It
+// centralizes the "opt into a debug HTTP client" check that every
+// build*Provider method otherwise repeated individually.
+func (c *coordinator) debugHTTPClient() *http.Client {
+	if c.cfg.Config().Options.Debug {
+		return log.NewHTTPClient()
+	}
+	return nil
+}
+
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
 	var opts []anthropic.Option
 
@@ -1096,8 +1163,8 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 	// the subscription-OAuth endpoint requires (see cc_system_split.go).
 	// It is a no-op for non-Claude-Code system prompts.
 	var base http.RoundTripper = http.DefaultTransport
-	if c.cfg.Config().Options.Debug {
-		base = log.NewHTTPClient().Transport
+	if hc := c.debugHTTPClient(); hc != nil {
+		base = hc.Transport
 	}
 	// For the native Claude Code subscription provider, inject a fresh
 	// OAuth bearer token (read+refreshed from ~/.claude/.credentials.json)
@@ -1122,9 +1189,8 @@ func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[st
 		openai.WithAPIKey(apiKey),
 		openai.WithUseResponsesAPI(),
 	}
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
-		opts = append(opts, openai.WithHTTPClient(httpClient))
+	if hc := c.debugHTTPClient(); hc != nil {
+		opts = append(opts, openai.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
 		opts = append(opts, openai.WithHeaders(headers))
@@ -1139,9 +1205,8 @@ func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[stri
 	opts := []openrouter.Option{
 		openrouter.WithAPIKey(apiKey),
 	}
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
-		opts = append(opts, openrouter.WithHTTPClient(httpClient))
+	if hc := c.debugHTTPClient(); hc != nil {
+		opts = append(opts, openrouter.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
 		opts = append(opts, openrouter.WithHeaders(headers))
@@ -1153,9 +1218,8 @@ func (c *coordinator) buildVercelProvider(_, apiKey string, headers map[string]s
 	opts := []vercel.Option{
 		vercel.WithAPIKey(apiKey),
 	}
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
-		opts = append(opts, vercel.WithHTTPClient(httpClient))
+	if hc := c.debugHTTPClient(); hc != nil {
+		opts = append(opts, vercel.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
 		opts = append(opts, vercel.WithHeaders(headers))
@@ -1182,8 +1246,8 @@ func (c *coordinator) buildOpenaiCompatProvider(baseURL, apiKey string, headers 
 		)
 		httpClient = copilot.NewClient(isSubAgent, c.cfg.Config().Options.Debug)
 	}
-	if httpClient == nil && c.cfg.Config().Options.Debug {
-		httpClient = log.NewHTTPClient()
+	if httpClient == nil {
+		httpClient = c.debugHTTPClient()
 	}
 	if httpClient != nil {
 		opts = append(opts, openaicompat.WithHTTPClient(httpClient))
@@ -1206,9 +1270,8 @@ func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[str
 		azure.WithAPIKey(apiKey),
 		azure.WithUseResponsesAPI(),
 	}
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
-		opts = append(opts, azure.WithHTTPClient(httpClient))
+	if hc := c.debugHTTPClient(); hc != nil {
+		opts = append(opts, azure.WithHTTPClient(hc))
 	}
 	if options == nil {
 		options = make(map[string]string)
@@ -1225,9 +1288,8 @@ func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[str
 
 func (c *coordinator) buildBedrockProvider(apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
 	var opts []bedrock.Option
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
-		opts = append(opts, bedrock.WithHTTPClient(httpClient))
+	if hc := c.debugHTTPClient(); hc != nil {
+		opts = append(opts, bedrock.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
 		opts = append(opts, bedrock.WithHeaders(headers))
@@ -1257,9 +1319,8 @@ func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[st
 		google.WithBaseURL(baseURL),
 		google.WithGeminiAPIKey(apiKey),
 	}
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
-		opts = append(opts, google.WithHTTPClient(httpClient))
+	if hc := c.debugHTTPClient(); hc != nil {
+		opts = append(opts, google.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
 		opts = append(opts, google.WithHeaders(headers))
@@ -1269,9 +1330,8 @@ func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[st
 
 func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, options map[string]string) (fantasy.Provider, error) {
 	opts := []google.Option{}
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
-		opts = append(opts, google.WithHTTPClient(httpClient))
+	if hc := c.debugHTTPClient(); hc != nil {
+		opts = append(opts, google.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
 		opts = append(opts, google.WithHeaders(headers))
@@ -1290,24 +1350,19 @@ func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, optio
 // and injects the subscription bearer, chatgpt-account-id, and Codex beta
 // headers on every request via codex.AuthTransport.
 func (c *coordinator) buildCodexProvider(baseURL, apiKey string, headers map[string]string) (fantasy.Provider, error) {
-	if baseURL == "" {
-		baseURL = codex.BaseURL
-	}
 	var base http.RoundTripper = http.DefaultTransport
-	if c.cfg.Config().Options.Debug {
-		base = log.NewHTTPClient().Transport
+	if hc := c.debugHTTPClient(); hc != nil {
+		base = hc.Transport
 	}
-	httpClient := &http.Client{Transport: codex.NewAuthTransport(base, apiKey)}
-	opts := []openai.Option{
-		openai.WithBaseURL(baseURL),
-		openai.WithUseResponsesAPI(),
-		openai.WithAPIKey(apiKey),
-		openai.WithHTTPClient(httpClient),
-	}
-	if len(headers) > 0 {
-		opts = append(opts, openai.WithHeaders(headers))
-	}
-	return openai.New(opts...)
+
+	return codex.NewProvider(codex.ProviderOptions{
+		BaseURL: baseURL,
+		APIKey:  apiKey,
+		Headers: headers,
+		HTTPClient: &http.Client{
+			Transport: codex.NewAuthTransport(base, apiKey),
+		},
+	})
 }
 
 // buildGeminiCliProvider builds the Gemini CLI (Cloud Code Assist)
@@ -1323,8 +1378,8 @@ func (c *coordinator) buildGeminiCliProvider(apiKey string, headers, oauthExtra 
 		projectID = oauthExtra["project_id"]
 	}
 	var base http.RoundTripper = http.DefaultTransport
-	if c.cfg.Config().Options.Debug {
-		base = log.NewHTTPClient().Transport
+	if hc := c.debugHTTPClient(); hc != nil {
+		base = hc.Transport
 	}
 	httpClient := &http.Client{Transport: &geminicli.WireTransport{
 		Base:        base,
@@ -1551,12 +1606,15 @@ func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 	return c.runWithUnauthorizedRetry(ctx, providerCfg, summarize)
 }
 
-// GenerateTitle generates a session title using the current agent.
-func (c *coordinator) GenerateTitle(ctx context.Context, sessionID, prompt string) {
+// GenerateTitle generates a session title using the current agent. It
+// returns errCoderAgentNotConfigured if no agent is configured, matching
+// RegenerateTitle's behavior for the identical guard.
+func (c *coordinator) GenerateTitle(ctx context.Context, sessionID, prompt string) error {
 	if c.currentAgent == nil {
-		return
+		return errCoderAgentNotConfigured
 	}
 	c.currentAgent.GenerateTitle(ctx, sessionID, prompt)
+	return nil
 }
 
 // RegenerateTitle re-runs AI title generation for a session using the whole
@@ -1617,6 +1675,11 @@ func (c *coordinator) CancelSubAgent(subAgentSessionID string) {
 // BackgroundNow implements Coordinator.
 func (c *coordinator) BackgroundNow(sessionID string) map[tools.BackgroundKind]int {
 	return tools.BackgroundNow(sessionID)
+}
+
+// SubscribeTasks implements Coordinator.
+func (c *coordinator) SubscribeTasks(ctx context.Context) <-chan pubsub.Event[TaskStatusEvent] {
+	return SubscribeTaskStatus(ctx)
 }
 
 // titleContextMaxChars caps how much conversation text is fed to title
@@ -1685,7 +1748,7 @@ func (c *coordinator) retryAfterUnauthorized(ctx context.Context, providerCfg co
 		return c.refreshOAuth2Token(ctx, providerCfg)
 	case strings.Contains(providerCfg.APIKeyTemplate, "$"):
 		slog.Debug("Received 401. Refreshing API Key template and retrying", "provider", providerCfg.ID)
-		return c.refreshApiKeyTemplate(ctx, providerCfg)
+		return c.refreshAPIKeyTemplate(ctx, providerCfg)
 	default:
 		return nil
 	}
@@ -1805,7 +1868,7 @@ func (c *coordinator) refreshOAuth2Token(ctx context.Context, providerCfg config
 	return nil
 }
 
-func (c *coordinator) refreshApiKeyTemplate(ctx context.Context, providerCfg config.ProviderConfig) error {
+func (c *coordinator) refreshAPIKeyTemplate(ctx context.Context, providerCfg config.ProviderConfig) error {
 	newAPIKey, err := c.cfg.Resolve(providerCfg.APIKeyTemplate)
 	if err != nil {
 		slog.Error("Failed to re-resolve API key after 401 error", "provider", providerCfg.ID, "error", err)
@@ -1845,6 +1908,13 @@ type subAgentParams struct {
 	// recorded in the subAgentRegistry entry for AgentList/
 	// AgentProgress. Defaults to a truncated Prompt if empty.
 	Label string
+	// Background, when set, detaches the sub-agent immediately instead
+	// of blocking the tool call until it finishes: runSubAgent returns
+	// right after starting the run, and the eventual result is queued
+	// back into the parent session as a follow-up message (see
+	// completeSubAgentBackgrounded), exactly as if Ctrl+B had
+	// backgrounded it mid-flight.
+	Background bool
 }
 
 // runSubAgent runs a sub-agent and handles session management and cost accumulation.
@@ -1905,9 +1975,6 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 	// non-backgrounded case.
 	bgCtx, bgCancel := context.WithCancel(context.WithoutCancel(ctx))
 
-	trigger, unregisterBackground := tools.RegisterBackground(params.SessionID, params.ToolCallID, tools.BackgroundKindSubAgent)
-	defer unregisterBackground()
-
 	resultCh := make(chan subAgentRunOutcome, 1)
 	go func() {
 		var result *fantasy.AgentResult
@@ -1929,6 +1996,24 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		})
 		resultCh <- subAgentRunOutcome{result: result, err: runErr}
 	}()
+
+	if params.Background {
+		// Detach immediately -- the caller asked to background this
+		// sub-agent from the start rather than waiting for Ctrl+B, so
+		// skip the blocking select entirely.
+		go func() {
+			out := <-resultCh
+			bgCancel()
+			c.completeSubAgentBackgrounded(params, subSession, model, out)
+		}()
+		return fantasy.NewTextResponse(fmt.Sprintf(
+			"Started the sub-agent in the background (session %s). I'll follow up in this conversation once it finishes -- check on it any time with AgentProgress(session_id=%q).",
+			subSession.ID, subSession.ID,
+		)), nil
+	}
+
+	trigger, unregisterBackground := tools.RegisterBackground(params.SessionID, params.ToolCallID, tools.BackgroundKindSubAgent)
+	defer unregisterBackground()
 
 	select {
 	case out := <-resultCh:
@@ -1957,9 +2042,12 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		// blocking behavior a plain synchronous call already had.
 		bgCancel()
 		out := <-resultCh
-		c.subAgents.finish(subSession.ID, SubAgentFailed, ctx.Err().Error())
+		reason := ctx.Err().Error()
+		if out.err != nil {
+			reason = out.err.Error()
+		}
+		c.subAgents.finish(subSession.ID, SubAgentFailed, reason)
 		c.lingerSubAgentRemoval(subSession.ID)
-		_ = out
 		return fantasy.ToolResponse{}, ctx.Err()
 	}
 }
@@ -1987,13 +2075,7 @@ func (c *coordinator) lingerSubAgentRemoval(sessionID string) {
 // non-backgrounded case. It formats the same response a direct,
 // unbackgrounded runSubAgent always returned.
 func (c *coordinator) completeSubAgentSync(ctx context.Context, params subAgentParams, subSession session.Session, model Model, out subAgentRunOutcome) (fantasy.ToolResponse, error) {
-	// Notify only if still unauthorized after retry.
-	if out.err != nil && c.isUnauthorized(out.err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
-		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
-			Type:       notify.TypeReAuthenticate,
-			ProviderID: model.ModelCfg.Provider,
-		})
-	}
+	c.notifyIfUnauthorized(model, out.err)
 	if out.err != nil {
 		c.subAgents.finish(subSession.ID, SubAgentFailed, out.err.Error())
 		c.lingerSubAgentRemoval(subSession.ID)
@@ -2005,14 +2087,7 @@ func (c *coordinator) completeSubAgentSync(ctx context.Context, params subAgentP
 
 	// Update parent session cost on a best-effort basis. A failure here must
 	// not discard the sub-agent output that was already produced.
-	if err := c.updateParentSessionCost(ctx, subSession.ID, params.SessionID); err != nil {
-		slog.Warn(
-			"Failed to update parent session cost",
-			"child_session", subSession.ID,
-			"parent_session", params.SessionID,
-			"error", err,
-		)
-	}
+	c.finalizeSubAgentCost(ctx, subSession.ID, params.SessionID)
 
 	c.subAgents.finish(subSession.ID, SubAgentDone, "")
 	c.lingerSubAgentRemoval(subSession.ID)
@@ -2030,12 +2105,7 @@ func (c *coordinator) completeSubAgentSync(ctx context.Context, params subAgentP
 // follow-up user message instead -- the same mechanism finishWorkflow uses
 // for background workflows completing.
 func (c *coordinator) completeSubAgentBackgrounded(params subAgentParams, subSession session.Session, model Model, out subAgentRunOutcome) {
-	if out.err != nil && c.isUnauthorized(out.err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
-		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
-			Type:       notify.TypeReAuthenticate,
-			ProviderID: model.ModelCfg.Provider,
-		})
-	}
+	c.notifyIfUnauthorized(model, out.err)
 
 	var prompt string
 	if out.err != nil {
@@ -2047,14 +2117,7 @@ func (c *coordinator) completeSubAgentBackgrounded(params subAgentParams, subSes
 	} else {
 		// Best-effort, mirroring completeSubAgentSync: a cost-tracking
 		// failure must not discard the sub-agent's output.
-		if err := c.updateParentSessionCost(context.Background(), subSession.ID, params.SessionID); err != nil {
-			slog.Warn(
-				"Failed to update parent session cost",
-				"child_session", subSession.ID,
-				"parent_session", params.SessionID,
-				"error", err,
-			)
-		}
+		c.finalizeSubAgentCost(context.Background(), subSession.ID, params.SessionID)
 		c.subAgents.finish(subSession.ID, SubAgentDone, "")
 		output := subAgentOutput(out.result)
 		if output == "" {
@@ -2108,6 +2171,37 @@ func subAgentOutput(result *fantasy.AgentResult) string {
 		return ""
 	}
 	return result.Response.Content.Text()
+}
+
+// notifyIfUnauthorized publishes a reauth-required notification when a
+// sub-agent turn's error is still an unauthorized failure after retry, for
+// providers that support reauth notifications (currently only hyper). It
+// is shared by completeSubAgentSync and completeSubAgentBackgrounded so
+// both the synchronous and backgrounded sub-agent completion paths notify
+// identically.
+func (c *coordinator) notifyIfUnauthorized(model Model, err error) {
+	if err != nil && c.isUnauthorized(err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
+		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+			Type:       notify.TypeReAuthenticate,
+			ProviderID: model.ModelCfg.Provider,
+		})
+	}
+}
+
+// finalizeSubAgentCost updates the parent session's cost with a completed
+// sub-agent's cost on a best-effort basis, logging (rather than
+// returning) any failure so it never discards the sub-agent output that
+// was already produced. Shared by completeSubAgentSync and
+// completeSubAgentBackgrounded.
+func (c *coordinator) finalizeSubAgentCost(ctx context.Context, childSessionID, parentSessionID string) {
+	if err := c.updateParentSessionCost(ctx, childSessionID, parentSessionID); err != nil {
+		slog.Warn(
+			"Failed to update parent session cost",
+			"child_session", childSessionID,
+			"parent_session", parentSessionID,
+			"error", err,
+		)
+	}
 }
 
 // updateParentSessionCost accumulates the cost from a child session to its parent session.

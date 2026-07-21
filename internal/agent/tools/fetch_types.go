@@ -14,16 +14,18 @@ const LargeContentThreshold = 50000 // 50KB
 
 // AgenticFetchParams defines the parameters for the agentic fetch tool.
 type AgenticFetchParams struct {
-	URL    string `json:"url,omitempty" description:"The URL to fetch content from (optional - if not provided, the agent will search the web)"`
-	Prompt string `json:"prompt" description:"The prompt describing what information to find or extract"`
-	Model  string `json:"model,omitempty" description:"Optional. The ID of the model to run this fetch on, chosen from the list of available models in this tool's description. Omit to use the default model (a Claude Sonnet model, chosen for a good balance of quality and cost for summarization/extraction tasks)."`
+	URL        string `json:"url,omitempty" description:"The URL to fetch content from (optional - if not provided, the agent will search the web)"`
+	Prompt     string `json:"prompt" description:"The prompt describing what information to find or extract"`
+	Model      string `json:"model,omitempty" description:"Optional. The ID of the model to run this fetch on, chosen from the list of available models in this tool's description. Omit to use the default model (a Claude Sonnet model, chosen for a good balance of quality and cost for summarization/extraction tasks)."`
+	Background bool   `json:"background,omitempty" description:"Optional. If true, start the fetch/analysis and return immediately instead of waiting for it to finish. Its result is delivered later as a follow-up message in this conversation; check on it any time with AgentList or AgentProgress(session_id)."`
 }
 
 // AgenticFetchPermissionsParams defines the permission parameters for the agentic fetch tool.
 type AgenticFetchPermissionsParams struct {
-	URL    string `json:"url,omitempty"`
-	Prompt string `json:"prompt"`
-	Model  string `json:"model,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Prompt     string `json:"prompt"`
+	Model      string `json:"model,omitempty"`
+	Background bool   `json:"background,omitempty"`
 }
 
 // WebFetchParams defines the parameters for the web_fetch tool.
