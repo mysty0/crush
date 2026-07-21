@@ -1156,7 +1156,20 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				return getSessionErr
 			}
 			usage, estimated := fallbackStepUsage(stepMessages, stepResult)
-			a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimated)
+			cost := a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimated)
+			// Persist this turn's usage on the assistant message so per-turn
+			// and cumulative token consumption can be reconstructed from
+			// history (the session counters only keep the latest snapshot).
+			if !usageIsZero(usage) {
+				currentAssistant.AddTokenUsage(message.TokenUsage{
+					InputTokens:         usage.InputTokens,
+					OutputTokens:        usage.OutputTokens,
+					CacheReadTokens:     usage.CacheReadTokens,
+					CacheCreationTokens: usage.CacheCreationTokens,
+					Cost:                cost,
+					Estimated:           estimated,
+				})
+			}
 			extractHyperCredits(stepResult.ProviderMetadata)
 			_, sessionErr := a.sessions.Save(ctx, updatedSession)
 			if sessionErr != nil {
@@ -2078,7 +2091,9 @@ func extractHyperCredits(metadata fantasy.ProviderMetadata) {
 	}
 }
 
-func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64, estimated bool) {
+// updateSessionUsage applies a turn's usage/cost to the session and returns
+// the final (possibly overridden or flat-rate-zeroed) cost applied.
+func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64, estimated bool) float64 {
 	if !usageIsZero(usage) {
 		session.EstimatedUsage = estimated
 	}
@@ -2109,6 +2124,7 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 
 	session.Cost += cost
 	updateSessionTokenCounters(session, usage)
+	return cost
 }
 
 func updateSessionTokenCounters(session *session.Session, usage fantasy.Usage) {

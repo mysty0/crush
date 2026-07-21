@@ -90,7 +90,7 @@ func (c *coordinator) buildMemoryRecall(isSubAgent bool, small Model) (recall fu
 		if small.Model != nil {
 			due := dueForJudge(ctx, c.memory, judging, fresh)
 			if len(due) > 0 {
-				go c.judgeMemoryRelevance(small, smallProviderCfg.SystemPromptPrefix, query, due, judging)
+				go c.judgeMemoryRelevance(small, smallProviderCfg.SystemPromptPrefix, projectScope, query, due, judging)
 			}
 		}
 
@@ -135,7 +135,7 @@ func dueForJudge(ctx context.Context, store *memory.Store, judging *csync.Map[st
 // this runs detached in the background, so an unexpected failure here (a
 // bad provider config, a malformed response) must never crash the process.
 // Always releases every hit's judging claim on return, however it exits.
-func (c *coordinator) judgeMemoryRelevance(small Model, systemPromptPrefix, query string, hits []memory.Hit, judging *csync.Map[string, struct{}]) {
+func (c *coordinator) judgeMemoryRelevance(small Model, systemPromptPrefix, projectScope, query string, hits []memory.Hit, judging *csync.Map[string, struct{}]) {
 	defer func() {
 		for _, h := range hits {
 			judging.Del(h.ID)
@@ -173,6 +173,12 @@ func (c *coordinator) judgeMemoryRelevance(small Model, systemPromptPrefix, quer
 		slog.Debug("Memory relevance judge failed; leaving importance unchanged", "err", err)
 		return
 	}
+
+	// The judge already spent subscription tokens, whatever the verdict.
+	// Record that usage to the DB and telemetry so this background
+	// small-model call is no longer invisible.
+	c.recordBackgroundUsage(ctx, small, projectScope, bgSourceMemoryJudge, "Memory relevance checks",
+		fmt.Sprintf("Judged %d recalled memories for relevance.", len(hits)), resp.TotalUsage)
 
 	relevant := parseRelevanceVerdict(resp.Response.Content.Text(), len(hits))
 	if relevant == nil {

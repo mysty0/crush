@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/memory"
 )
 
 // nativeWebSearch performs a web search using the active model provider's
@@ -52,6 +53,9 @@ func (c *coordinator) nativeWebSearch(ctx context.Context, query string, maxResu
 	if err != nil {
 		return "", false, err
 	}
+
+	c.recordBackgroundUsage(ctx, large, memory.ProjectScope(c.cfg.WorkingDir()),
+		bgSourceWebSearch, "Web searches", "Searched: "+query, resp.Usage)
 
 	return formatNativeSearchResponse(resp), true, nil
 }
@@ -132,6 +136,9 @@ func (c *coordinator) summarizeWebContent(ctx context.Context, url, content, use
 	if err != nil {
 		return "", err
 	}
+
+	c.recordBackgroundUsage(ctx, small, memory.ProjectScope(c.cfg.WorkingDir()),
+		bgSourceWebFetch, "Web page summaries", "Summarized: "+url, resp.Usage)
 	return strings.TrimSpace(resp.Content.Text()), nil
 }
 

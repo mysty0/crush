@@ -140,6 +140,24 @@ type ShellCommand struct {
 
 func (ShellCommand) isPart() {}
 
+// TokenUsage records the model token usage (and cost) for the assistant
+// turn that produced this message. It is persisted as a content part so
+// per-turn and cumulative usage can be reconstructed from message history:
+// the session-level prompt_tokens/completion_tokens only hold the latest
+// turn's snapshot, and cost is zero on flat-rate subscriptions.
+type TokenUsage struct {
+	InputTokens         int64   `json:"input_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	CacheReadTokens     int64   `json:"cache_read_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	Cost                float64 `json:"cost"`
+	// Estimated is true when the counts were inferred (e.g. from a
+	// provider that did not report usage) rather than reported.
+	Estimated bool `json:"estimated,omitempty"`
+}
+
+func (TokenUsage) isPart() {}
+
 // HasShellCommand reports whether the message contains any ShellCommand parts.
 func (m *Message) HasShellCommand() bool {
 	for _, part := range m.Parts {
@@ -462,6 +480,30 @@ func (m *Message) AddFinish(reason FinishReason, message, details string) {
 		}
 	}
 	m.Parts = append(m.Parts, Finish{Reason: reason, Time: time.Now().Unix(), Message: message, Details: details})
+}
+
+// AddTokenUsage attaches (or replaces) the per-turn token usage for this
+// message. At most one TokenUsage part is kept per message.
+func (m *Message) AddTokenUsage(u TokenUsage) {
+	for i, part := range m.Parts {
+		if _, ok := part.(TokenUsage); ok {
+			m.Parts = slices.Delete(m.Parts, i, i+1)
+			break
+		}
+	}
+	m.Parts = append(m.Parts, u)
+}
+
+// TokenUsagePart returns the message's token usage, or nil if none was
+// recorded (e.g. user/tool messages, or turns from before usage was
+// persisted).
+func (m *Message) TokenUsagePart() *TokenUsage {
+	for _, part := range m.Parts {
+		if u, ok := part.(TokenUsage); ok {
+			return &u
+		}
+	}
+	return nil
 }
 
 func (m *Message) AddImageURL(url, detail string) {

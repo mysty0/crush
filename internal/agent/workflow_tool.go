@@ -22,6 +22,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/workflow"
 )
@@ -612,6 +613,8 @@ func (r *workflowRunner) CoerceObject(ctx context.Context, text string, schema *
 	if err != nil {
 		return nil, err
 	}
+	r.c.recordBackgroundUsage(ctx, r.smallModel, memory.ProjectScope(r.c.cfg.WorkingDir()),
+		bgSourceWorkflowObject, "Workflow structured output", "", resp.Usage)
 	return resp.Object, nil
 }
 
@@ -643,6 +646,8 @@ func (r *workflowRunner) repairObjectText(schemaName string, schema fantasy.Sche
 		if err != nil {
 			return "", err
 		}
+		r.c.recordBackgroundUsage(ctx, r.smallModel, memory.ProjectScope(r.c.cfg.WorkingDir()),
+			bgSourceWorkflowObject, "Workflow structured output", "", resp.Usage)
 		return strings.TrimSpace(resp.Content.Text()), nil
 	}
 }
