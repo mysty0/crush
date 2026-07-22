@@ -94,7 +94,7 @@ func (c *coordinator) recordBackgroundUsage(ctx context.Context, model Model, pr
 	}
 
 	promptTokens := usage.InputTokens + usage.CacheReadTokens + usage.CacheCreationTokens
-	if err := c.sessions.UpdateTitleAndUsage(ctx, sessionID, title, promptTokens, usage.OutputTokens, cost); err != nil {
+	if err := c.sessions.UpdateTitleAndUsage(ctx, sessionID, title, promptTokens, usage.OutputTokens, usage.CacheCreationTokens, usage.CacheReadTokens, cost); err != nil {
 		slog.Debug("Background usage: could not update session usage", "source", source, "err", err)
 	}
 

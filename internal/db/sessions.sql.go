@@ -37,7 +37,7 @@ INSERT INTO sessions (
     ?,
     strftime('%s', 'now'),
     strftime('%s', 'now')
-) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, forked_from_session_id, forked_at_message_id
+) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, forked_from_session_id, forked_at_message_id, cache_creation_tokens, cache_read_tokens
 `
 
 type CreateSessionParams struct {
@@ -79,6 +79,8 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.Todos,
 		&i.ForkedFromSessionID,
 		&i.ForkedAtMessageID,
+		&i.CacheCreationTokens,
+		&i.CacheReadTokens,
 	)
 	return i, err
 }
@@ -94,7 +96,7 @@ func (q *Queries) DeleteSession(ctx context.Context, id string) error {
 }
 
 const getLastSession = `-- name: GetLastSession :one
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, forked_from_session_id, forked_at_message_id
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, forked_from_session_id, forked_at_message_id, cache_creation_tokens, cache_read_tokens
 FROM sessions
 ORDER BY updated_at DESC
 LIMIT 1
@@ -117,12 +119,14 @@ func (q *Queries) GetLastSession(ctx context.Context) (Session, error) {
 		&i.Todos,
 		&i.ForkedFromSessionID,
 		&i.ForkedAtMessageID,
+		&i.CacheCreationTokens,
+		&i.CacheReadTokens,
 	)
 	return i, err
 }
 
 const getSessionByID = `-- name: GetSessionByID :one
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, forked_from_session_id, forked_at_message_id
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, forked_from_session_id, forked_at_message_id, cache_creation_tokens, cache_read_tokens
 FROM sessions
 WHERE id = ? LIMIT 1
 `
@@ -144,12 +148,14 @@ func (q *Queries) GetSessionByID(ctx context.Context, id string) (Session, error
 		&i.Todos,
 		&i.ForkedFromSessionID,
 		&i.ForkedAtMessageID,
+		&i.CacheCreationTokens,
+		&i.CacheReadTokens,
 	)
 	return i, err
 }
 
 const listChildSessions = `-- name: ListChildSessions :many
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, forked_from_session_id, forked_at_message_id
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, forked_from_session_id, forked_at_message_id, cache_creation_tokens, cache_read_tokens
 FROM sessions
 WHERE parent_session_id = ?
 ORDER BY created_at ASC
@@ -178,6 +184,8 @@ func (q *Queries) ListChildSessions(ctx context.Context, parentSessionID sql.Nul
 			&i.Todos,
 			&i.ForkedFromSessionID,
 			&i.ForkedAtMessageID,
+			&i.CacheCreationTokens,
+			&i.CacheReadTokens,
 		); err != nil {
 			return nil, err
 		}
@@ -193,7 +201,7 @@ func (q *Queries) ListChildSessions(ctx context.Context, parentSessionID sql.Nul
 }
 
 const listSessions = `-- name: ListSessions :many
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, forked_from_session_id, forked_at_message_id
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, forked_from_session_id, forked_at_message_id, cache_creation_tokens, cache_read_tokens
 FROM sessions
 WHERE parent_session_id is NULL
 ORDER BY updated_at DESC
@@ -222,6 +230,8 @@ func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
 			&i.Todos,
 			&i.ForkedFromSessionID,
 			&i.ForkedAtMessageID,
+			&i.CacheCreationTokens,
+			&i.CacheReadTokens,
 		); err != nil {
 			return nil, err
 		}
@@ -259,21 +269,25 @@ SET
     title = ?,
     prompt_tokens = ?,
     completion_tokens = ?,
+    cache_creation_tokens = ?,
+    cache_read_tokens = ?,
     summary_message_id = ?,
     cost = ?,
     todos = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, forked_from_session_id, forked_at_message_id
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, forked_from_session_id, forked_at_message_id, cache_creation_tokens, cache_read_tokens
 `
 
 type UpdateSessionParams struct {
-	Title            string         `json:"title"`
-	PromptTokens     int64          `json:"prompt_tokens"`
-	CompletionTokens int64          `json:"completion_tokens"`
-	SummaryMessageID sql.NullString `json:"summary_message_id"`
-	Cost             float64        `json:"cost"`
-	Todos            sql.NullString `json:"todos"`
-	ID               string         `json:"id"`
+	Title               string         `json:"title"`
+	PromptTokens        int64          `json:"prompt_tokens"`
+	CompletionTokens    int64          `json:"completion_tokens"`
+	CacheCreationTokens int64          `json:"cache_creation_tokens"`
+	CacheReadTokens     int64          `json:"cache_read_tokens"`
+	SummaryMessageID    sql.NullString `json:"summary_message_id"`
+	Cost                float64        `json:"cost"`
+	Todos               sql.NullString `json:"todos"`
+	ID                  string         `json:"id"`
 }
 
 func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error) {
@@ -281,6 +295,8 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (S
 		arg.Title,
 		arg.PromptTokens,
 		arg.CompletionTokens,
+		arg.CacheCreationTokens,
+		arg.CacheReadTokens,
 		arg.SummaryMessageID,
 		arg.Cost,
 		arg.Todos,
@@ -301,6 +317,8 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (S
 		&i.Todos,
 		&i.ForkedFromSessionID,
 		&i.ForkedAtMessageID,
+		&i.CacheCreationTokens,
+		&i.CacheReadTokens,
 	)
 	return i, err
 }
@@ -311,17 +329,21 @@ SET
     title = ?,
     prompt_tokens = prompt_tokens + ?,
     completion_tokens = completion_tokens + ?,
+    cache_creation_tokens = cache_creation_tokens + ?,
+    cache_read_tokens = cache_read_tokens + ?,
     cost = cost + ?,
     updated_at = strftime('%s', 'now')
 WHERE id = ?
 `
 
 type UpdateSessionTitleAndUsageParams struct {
-	Title            string  `json:"title"`
-	PromptTokens     int64   `json:"prompt_tokens"`
-	CompletionTokens int64   `json:"completion_tokens"`
-	Cost             float64 `json:"cost"`
-	ID               string  `json:"id"`
+	Title               string  `json:"title"`
+	PromptTokens        int64   `json:"prompt_tokens"`
+	CompletionTokens    int64   `json:"completion_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	CacheReadTokens     int64   `json:"cache_read_tokens"`
+	Cost                float64 `json:"cost"`
+	ID                  string  `json:"id"`
 }
 
 func (q *Queries) UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSessionTitleAndUsageParams) error {
@@ -329,6 +351,8 @@ func (q *Queries) UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSess
 		arg.Title,
 		arg.PromptTokens,
 		arg.CompletionTokens,
+		arg.CacheCreationTokens,
+		arg.CacheReadTokens,
 		arg.Cost,
 		arg.ID,
 	)

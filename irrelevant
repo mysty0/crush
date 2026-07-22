@@ -1,0 +1,156 @@
+File: crush
+Build ID: 17ea984aabb706be4fc3aa93bbf9f99b19e953ec
+Type: cpu
+Time: 2026-07-09 19:47:27 BST
+Duration: 8s, Total samples = 36.59s (457.35%)
+Showing nodes accounting for 31.83s, 86.99% of 36.59s total
+Dropped 419 nodes (cum <= 0.18s)
+      flat  flat%   sum%        cum   cum%
+    14.12s 38.59% 38.59%     14.13s 38.62%  runtime.(*lfstack).pop
+     2.24s  6.12% 44.71%      2.79s  7.63%  runtime.(*unwinder).resolveInternal
+     2.21s  6.04% 50.75%      2.22s  6.07%  runtime.(*lfstack).push
+     1.26s  3.44% 54.20%      2.12s  5.79%  runtime.tryDeferToSpanScan
+     0.97s  2.65% 56.85%     15.41s 42.12%  runtime.getempty
+     0.81s  2.21% 59.06%     24.82s 67.83%  runtime.markroot
+     0.68s  1.86% 60.92%         1s  2.73%  runtime.pcvalue
+     0.58s  1.59% 62.50%      0.58s  1.59%  runtime.spanClass.sizeclass (inline)
+     0.57s  1.56% 64.06%      9.04s 24.71%  runtime.scanblock
+     0.46s  1.26% 65.32%      0.48s  1.31%  internal/runtime/gc/scan.scanSpanPackedAVX512
+     0.45s  1.23% 66.55%      0.95s  2.60%  github.com/clipperhouse/uax29/v2/graphemes.(*Iterator[go.shape.string]).First
+     0.43s  1.18% 67.72%      0.48s  1.31%  github.com/clipperhouse/uax29/v2/graphemes.(*Iterator[go.shape.string]).Next
+     0.32s  0.87% 68.60%      0.32s  0.87%  internal/runtime/syscall/linux.Syscall6
+     0.31s  0.85% 69.45%      0.31s  0.85%  runtime.(*workbuf).checkempty (inline)
+     0.30s  0.82% 70.27%      1.50s  4.10%  github.com/charmbracelet/ultraviolet.renderLine
+     0.25s  0.68% 70.95%      1.07s  2.92%  runtime.bulkBarrierPreWrite
+     0.25s  0.68% 71.63%      0.36s  0.98%  runtime.findObject
+     0.24s  0.66% 72.29%      0.24s  0.66%  github.com/charmbracelet/ultraviolet.colorEqual
+     0.22s   0.6% 72.89%      0.75s  2.05%  runtime.scanObjectsSmall
+     0.21s  0.57% 73.46%      7.63s 20.85%  runtime.(*stackScanState).putPtr
+     0.21s  0.57% 74.04%      0.23s  0.63%  runtime.findfunc
+     0.20s  0.55% 74.58%      0.65s  1.78%  github.com/charmbracelet/ultraviolet.(*Cell).Equal
+     0.20s  0.55% 75.13%      0.25s  0.68%  github.com/charmbracelet/ultraviolet.(*RenderBuffer).TouchLine
+     0.20s  0.55% 75.68%      1.44s  3.94%  github.com/charmbracelet/x/ansi.FirstGraphemeCluster[go.shape.string]
+     0.20s  0.55% 76.22%      8.18s 22.36%  runtime.(*stackScanState).addObject
+     0.20s  0.55% 76.77%      0.20s  0.55%  runtime.memclrNoHeapPointers
+     0.19s  0.52% 77.29%      2.25s  6.15%  runtime.scanSpan
+     0.18s  0.49% 77.78%      0.42s  1.15%  github.com/charmbracelet/ultraviolet.(*Style).Equal
+     0.17s  0.46% 78.25%      0.26s  0.71%  github.com/clipperhouse/displaywidth.Options.String
+     0.17s  0.46% 78.71%      0.20s  0.55%  runtime.heapArenaOf (inline)
+     0.16s  0.44% 79.15%      0.70s  1.91%  github.com/charmbracelet/ultraviolet.Line.Set
+     0.16s  0.44% 79.58%      0.38s  1.04%  runtime.scanObject
+     0.16s  0.44% 80.02%      0.27s  0.74%  runtime.typePointers.next
+     0.16s  0.44% 80.46%      0.65s  1.78%  runtime.wbBufFlush1
+     0.15s  0.41% 80.87%      1.29s  3.53%  charm.land/lipgloss/v2.Style.Render
+     0.15s  0.41% 81.28%      0.98s  2.68%  github.com/charmbracelet/ultraviolet.printString[go.shape.string]
+     0.15s  0.41% 81.69%      1.21s  3.31%  runtime.(*stackScanState).getPtr
+     0.14s  0.38% 82.07%      1.67s  4.56%  github.com/charmbracelet/x/ansi.stringWidth
+     0.14s  0.38% 82.45%      0.65s  1.78%  runtime.(*stkframe).getStackMap
+     0.14s  0.38% 82.84%     17.24s 47.12%  runtime.scanframeworker
+     0.13s  0.36% 83.19%      1.51s  4.13%  github.com/charmbracelet/ultraviolet.(*RenderBuffer).SetCell
+     0.13s  0.36% 83.55%     23.71s 64.80%  runtime.scanstack
+     0.12s  0.33% 83.88%      0.87s  2.38%  runtime.(*unwinder).initAt
+     0.10s  0.27% 84.15%      0.25s  0.68%  type:.eq.github.com/charmbracelet/ultraviolet.Style
+     0.08s  0.22% 84.37%      0.66s  1.80%  github.com/charmbracelet/ultraviolet.NewBuffer
+     0.07s  0.19% 84.56%      0.77s  2.10%  github.com/charmbracelet/ultraviolet.(*Buffer).SetCell (inline)
+     0.06s  0.16% 84.72%      0.33s   0.9%  github.com/charmbracelet/ultraviolet.(*Buffer).Clear
+     0.06s  0.16% 84.89%      0.59s  1.61%  runtime.(*wbBuf).get2 (inline)
+     0.06s  0.16% 85.05%     27.94s 76.36%  runtime.gcDrain
+     0.06s  0.16% 85.21%      0.38s  1.04%  runtime.netpoll
+     0.06s  0.16% 85.38%      0.25s  0.68%  runtime.sweepone
+     0.05s  0.14% 85.52%      0.95s  2.60%  github.com/charmbracelet/x/ansi.truncate
+     0.05s  0.14% 85.65%      0.21s  0.57%  runtime.mallocgcSmallNoscan
+     0.05s  0.14% 85.79%      0.38s  1.04%  runtime.pcdatavalue
+     0.05s  0.14% 85.93%      0.23s  0.63%  strings.(*Builder).WriteString (partial-inline)
+     0.04s  0.11% 86.03%      1.54s  4.21%  github.com/charmbracelet/ultraviolet.(*StyledString).Draw
+     0.04s  0.11% 86.14%      0.35s  0.96%  github.com/charmbracelet/ultraviolet.cellEqual (inline)
+     0.04s  0.11% 86.25%      2.33s  6.37%  runtime.(*unwinder).next
+     0.03s 0.082% 86.34%      0.67s  1.83%  github.com/charmbracelet/crush/internal/ui/model.drawCachedBuffer
+     0.03s 0.082% 86.42%      0.81s  2.21%  runtime.mallocgc
+     0.03s 0.082% 86.50%      0.27s  0.74%  runtime.mallocgcLarge
+     0.03s 0.082% 86.58%      1.02s  2.79%  runtime.wbMove
+     0.02s 0.055% 86.64%      0.32s  0.87%  github.com/charmbracelet/ultraviolet.(*Buffer).Draw
+     0.02s 0.055% 86.69%      0.27s  0.74%  github.com/charmbracelet/ultraviolet.(*Style).IsZero (inline)
+     0.02s 0.055% 86.75%     23.95s 65.46%  runtime.markroot.func1
+     0.02s 0.055% 86.80%     29.32s 80.13%  runtime.systemstack
+     0.02s 0.055% 86.85%      0.36s  0.98%  runtime.tracebacksomeothers.func1
+     0.01s 0.027% 86.88%      0.21s  0.57%  charm.land/lipgloss/v2.Style.applyMargins
+     0.01s 0.027% 86.91%      0.24s  0.66%  charm.land/lipgloss/v2.alignTextHorizontal
+     0.01s 0.027% 86.94%      0.85s  2.32%  runtime.(*unwinder).init (inline)
+     0.01s 0.027% 86.96%      0.40s  1.09%  runtime.pollWork
+     0.01s 0.027% 86.99%      2.23s  6.09%  runtime.putempty
+         0     0% 86.99%      0.31s  0.85%  charm.land/bubbles/v2/textarea.Model.View
+         0     0% 86.99%      7.11s 19.43%  charm.land/bubbletea/v2.(*Program).Run
+         0     0% 86.99%      7.11s 19.43%  charm.land/bubbletea/v2.(*Program).eventLoop
+         0     0% 86.99%      7.11s 19.43%  charm.land/bubbletea/v2.(*Program).render
+         0     0% 86.99%      0.81s  2.21%  charm.land/bubbletea/v2.(*Program).startRenderer.func1
+         0     0% 86.99%      0.81s  2.21%  charm.land/bubbletea/v2.(*cursedRenderer).flush
+         0     0% 86.99%      7.11s 19.43%  charm.land/fang/v2.Execute
+         0     0% 86.99%      0.26s  0.71%  charm.land/lipgloss/v2.JoinVertical
+         0     0% 86.99%      0.19s  0.52%  charm.land/lipgloss/v2.Wrap
+         0     0% 86.99%      0.40s  1.09%  charm.land/lipgloss/v2.getLines
+         0     0% 86.99%      0.25s  0.68%  encoding/json.Unmarshal
+         0     0% 86.99%      7.11s 19.43%  github.com/charmbracelet/crush/internal/cmd.Execute
+         0     0% 86.99%      7.11s 19.43%  github.com/charmbracelet/crush/internal/cmd.init.func7
+         0     0% 86.99%      1.68s  4.59%  github.com/charmbracelet/crush/internal/ui/model.(*Chat).Draw
+         0     0% 86.99%      5.10s 13.94%  github.com/charmbracelet/crush/internal/ui/model.(*UI).Draw
+         0     0% 86.99%      7.11s 19.43%  github.com/charmbracelet/crush/internal/ui/model.(*UI).View
+         0     0% 86.99%      0.46s  1.26%  github.com/charmbracelet/crush/internal/ui/model.(*UI).agentListAreaHeight
+         0     0% 86.99%      0.75s  2.05%  github.com/charmbracelet/crush/internal/ui/model.(*UI).agentListEntries
+         0     0% 86.99%      1.01s  2.76%  github.com/charmbracelet/crush/internal/ui/model.(*UI).drawSidebar
+         0     0% 86.99%      0.33s   0.9%  github.com/charmbracelet/crush/internal/ui/model.(*UI).drawSubAgentBanner
+         0     0% 86.99%      0.46s  1.26%  github.com/charmbracelet/crush/internal/ui/model.(*UI).generateLayout
+         0     0% 86.99%      0.39s  1.07%  github.com/charmbracelet/crush/internal/ui/model.(*UI).renderAgentList
+         0     0% 86.99%      0.31s  0.85%  github.com/charmbracelet/crush/internal/ui/model.(*UI).renderEditorView
+         0     0% 86.99%      0.24s  0.66%  github.com/charmbracelet/crush/internal/ui/model.(*UI).renderPills
+         0     0% 86.99%      0.27s  0.74%  github.com/charmbracelet/crush/internal/ui/model.(*UI).runningSubAgents
+         0     0% 86.99%      0.46s  1.26%  github.com/charmbracelet/crush/internal/ui/model.(*UI).splitEditorAgentList
+         0     0% 86.99%      0.73s  2.00%  github.com/charmbracelet/crush/internal/ui/model.newChatDrawCache
+         0     0% 86.99%      0.19s  0.52%  github.com/charmbracelet/crush/internal/ui/model.renderedBounds
+         0     0% 86.99%      0.19s  0.52%  github.com/charmbracelet/crush/internal/ui/model.renderedBounds-range1 (inline)
+         0     0% 86.99%      0.19s  0.52%  github.com/charmbracelet/crush/internal/ui/model.renderedBounds.SplitSeq.splitSeq.func1 (inline)
+         0     0% 86.99%      1.50s  4.10%  github.com/charmbracelet/ultraviolet.(*Buffer).Render (inline)
+         0     0% 86.99%      0.33s   0.9%  github.com/charmbracelet/ultraviolet.(*RenderBuffer).Clear
+         0     0% 86.99%      0.19s  0.52%  github.com/charmbracelet/ultraviolet.(*TerminalRenderer).Render
+         0     0% 86.99%      1.50s  4.10%  github.com/charmbracelet/ultraviolet.Lines.Render
+         0     0% 86.99%      0.66s  1.80%  github.com/charmbracelet/ultraviolet.NewRenderBuffer (inline)
+         0     0% 86.99%      0.66s  1.80%  github.com/charmbracelet/ultraviolet.NewScreenBuffer (inline)
+         0     0% 86.99%      0.25s  0.68%  github.com/charmbracelet/ultraviolet/screen.Clear
+         0     0% 86.99%      0.19s  0.52%  github.com/charmbracelet/x/ansi.Method.StringWidth (inline)
+         0     0% 86.99%      1.48s  4.04%  github.com/charmbracelet/x/ansi.StringWidth (inline)
+         0     0% 86.99%      0.95s  2.60%  github.com/charmbracelet/x/ansi.Truncate (inline)
+         0     0% 86.99%      7.11s 19.43%  github.com/spf13/cobra.(*Command).Execute (inline)
+         0     0% 86.99%      7.11s 19.43%  github.com/spf13/cobra.(*Command).ExecuteC
+         0     0% 86.99%      7.11s 19.43%  github.com/spf13/cobra.(*Command).ExecuteContext (inline)
+         0     0% 86.99%      7.11s 19.43%  github.com/spf13/cobra.(*Command).execute
+         0     0% 86.99%      0.48s  1.31%  internal/runtime/gc/scan.ScanSpanPacked (inline)
+         0     0% 86.99%      0.48s  1.31%  internal/runtime/gc/scan.ScanSpanPackedAVX512
+         0     0% 86.99%      0.32s  0.87%  internal/runtime/syscall/linux.EpollWait
+         0     0% 86.99%      7.11s 19.43%  main.main
+         0     0% 86.99%      0.40s  1.09%  net/http.(*ServeMux).ServeHTTP
+         0     0% 86.99%      0.40s  1.09%  net/http.(*conn).serve
+         0     0% 86.99%      0.40s  1.09%  net/http.HandlerFunc.ServeHTTP
+         0     0% 86.99%      0.40s  1.09%  net/http.serverHandler.ServeHTTP
+         0     0% 86.99%      0.40s  1.09%  net/http/pprof.Index
+         0     0% 86.99%      0.40s  1.09%  net/http/pprof.handler.ServeHTTP
+         0     0% 86.99%      0.36s  0.98%  runtime.Stack
+         0     0% 86.99%      0.36s  0.98%  runtime.Stack.func1
+         0     0% 86.99%      0.25s  0.68%  runtime.bgsweep
+         0     0% 86.99%      0.36s  0.98%  runtime.forEachGRace
+         0     0% 86.99%      0.55s  1.50%  runtime.funcspdelta (inline)
+         0     0% 86.99%     27.97s 76.44%  runtime.gcBgMarkWorker
+         0     0% 86.99%     27.94s 76.36%  runtime.gcBgMarkWorker.func2
+         0     0% 86.99%      7.84s 21.43%  runtime.gcDrainMarkWorkerDedicated (inline)
+         0     0% 86.99%     20.10s 54.93%  runtime.gcDrainMarkWorkerIdle (inline)
+         0     0% 86.99%      7.11s 19.43%  runtime.main
+         0     0% 86.99%      0.47s  1.28%  runtime.makeslice
+         0     0% 86.99%      0.33s   0.9%  runtime.traceback (inline)
+         0     0% 86.99%      0.33s   0.9%  runtime.traceback1
+         0     0% 86.99%      0.27s  0.74%  runtime.traceback1.func1
+         0     0% 86.99%      0.24s  0.66%  runtime.traceback2
+         0     0% 86.99%      0.36s  0.98%  runtime.tracebackothers (inline)
+         0     0% 86.99%      0.36s  0.98%  runtime.tracebacksomeothers
+         0     0% 86.99%      0.66s  1.80%  runtime.wbBufFlush
+         0     0% 86.99%      0.65s  1.78%  runtime.wbBufFlush.func1
+         0     0% 86.99%      0.40s  1.09%  runtime/pprof.(*Profile).WriteTo
+         0     0% 86.99%      0.40s  1.09%  runtime/pprof.writeGoroutine
+         0     0% 86.99%      0.40s  1.09%  runtime/pprof.writeGoroutineStacks

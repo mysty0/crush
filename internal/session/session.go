@@ -54,6 +54,8 @@ type Session struct {
 	MessageCount        int64
 	PromptTokens        int64
 	CompletionTokens    int64
+	CacheCreationTokens int64
+	CacheReadTokens     int64
 	EstimatedUsage      bool
 	SummaryMessageID    string
 	ForkedFromSessionID string
@@ -81,7 +83,7 @@ type Service interface {
 	// sessions for "session show" and the workflow view.
 	ListChildren(ctx context.Context, parentID string) ([]Session, error)
 	Save(ctx context.Context, session Session) (Session, error)
-	UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error
+	UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int64, cost float64) error
 	Rename(ctx context.Context, id string, title string) error
 	Delete(ctx context.Context, id string) error
 
@@ -221,10 +223,12 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 	}
 
 	dbSession, err := s.q.UpdateSession(ctx, db.UpdateSessionParams{
-		ID:               session.ID,
-		Title:            session.Title,
-		PromptTokens:     session.PromptTokens,
-		CompletionTokens: session.CompletionTokens,
+		ID:                  session.ID,
+		Title:               session.Title,
+		PromptTokens:        session.PromptTokens,
+		CompletionTokens:    session.CompletionTokens,
+		CacheCreationTokens: session.CacheCreationTokens,
+		CacheReadTokens:     session.CacheReadTokens,
 		SummaryMessageID: sql.NullString{
 			String: session.SummaryMessageID,
 			Valid:  session.SummaryMessageID != "",
@@ -248,13 +252,15 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 
 // UpdateTitleAndUsage updates only the title and usage fields atomically.
 // This is safer than fetching, modifying, and saving the entire session.
-func (s *service) UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error {
+func (s *service) UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int64, cost float64) error {
 	if err := s.q.UpdateSessionTitleAndUsage(ctx, db.UpdateSessionTitleAndUsageParams{
-		ID:               sessionID,
-		Title:            title,
-		PromptTokens:     promptTokens,
-		CompletionTokens: completionTokens,
-		Cost:             cost,
+		ID:                  sessionID,
+		Title:               title,
+		PromptTokens:        promptTokens,
+		CompletionTokens:    completionTokens,
+		CacheCreationTokens: cacheCreationTokens,
+		CacheReadTokens:     cacheReadTokens,
+		Cost:                cost,
 	}); err != nil {
 		return err
 	}
@@ -346,6 +352,8 @@ func (s *service) fromDBItem(item db.Session) Session {
 		MessageCount:        item.MessageCount,
 		PromptTokens:        item.PromptTokens,
 		CompletionTokens:    item.CompletionTokens,
+		CacheCreationTokens: item.CacheCreationTokens,
+		CacheReadTokens:     item.CacheReadTokens,
 		SummaryMessageID:    item.SummaryMessageID.String,
 		ForkedFromSessionID: item.ForkedFromSessionID.String,
 		ForkedAtMessageID:   item.ForkedAtMessageID.String,

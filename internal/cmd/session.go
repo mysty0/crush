@@ -431,16 +431,18 @@ func outputSessionJSON(ctx context.Context, svc *sessionServices, w io.Writer, s
 	skills := extractSkillsFromMessages(msgs)
 	output := sessionShowOutput{
 		Meta: sessionShowMeta{
-			ID:               session.HashID(sess.ID),
-			UUID:             sess.ID,
-			Title:            sess.Title,
-			Created:          time.Unix(sess.CreatedAt, 0).Format(time.RFC3339),
-			Modified:         time.Unix(sess.UpdatedAt, 0).Format(time.RFC3339),
-			Cost:             sess.Cost,
-			PromptTokens:     sess.PromptTokens,
-			CompletionTokens: sess.CompletionTokens,
-			TotalTokens:      sess.PromptTokens + sess.CompletionTokens,
-			Skills:           skills,
+			ID:                  session.HashID(sess.ID),
+			UUID:                sess.ID,
+			Title:               sess.Title,
+			Created:             time.Unix(sess.CreatedAt, 0).Format(time.RFC3339),
+			Modified:            time.Unix(sess.UpdatedAt, 0).Format(time.RFC3339),
+			Cost:                sess.Cost,
+			PromptTokens:        sess.PromptTokens,
+			CompletionTokens:    sess.CompletionTokens,
+			CacheCreationTokens: sess.CacheCreationTokens,
+			CacheReadTokens:     sess.CacheReadTokens,
+			TotalTokens:         sess.PromptTokens + sess.CompletionTokens,
+			Skills:              skills,
 		},
 		Messages: buildSessionShowMessages(ctx, svc, msgs, maxSubAgentDepth),
 	}
@@ -688,16 +690,18 @@ func sessionWriter(ctx context.Context, contentHeight int) (io.Writer, func(), b
 }
 
 type sessionShowMeta struct {
-	ID               string             `json:"id"`
-	UUID             string             `json:"uuid"`
-	Title            string             `json:"title"`
-	Created          string             `json:"created"`
-	Modified         string             `json:"modified"`
-	Cost             float64            `json:"cost"`
-	PromptTokens     int64              `json:"prompt_tokens"`
-	CompletionTokens int64              `json:"completion_tokens"`
-	TotalTokens      int64              `json:"total_tokens"`
-	Skills           []sessionShowSkill `json:"skills,omitempty"`
+	ID                  string             `json:"id"`
+	UUID                string             `json:"uuid"`
+	Title               string             `json:"title"`
+	Created             string             `json:"created"`
+	Modified            string             `json:"modified"`
+	Cost                float64            `json:"cost"`
+	PromptTokens        int64              `json:"prompt_tokens"`
+	CompletionTokens    int64              `json:"completion_tokens"`
+	CacheCreationTokens int64              `json:"cache_creation_tokens"`
+	CacheReadTokens     int64              `json:"cache_read_tokens"`
+	TotalTokens         int64              `json:"total_tokens"`
+	Skills              []sessionShowSkill `json:"skills,omitempty"`
 }
 
 type sessionShowSkill struct {
@@ -771,12 +775,14 @@ type sessionShowSubAgent struct {
 // stats and conversation, embedded inline on the Workflow tool_call
 // part. The phase is derived from the sub-session title.
 type sessionShowWorkflowAgent struct {
-	SessionID        string               `json:"session_id"`
-	Title            string               `json:"title"`
-	PromptTokens     int64                `json:"prompt_tokens"`
-	CompletionTokens int64                `json:"completion_tokens"`
-	Cost             float64              `json:"cost"`
-	Messages         []sessionShowMessage `json:"messages"`
+	SessionID           string               `json:"session_id"`
+	Title               string               `json:"title"`
+	PromptTokens        int64                `json:"prompt_tokens"`
+	CompletionTokens    int64                `json:"completion_tokens"`
+	CacheCreationTokens int64                `json:"cache_creation_tokens"`
+	CacheReadTokens     int64                `json:"cache_read_tokens"`
+	Cost                float64              `json:"cost"`
+	Messages            []sessionShowMessage `json:"messages"`
 }
 
 // buildWorkflowAgentShows converts a workflow's child sessions into
@@ -793,12 +799,14 @@ func buildWorkflowAgentShows(ctx context.Context, svc *sessionServices, children
 			childMessages = buildSessionShowMessages(ctx, svc, messagePtrs(msgs), depth)
 		}
 		out = append(out, sessionShowWorkflowAgent{
-			SessionID:        child.ID,
-			Title:            child.Title,
-			PromptTokens:     child.PromptTokens,
-			CompletionTokens: child.CompletionTokens,
-			Cost:             child.Cost,
-			Messages:         childMessages,
+			SessionID:           child.ID,
+			Title:               child.Title,
+			PromptTokens:        child.PromptTokens,
+			CompletionTokens:    child.CompletionTokens,
+			CacheCreationTokens: child.CacheCreationTokens,
+			CacheReadTokens:     child.CacheReadTokens,
+			Cost:                child.Cost,
+			Messages:            childMessages,
 		})
 	}
 	return out

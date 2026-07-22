@@ -1,7 +1,10 @@
 {
   "$schema": "https://charm.land/crush.json",
   "options": {
-    "edit_mode": "hashline"
+    "edit_mode": "hashline",
+    "memory": {
+      "enabled": false
+    }
   },
   "lsp": {
     "gopls": {

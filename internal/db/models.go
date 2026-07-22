@@ -52,4 +52,6 @@ type Session struct {
 	Todos               sql.NullString `json:"todos"`
 	ForkedFromSessionID sql.NullString `json:"forked_from_session_id"`
 	ForkedAtMessageID   sql.NullString `json:"forked_at_message_id"`
+	CacheCreationTokens int64          `json:"cache_creation_tokens"`
+	CacheReadTokens     int64          `json:"cache_read_tokens"`
 }
