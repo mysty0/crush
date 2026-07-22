@@ -304,6 +304,49 @@ type Options struct {
 	DisableNotifications      bool         `json:"disable_notifications,omitempty" jsonschema:"description=Deprecated: Use notification_style instead. Disable desktop notifications,default=false"`
 	NotificationStyle         string       `json:"notification_style,omitempty" jsonschema:"description=Notification style to use. Options: auto (default), native, osc, bell, disabled. Auto selects based on environment: native for local sessions, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
 	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
+	// CompressToolDescriptions strips filler words, pleasantries, hedging
+	// phrases, and redundant articles from MCP tool, prompt, and resource
+	// descriptions before they are sent to the model, to reduce token
+	// usage. Protected spans (code blocks, inline code, URLs, paths,
+	// CONST_CASE identifiers, function calls, semver strings) are left
+	// untouched. Defaults to true when unset.
+	CompressToolDescriptions *bool `json:"compress_tool_descriptions,omitempty" jsonschema:"description=Shrink verbose MCP tool\\, prompt\\, and resource descriptions to reduce token usage,default=true"`
+	// CompressToolOutputs enables local, headroomd-backed compression of
+	// large stored tool-result messages from prior turns before they are
+	// resent to the model, to reduce token usage on long sessions. Only
+	// tool results from steps before the current one are ever touched;
+	// the daemon (headroomd) is started lazily and disabled gracefully
+	// when unavailable. Defaults to true when unset.
+	CompressToolOutputs *bool `json:"compress_tool_outputs,omitempty" jsonschema:"description=Compress large stored tool-result messages from prior turns via the local headroomd daemon to reduce token usage,default=true"`
+	// HeadroomBinaryPath optionally overrides the path to the headroomd
+	// binary. When empty, Crush looks for "headroomd" on PATH.
+	HeadroomBinaryPath string `json:"headroom_binary_path,omitempty" jsonschema:"description=Path to the headroomd binary. Empty searches PATH.,example=/usr/local/bin/headroomd"`
+	// HeadroomModelPath is the path to the compression model file used by
+	// headroomd. Required for tool-output compression to activate; v1 has
+	// no auto-download flow, so compression stays disabled until this (and
+	// HeadroomTokenizerPath) are configured.
+	HeadroomModelPath string `json:"headroom_model_path,omitempty" jsonschema:"description=Path to the headroomd compression model file,example=~/.config/crush/headroom/model.bin"`
+	// HeadroomTokenizerPath is the path to the tokenizer file used by
+	// headroomd. See HeadroomModelPath.
+	HeadroomTokenizerPath string `json:"headroom_tokenizer_path,omitempty" jsonschema:"description=Path to the headroomd tokenizer file,example=~/.config/crush/headroom/tokenizer.json"`
+	// HeadroomGPU requests that headroomd run inference on an NVIDIA GPU
+	// via the ONNX Runtime CUDA execution provider, instead of CPU. Only
+	// takes effect if the headroomd binary was itself built with CUDA
+	// support (the Rust crate's `gpu` Cargo feature); a binary without it
+	// refuses to start with --gpu rather than silently falling back to
+	// CPU. Defaults to false (CPU) when unset.
+	HeadroomGPU bool `json:"headroom_gpu,omitempty" jsonschema:"description=Run headroomd inference on an NVIDIA GPU (CUDA) instead of CPU. Requires a headroomd binary built with CUDA support.,default=false"`
+	// HeadroomGPUDeviceID selects which CUDA device headroomd uses when
+	// HeadroomGPU is set. Ignored otherwise. Defaults to 0.
+	HeadroomGPUDeviceID int `json:"headroom_gpu_device_id,omitempty" jsonschema:"description=CUDA device id for headroomd to use when headroom_gpu is set,default=0"`
+	// HeadroomOrtDylibPath optionally points headroomd at a custom-built
+	// libonnxruntime.so to load at runtime, instead of the prebuilt binary
+	// it normally links against. Needed for GPU generations (e.g.
+	// Blackwell/RTX 50-series) not yet covered by any official prebuilt
+	// ONNX Runtime release -- see compressd/README.md for the build
+	// recipe. Only takes effect on a headroomd binary built with the
+	// `gpu-dynamic` Cargo feature.
+	HeadroomOrtDylibPath string `json:"headroom_ort_dylib_path,omitempty" jsonschema:"description=Path to a custom-built libonnxruntime.so for headroomd to load instead of its linked/downloaded runtime,example=~/build/onnxruntime-src/build/Linux/Release/libonnxruntime.so"`
 	// AlwaysReinjectSkills controls how an activated skill's instructions
 	// are kept in context. When false (default), the instructions are
 	// injected on activation and re-injected only after a summarization
@@ -411,6 +454,16 @@ func (o Options) SummarizeBudget() int {
 		return o.Read.SummarizeBudget
 	}
 	return 400
+}
+
+// CompressToolDescriptionsEnabled reports whether MCP tool, prompt, and
+// resource descriptions should be shrunk before being sent to the model.
+// Defaults to true when unset.
+func (o Options) CompressToolDescriptionsEnabled() bool {
+	if o.CompressToolDescriptions == nil {
+		return true
+	}
+	return *o.CompressToolDescriptions
 }
 
 // Edit mode values for Options.EditMode.
@@ -985,6 +1038,7 @@ func allToolNames() []string {
 		"ListMcpResourcesTool",
 		"ReadMcpResourceTool",
 		"skill",
+		"retrieve_full_output",
 	}
 }
 

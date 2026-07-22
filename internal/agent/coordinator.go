@@ -24,6 +24,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/claudecode"
+	"github.com/charmbracelet/crush/internal/compressd"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/discover"
@@ -201,6 +202,14 @@ type coordinator struct {
 	notify      pubsub.Publisher[notify.Notification]
 	runComplete pubsub.Publisher[notify.RunComplete]
 	memory      *memory.Store
+	// compressdMgr supervises the local headroomd compression daemon used
+	// to shrink large stored tool-result messages from prior turns before
+	// they are resent to the model. Nil when not wired up (e.g. tests).
+	compressdMgr *compressd.Manager
+	// retrieveStore holds the original content of tool-result messages
+	// that compressd replaced with a summary + compressed text, so the
+	// retrieve_full_output tool can return it if the model asks.
+	retrieveStore *compressd.RetrievalStore
 
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
@@ -266,6 +275,7 @@ func NewCoordinator(
 	runComplete pubsub.Publisher[notify.RunComplete],
 	skillsMgr *skills.Manager,
 	mem *memory.Store,
+	compressdMgr *compressd.Manager,
 ) (Coordinator, error) {
 	// Skills are pre-discovered by the caller (see app.New /
 	// backend.CreateWorkspace) and passed in via the manager. If no
@@ -302,6 +312,8 @@ func NewCoordinator(
 		loadedSkills:        skills.NewLoadedStore(),
 		snapshots:           hashline.NewStore(),
 		memory:              mem,
+		compressdMgr:        compressdMgr,
+		retrieveStore:       compressd.NewRetrievalStore(),
 	}
 
 	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
@@ -836,6 +848,7 @@ func (c *coordinator) newTaskAgent(ctx context.Context, prompt *prompt.Prompt, a
 		RunComplete:          c.runComplete,
 		ActiveSkillsFor:      c.activeSkillsInjection,
 		RecallMemories:       recallMemories,
+		CompressToolOutput:   c.buildCompressToolOutput(isSubAgent),
 		OnSummarized: func(sessionID string) {
 			c.loadedSkills.Bump(sessionID)
 			if resetMemoryShown != nil {
@@ -967,6 +980,12 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewSkillTool(c.activeSkills, c.loadedSkills),
 	)
+
+	// Only the main (non-sub-agent) coder ever has compressed tool
+	// outputs, so only it needs a way to retrieve the original.
+	if !isSubAgent && c.compressdMgr != nil {
+		allTools = append(allTools, tools.NewRetrieveFullOutputTool(c.retrieveStore))
+	}
 
 	// Add LSP tools if user has configured LSPs or auto_lsp is enabled (nil or true).
 	if len(c.cfg.Config().LSP) > 0 || c.cfg.Config().Options.AutoLSP == nil || *c.cfg.Config().Options.AutoLSP {

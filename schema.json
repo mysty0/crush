@@ -560,6 +560,54 @@
           "type": "array",
           "description": "List of skill names to disable and hide from the agent"
         },
+        "compress_tool_descriptions": {
+          "type": "boolean",
+          "description": "Shrink verbose MCP tool, prompt, and resource descriptions to reduce token usage",
+          "default": true
+        },
+        "compress_tool_outputs": {
+          "type": "boolean",
+          "description": "Compress large stored tool-result messages from prior turns via the local headroomd daemon to reduce token usage",
+          "default": true
+        },
+        "headroom_binary_path": {
+          "type": "string",
+          "description": "Path to the headroomd binary. Empty searches PATH.",
+          "examples": [
+            "/usr/local/bin/headroomd"
+          ]
+        },
+        "headroom_model_path": {
+          "type": "string",
+          "description": "Path to the headroomd compression model file",
+          "examples": [
+            "~/.config/crush/headroom/model.bin"
+          ]
+        },
+        "headroom_tokenizer_path": {
+          "type": "string",
+          "description": "Path to the headroomd tokenizer file",
+          "examples": [
+            "~/.config/crush/headroom/tokenizer.json"
+          ]
+        },
+        "headroom_gpu": {
+          "type": "boolean",
+          "description": "Run headroomd inference on an NVIDIA GPU (CUDA) instead of CPU. Requires a headroomd binary built with CUDA support.",
+          "default": false
+        },
+        "headroom_gpu_device_id": {
+          "type": "integer",
+          "description": "CUDA device id for headroomd to use when headroom_gpu is set",
+          "default": 0
+        },
+        "headroom_ort_dylib_path": {
+          "type": "string",
+          "description": "Path to a custom-built libonnxruntime.so for headroomd to load instead of its linked/downloaded runtime",
+          "examples": [
+            "~/build/onnxruntime-src/build/Linux/Release/libonnxruntime.so"
+          ]
+        },
         "always_reinject_skills": {
           "type": "boolean",
           "description": "Re-inject active skill instructions on every turn instead of only after summarization",
@@ -668,6 +716,13 @@
         "oauth": {
           "$ref": "#/$defs/Token",
           "description": "OAuth2 token for authentication with the provider"
+        },
+        "oauth_extra": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Provider-specific OAuth metadata persisted with the token"
         },
         "disable": {
           "type": "boolean",

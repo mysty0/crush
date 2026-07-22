@@ -23,6 +23,7 @@ import (
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/clipboard"
+	"github.com/charmbracelet/crush/internal/compressd"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
@@ -78,6 +79,12 @@ type App struct {
 
 	LSPManager *lsp.Manager
 
+	// Compressd supervises the local headroomd tool-output compression
+	// daemon. The subprocess is not started until compression is first
+	// needed; nil is never returned, only a manager that reports itself
+	// unavailable.
+	Compressd *compressd.Manager
+
 	Skills *skills.Manager
 
 	// Memory is the native long-term memory store (nil when disabled or if
@@ -132,6 +139,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		FileTracker: filetracker.NewService(q),
 		Rewind:      rewind.NewService(sessions, messages, files),
 		LSPManager:  lsp.NewManager(store),
+		Compressd:   compressd.NewManager(store),
 		Skills:      skillsMgr,
 		Memory:      newMemoryStore(ctx, conn, store),
 
@@ -653,6 +661,7 @@ func (app *App) InitCoderAgent(ctx context.Context) error {
 		app.runCompletions,
 		app.Skills,
 		app.Memory,
+		app.Compressd,
 	)
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)
@@ -738,6 +747,13 @@ func (app *App) Shutdown() {
 	// Shutdown all LSP clients.
 	wg.Go(func() {
 		app.LSPManager.KillAll(shutdownCtx)
+	})
+
+	// Shut down the headroomd compression daemon, if it was started.
+	wg.Go(func() {
+		if err := app.Compressd.Close(shutdownCtx); err != nil {
+			slog.Warn("Failed to stop headroomd", "error", err)
+		}
 	})
 
 	// Call all cleanup functions.

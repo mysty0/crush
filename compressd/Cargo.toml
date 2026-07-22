@@ -1,0 +1,76 @@
+[package]
+name = "headroomd"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "Local IPC daemon that scores extractive-compression keep/drop decisions for text using an ONNX token-classification model."
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "headroomd"
+path = "src/main.rs"
+
+[dependencies]
+# ONNX Runtime bindings. `load-dynamic` is always on: the daemon loads
+# libonnxruntime.so at runtime (via --ort-dylib-path or ORT_DYLIB_PATH),
+# rather than linking against a binary ort fetches at build time
+# (`download-binaries`). That fetch happens over the network from
+# inside ort-sys's build script, which is incompatible with sandboxed,
+# network-off builds (Nix, most CI); dynamic loading also means one
+# headroomd binary works with any ONNX Runtime build a user supplies --
+# the stock CPU release or a custom one (e.g. compiled with
+# CMAKE_CUDA_ARCHITECTURES=120 for GPU generations, such as Blackwell/
+# RTX 50-series, not yet covered by any official prebuilt release). The
+# `ndarray` feature is intentionally left off: we build tensors directly
+# from `(shape, Vec<T>)` tuples, which avoids pinning an `ndarray`
+# version to match whatever `ort` expects internally.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = [
+    "std",
+    "load-dynamic",
+    "api-24",
+] }
+tokenizers = { version = "0.20", default-features = false, features = [
+    "onig",
+] }
+
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "signal",
+    "sync",
+    "time",
+] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "2"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Used only to resolve the current uid for the default Unix socket path.
+libc = "0.2"
+
+[features]
+default = []
+# Enables the ONNX Runtime CUDA execution provider's registration code.
+# Requires an ONNX Runtime build that itself has CUDA support compiled
+# in (supplied at runtime via --ort-dylib-path, see above) and a
+# CUDA/cuDNN runtime on the loader path. Not enabled by default: a plain
+# `cargo build` must keep working on machines without a GPU or CUDA
+# toolkit at all. Build with `--features gpu` to enable, and pass
+# `--gpu` at runtime to actually request the device.
+gpu = ["ort/cuda"]
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true

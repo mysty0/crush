@@ -191,6 +191,14 @@ type sessionAgent struct {
 	// earlier in that session. Called each turn so recall is automatic. May
 	// be nil.
 	recallMemories func(ctx context.Context, sessionID, query string) string
+	// compressToolOutput attempts to compress a prior-step tool-result
+	// message's content via the local compressd daemon for the given
+	// session, returning the replacement text (a short summary plus the
+	// compressed text) and true on success, or ("", false) when
+	// compression is disabled, unavailable, or fails for this content.
+	// Called for each eligible tool-result message every turn. May be
+	// nil, in which case tool-output compression is skipped entirely.
+	compressToolOutput func(ctx context.Context, sessionID, content string) (string, bool)
 	// onSummarized is invoked after a successful summarization so callers
 	// can re-establish per-session context (e.g. re-inject active skills
 	// that the summary compacted away). May be nil.
@@ -257,6 +265,10 @@ type SessionAgentOptions struct {
 	// current user prompt for a session, injected automatically each turn.
 	// May be nil.
 	RecallMemories func(ctx context.Context, sessionID, query string) string
+	// CompressToolOutput attempts to compress a prior-step tool-result
+	// message's content, returning the replacement text and true on
+	// success. May be nil to skip tool-output compression entirely.
+	CompressToolOutput func(ctx context.Context, sessionID, content string) (string, bool)
 	// OnSummarized is invoked after a successful summarization. May be nil.
 	OnSummarized func(sessionID string)
 }
@@ -279,6 +291,7 @@ func NewSessionAgent(
 		runComplete:          opts.RunComplete,
 		activeSkillsFor:      opts.ActiveSkillsFor,
 		recallMemories:       opts.RecallMemories,
+		compressToolOutput:   opts.CompressToolOutput,
 		onSummarized:         opts.OnSummarized,
 		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
 		activeRequests:       csync.NewMap[string, context.CancelFunc](),
@@ -893,6 +906,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			}
 
 			prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, largeModel)
+
+			// Compress large tool-result messages from prior steps to save
+			// context, leaving the most recent step's tool output untouched
+			// (the model needs it verbatim this turn). Ephemeral: only the
+			// copy of the message sent to the provider this turn is
+			// affected, never the persisted message.
+			if a.compressToolOutput != nil {
+				compressPriorToolResults(callContext, call.SessionID, prepared.Messages, a.compressToolOutput)
+			}
 
 			// Inject instructions for skills activated in this session so
 			// they persist and survive summarization. The provider decides
@@ -2285,6 +2307,70 @@ func (a *sessionAgent) convertToToolResult(result fantasy.ToolResultContent) mes
 	}
 
 	return baseResult
+}
+
+// compressToolResultThresholdBytes is the minimum size (in UTF-8 bytes) a
+// stored tool-result message's text content must reach before
+// compressPriorToolResults attempts to compress it. Chosen so ordinary,
+// already-short tool outputs (a handful of lines of grep/ls/bash output)
+// are left untouched -- the daemon round-trip and the summary-plus-id
+// wrapper only pay for themselves on genuinely large payloads (full-file
+// reads, long command output, big search result sets) that would
+// otherwise dominate the context window on long-running sessions.
+const compressToolResultThresholdBytes = 4000
+
+// compressedOutputMarker prefixes every replacement produced by
+// compressPriorToolResults so a later step's pass over the same message
+// (now no longer the most recent step) recognizes it as already
+// compressed and skips it, instead of repeatedly compressing already
+// compressed text.
+const compressedOutputMarker = "[Tool output compressed"
+
+// compressPriorToolResults replaces the text content of large tool-result
+// parts in messages with a compressed form, via compress, skipping the
+// most recent tool-result message (the freshest step's output, which the
+// model needs verbatim this turn) and anything already compressed. It
+// mutates messages in place: safe here because messages is the ephemeral
+// per-step copy PrepareStep builds for the provider call, never the
+// persisted message.Message. Any error from compress (daemon unavailable,
+// disabled, etc) is treated as "leave this message untouched" -- it must
+// never fail the turn.
+func compressPriorToolResults(
+	ctx context.Context,
+	sessionID string,
+	messages []fantasy.Message,
+	compress func(ctx context.Context, sessionID, content string) (string, bool),
+) {
+	lastToolMessageIdx := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == fantasy.MessageRoleTool {
+			lastToolMessageIdx = i
+			break
+		}
+	}
+
+	for i := range messages {
+		if i == lastToolMessageIdx || messages[i].Role != fantasy.MessageRoleTool {
+			continue
+		}
+		for j, part := range messages[i].Content {
+			resultPart, ok := part.(fantasy.ToolResultPart)
+			if !ok {
+				continue
+			}
+			text, ok := resultPart.Output.(fantasy.ToolResultOutputContentText)
+			if !ok || len(text.Text) < compressToolResultThresholdBytes ||
+				strings.HasPrefix(text.Text, compressedOutputMarker) {
+				continue
+			}
+			replacement, ok := compress(ctx, sessionID, text.Text)
+			if !ok {
+				continue
+			}
+			resultPart.Output = fantasy.ToolResultOutputContentText{Text: replacement}
+			messages[i].Content[j] = resultPart
+		}
+	}
 }
 
 // workaroundProviderMediaLimitations converts media content in tool results to
