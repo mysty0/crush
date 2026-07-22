@@ -142,6 +142,10 @@ type SessionAgent interface {
 	SetModels(large Model, small Model)
 	SetTools(tools []fantasy.AgentTool)
 	SetSystemPrompt(systemPrompt string)
+	// ArmReady declares that n asynchronous initialization tasks must
+	// finish before the agent runs a turn; the returned func is called
+	// once per task. See sessionAgent.ArmReady.
+	ArmReady(n int) func()
 	Cancel(sessionID string)
 	// CancelKeepQueue stops the active run without discarding queued
 	// follow-up prompts, so the first queued prompt starts as the next
@@ -171,6 +175,19 @@ type sessionAgent struct {
 	systemPromptPrefix *csync.Value[string]
 	systemPrompt       *csync.Value[string]
 	tools              *csync.Slice[fantasy.AgentTool]
+
+	// Readiness barrier. Task sub-agents attach their system prompt and
+	// tools asynchronously after construction (see coordinator.newTaskAgent),
+	// so a turn dispatched immediately after the agent is built could
+	// otherwise run before those are set -- executing tool-less, which makes
+	// the model emit tool calls as prose and end the turn having done
+	// nothing. ArmReady declares how many init tasks must finish; WaitReady
+	// (called at the top of Run) blocks until they do. An agent that was
+	// never armed is always ready, so non-task agents are unaffected.
+	readyMu     sync.Mutex
+	readyCh     chan struct{} // Closed when ready; nil until first armed.
+	readyArmed  bool
+	readyRemain int
 
 	isSubAgent           bool
 	sessions             session.Service
@@ -695,8 +712,24 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		return nil, nil
 	}
 
+	// Wait for asynchronous initialization (system prompt + tools) to
+	// finish before snapshotting them below. Without this, a sub-agent
+	// dispatched immediately after it was built could run tool-less and
+	// emit its tool calls as prose instead of executing them.
+	if err := a.WaitReady(ctx); err != nil {
+		return nil, err
+	}
+
 	// Copy mutable fields under lock to avoid races with SetTools/SetModels.
 	agentTools := a.tools.Copy()
+
+	// A task sub-agent must always have tools. Empty here means a build or
+	// readiness bug slipped through; fail fast with a retryable error
+	// rather than running a crippled, tool-less turn that the model would
+	// "answer" by narrating fake tool calls.
+	if a.isSubAgent && len(agentTools) == 0 {
+		return nil, errors.New("sub-agent has no tools available (initialization did not complete); retry")
+	}
 	largeModel := a.largeModel.Get()
 	systemPrompt := a.systemPrompt.Get()
 	promptPrefix := a.systemPromptPrefix.Get()
@@ -1145,7 +1178,20 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				return getSessionErr
 			}
 			usage, estimated := fallbackStepUsage(stepMessages, stepResult)
-			a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimated)
+			cost := a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimated)
+			// Persist this turn's usage on the assistant message so per-turn
+			// and cumulative token consumption can be reconstructed from
+			// history (the session counters only keep the latest snapshot).
+			if !usageIsZero(usage) {
+				currentAssistant.AddTokenUsage(message.TokenUsage{
+					InputTokens:         usage.InputTokens,
+					OutputTokens:        usage.OutputTokens,
+					CacheReadTokens:     usage.CacheReadTokens,
+					CacheCreationTokens: usage.CacheCreationTokens,
+					Cost:                cost,
+					Estimated:           estimated,
+				})
+			}
 			extractHyperCredits(stepResult.ProviderMetadata)
 			_, sessionErr := a.sessions.Save(ctx, updatedSession)
 			if sessionErr != nil {
@@ -2067,7 +2113,9 @@ func extractHyperCredits(metadata fantasy.ProviderMetadata) {
 	}
 }
 
-func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64, estimated bool) {
+// updateSessionUsage applies a turn's usage/cost to the session and returns
+// the final (possibly overridden or flat-rate-zeroed) cost applied.
+func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64, estimated bool) float64 {
 	if !usageIsZero(usage) {
 		session.EstimatedUsage = estimated
 	}
@@ -2098,6 +2146,7 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 
 	session.Cost += cost
 	updateSessionTokenCounters(session, usage)
+	return cost
 }
 
 func updateSessionTokenCounters(session *session.Session, usage fantasy.Usage) {
@@ -2256,6 +2305,54 @@ func (a *sessionAgent) SetModels(large Model, small Model) {
 
 func (a *sessionAgent) SetTools(tools []fantasy.AgentTool) {
 	a.tools.SetSlice(tools)
+}
+
+// ArmReady marks the agent as not-yet-ready until the returned done func
+// has been invoked n times -- once per asynchronous initialization task
+// (system prompt build, tool build). When the last task completes the
+// agent becomes ready and any Run blocked in WaitReady proceeds. Calling
+// it with n <= 0 is a no-op. It is safe to re-arm an already-ready agent.
+func (a *sessionAgent) ArmReady(n int) func() {
+	if n <= 0 {
+		return func() {}
+	}
+	a.readyMu.Lock()
+	if a.readyRemain == 0 {
+		// Fresh arm (first build, or re-arm after a prior ready).
+		a.readyCh = make(chan struct{})
+	}
+	a.readyArmed = true
+	a.readyRemain += n
+	a.readyMu.Unlock()
+	return func() {
+		a.readyMu.Lock()
+		defer a.readyMu.Unlock()
+		if a.readyRemain == 0 {
+			return
+		}
+		a.readyRemain--
+		if a.readyRemain == 0 {
+			close(a.readyCh)
+		}
+	}
+}
+
+// WaitReady blocks until the agent's asynchronous initialization has
+// completed or ctx is done. It returns immediately for an agent that was
+// never armed (WaitReady is a no-op on the primary agent).
+func (a *sessionAgent) WaitReady(ctx context.Context) error {
+	a.readyMu.Lock()
+	ch, armed := a.readyCh, a.readyArmed
+	a.readyMu.Unlock()
+	if !armed || ch == nil {
+		return nil
+	}
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (a *sessionAgent) SetSystemPrompt(systemPrompt string) {

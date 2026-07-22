@@ -857,12 +857,19 @@ func (c *coordinator) newTaskAgent(ctx context.Context, prompt *prompt.Prompt, a
 		},
 	})
 
+	// Arm the readiness barrier for the two async init tasks below so a
+	// turn dispatched before they finish (e.g. a freshly built task
+	// sub-agent invoked immediately) waits in Run rather than executing
+	// tool-less. See sessionAgent.ArmReady/WaitReady.
+	markReady := result.ArmReady(2)
+
 	c.readyWg.Go(func() error {
 		systemPrompt, err := prompt.Build(ctx, primary.Model.Provider(), primary.Model.Model(), c.cfg)
 		if err != nil {
 			return err
 		}
 		result.SetSystemPrompt(systemPrompt)
+		markReady()
 		return nil
 	})
 
@@ -872,6 +879,7 @@ func (c *coordinator) newTaskAgent(ctx context.Context, prompt *prompt.Prompt, a
 			return err
 		}
 		result.SetTools(tools)
+		markReady()
 		return nil
 	})
 
@@ -2108,9 +2116,25 @@ func (c *coordinator) completeSubAgentSync(ctx context.Context, params subAgentP
 	// not discard the sub-agent output that was already produced.
 	c.finalizeSubAgentCost(ctx, subSession.ID, params.SessionID)
 
+	output := subAgentOutput(out.result)
+
+	// Defense in depth: a healthy sub-agent that did real work makes tool
+	// calls. A run that made ZERO tool calls yet emitted raw tool-call
+	// markup in its text is degenerate -- the model narrated tool calls as
+	// prose instead of executing them (typically when it ran effectively
+	// tool-less) and "reported" fabricated work. Surface it as a retryable
+	// error instead of returning the fake report to the parent.
+	if subAgentToolCallCount(out.result) == 0 && looksLikeNarratedToolCalls(output) {
+		c.subAgents.finish(subSession.ID, SubAgentFailed, "sub-agent narrated tool calls as text")
+		c.lingerSubAgentRemoval(subSession.ID)
+		return fantasy.NewTextErrorResponse(fmt.Sprintf(
+			"The sub-agent made no tool calls and emitted tool-call syntax as plain text, so it did no real work. This usually clears on a fresh attempt. Retry the agent tool with resume_session_id=%q to continue in the same session.",
+			subSession.ID,
+		)), nil
+	}
+
 	c.subAgents.finish(subSession.ID, SubAgentDone, "")
 	c.lingerSubAgentRemoval(subSession.ID)
-	output := subAgentOutput(out.result)
 	if output == "" {
 		return fantasy.NewTextErrorResponse("Sub-agent completed but produced no text output."), nil
 	}
@@ -2133,12 +2157,21 @@ func (c *coordinator) completeSubAgentBackgrounded(params subAgentParams, subSes
 			"The backgrounded sub-agent (session %s) failed: %s\n\nIts progress up to this point is preserved. Retry the agent tool with resume_session_id=%q to continue from where it left off.",
 			subSession.ID, out.err, subSession.ID,
 		)
+	} else if output := subAgentOutput(out.result); subAgentToolCallCount(out.result) == 0 && looksLikeNarratedToolCalls(output) {
+		// Degenerate turn: the sub-agent made no tool calls yet emitted
+		// tool-call syntax as text, so it did no real work. Flag it and
+		// ask for a retry instead of queueing fabricated output as a
+		// completion (mirrors completeSubAgentSync).
+		c.subAgents.finish(subSession.ID, SubAgentFailed, "sub-agent narrated tool calls as text")
+		prompt = fmt.Sprintf(
+			"The backgrounded sub-agent (session %s) made no tool calls and emitted tool-call syntax as plain text, so it did no real work. Retry the agent tool with resume_session_id=%q to continue in the same session.",
+			subSession.ID, subSession.ID,
+		)
 	} else {
 		// Best-effort, mirroring completeSubAgentSync: a cost-tracking
 		// failure must not discard the sub-agent's output.
 		c.finalizeSubAgentCost(context.Background(), subSession.ID, params.SessionID)
 		c.subAgents.finish(subSession.ID, SubAgentDone, "")
-		output := subAgentOutput(out.result)
 		if output == "" {
 			output = "(no text output)"
 		}
@@ -2221,6 +2254,41 @@ func (c *coordinator) finalizeSubAgentCost(ctx context.Context, childSessionID, 
 			"error", err,
 		)
 	}
+}
+
+// subAgentToolCallCount returns the total number of tool calls the
+// sub-agent made across every step of its run.
+func subAgentToolCallCount(result *fantasy.AgentResult) int {
+	if result == nil {
+		return 0
+	}
+	n := 0
+	for _, step := range result.Steps {
+		n += len(step.Content.ToolCalls())
+	}
+	return n
+}
+
+// narratedToolCallMarkers are fragments of the raw tool-call harness
+// formats that a model emits as plain text when it "calls" a tool without
+// actually issuing a structured tool call.
+var narratedToolCallMarkers = []string{
+	"<function_calls>",
+	"<invoke name=",
+	"<parameter name=",
+	"<invoke",
+}
+
+// looksLikeNarratedToolCalls reports whether text contains raw tool-call
+// markup, the signature of a model narrating tool calls as prose instead
+// of executing them.
+func looksLikeNarratedToolCalls(text string) bool {
+	for _, m := range narratedToolCallMarkers {
+		if strings.Contains(text, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // updateParentSessionCost accumulates the cost from a child session to its parent session.

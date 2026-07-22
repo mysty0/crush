@@ -181,6 +181,19 @@ type ShellCommand struct {
 
 func (ShellCommand) isPart() {}
 
+// TokenUsage mirrors message.TokenUsage on the wire: per-turn token usage
+// and cost recorded on the assistant message that produced it.
+type TokenUsage struct {
+	InputTokens         int64   `json:"input_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	CacheReadTokens     int64   `json:"cache_read_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	Cost                float64 `json:"cost"`
+	Estimated           bool    `json:"estimated,omitempty"`
+}
+
+func (TokenUsage) isPart() {}
+
 // MarshalJSON implements the [json.Marshaler] interface.
 func (m Message) MarshalJSON() ([]byte, error) {
 	parts, err := MarshalParts(m.Parts)
@@ -512,6 +525,7 @@ const (
 	toolResultType   partType = "tool_result"
 	finishType       partType = "finish"
 	shellCommandType partType = "shell_command"
+	usageType        partType = "usage"
 )
 
 type partWrapper struct {
@@ -543,6 +557,8 @@ func MarshalParts(parts []ContentPart) ([]byte, error) {
 			typ = finishType
 		case ShellCommand:
 			typ = shellCommandType
+		case TokenUsage:
+			typ = usageType
 		default:
 			return nil, fmt.Errorf("unknown part type: %T", part)
 		}
@@ -620,6 +636,12 @@ func UnmarshalParts(data []byte) ([]ContentPart, error) {
 			parts = append(parts, part)
 		case shellCommandType:
 			part := ShellCommand{}
+			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
+				return nil, err
+			}
+			parts = append(parts, part)
+		case usageType:
+			part := TokenUsage{}
 			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
 				return nil, err
 			}
