@@ -8,6 +8,7 @@ import (
 	"os/signal"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/claudecode"
 	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/config"
@@ -28,10 +29,19 @@ var loginCmd = &cobra.Command{
 	Short:   "Login Crush to a platform",
 	Long: `Login Crush to a specified platform.
 The platform should be provided as an argument.
-Available platforms are: hyper, copilot, codex, gemini, antigravity.`,
+Available platforms are: hyper, copilot, codex, claude, gemini, antigravity.`,
 	Example: `
 # Authenticate with Charm Hyper
 crush login
+
+# Authenticate with a Claude Pro/Max subscription
+crush login claude
+
+# Add a second Claude subscription account alongside the first
+crush login claude --account work
+
+# Authenticate a Claude subscription without a local browser
+crush login claude --manual
 
 # Authenticate with GitHub Copilot
 crush login copilot
@@ -61,6 +71,8 @@ crush login -f copilot
 		"github",
 		"github-copilot",
 		"codex",
+		"claude",
+		"claude-code",
 		"gemini",
 		"antigravity",
 	},
@@ -84,6 +96,8 @@ crush login -f copilot
 		}
 		force, _ := cmd.Flags().GetBool("force")
 		device, _ := cmd.Flags().GetBool("device")
+		manual, _ := cmd.Flags().GetBool("manual")
+		account, _ := cmd.Flags().GetString("account")
 		switch provider {
 		case "hyper":
 			return loginHyper(c, ws.ID, force)
@@ -91,6 +105,8 @@ crush login -f copilot
 			return loginCopilot(c, ws.ID, force)
 		case "codex", "openai-codex", "chatgpt":
 			return loginCodex(c, ws.ID, force, device)
+		case "claude", "claude-code", "claudecode", "claude-max", "claude-pro":
+			return loginClaudeCode(c, ws.ID, force, manual, account)
 		case "gemini", "gemini-cli", "google-gemini-cli":
 			return loginGemini(c, ws.ID, force)
 		case "antigravity", "agy", "google-antigravity":
@@ -104,6 +120,8 @@ crush login -f copilot
 func init() {
 	loginCmd.Flags().BoolP("force", "f", false, "Force re-authentication even if already logged in")
 	loginCmd.Flags().Bool("device", false, "Use the device-code flow (Codex and Antigravity only; for headless environments)")
+	loginCmd.Flags().Bool("manual", false, "Paste the authorization code instead of listening for a redirect (Claude only; for headless environments)")
+	loginCmd.Flags().String("account", "", "Name a second (third, ...) Claude subscription account to log in alongside the first")
 }
 
 func loginHyper(c *client.Client, wsID string, force bool) error {
@@ -281,6 +299,94 @@ func loginCodex(c *client.Client, wsID string, force, device bool) error {
 	fmt.Println()
 	fmt.Println("You're now authenticated with OpenAI Codex!")
 	return nil
+}
+
+// loginClaudeCode authenticates a Claude Pro/Max subscription. Each
+// account lives in its own provider entry — the default account under
+// "claude-code" and every named one under "claude-code-<account>" — so
+// several subscriptions can be configured at once and switched between by
+// picking the matching provider in the model list.
+func loginClaudeCode(c *client.Client, wsID string, force, manual bool, account string) error {
+	ctx := getLoginContext()
+
+	if account != "" && claudecode.AccountSlug(account) == "" {
+		return fmt.Errorf("account name %q has no letters or digits to name a provider with", account)
+	}
+	providerID := claudecode.ProviderIDForAccount(account)
+
+	cfg, cfgErr := c.GetConfig(ctx, wsID)
+	if !force && cfgErr == nil && cfg != nil {
+		if pc, ok := cfg.Providers.Get(providerID); ok && pc.OAuthToken != nil {
+			fmt.Printf("You are already logged in to Claude as %s.\n", claudeAccountLabel(providerID, pc.OAuthExtra))
+			fmt.Println("Use --force to re-authenticate, or --account <name> to add another account.")
+			return nil
+		}
+	}
+
+	var (
+		token *oauth.Token
+		acct  claudecode.Account
+		err   error
+	)
+	if manual {
+		token, acct, err = claudecode.LoginManual(ctx)
+	} else {
+		token, acct, err = claudecode.LoginBrowser(ctx)
+	}
+	if err != nil {
+		return err
+	}
+
+	// Adding the same subscription twice under two names would silently
+	// share one rate limit, which defeats the point of a second account.
+	if cfg != nil && acct.UUID != "" {
+		for id, pc := range cfg.Providers.Seq2() {
+			if id == providerID || !claudecode.IsProviderID(id) || pc.OAuthExtra == nil {
+				continue
+			}
+			if pc.OAuthExtra["account_uuid"] == acct.UUID {
+				fmt.Printf("\nNote: this is the same Anthropic account already stored as %q;\n", id)
+				fmt.Println("both providers will draw on the same subscription limits.")
+			}
+		}
+	}
+
+	extra := map[string]string{}
+	if acct.UUID != "" {
+		extra["account_uuid"] = acct.UUID
+	}
+	if acct.Email != "" {
+		extra["email"] = acct.Email
+	}
+	if acct.OrganizationUUID != "" {
+		extra["organization_uuid"] = acct.OrganizationUUID
+	}
+
+	if err := cmp.Or(
+		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+providerID+".oauth", token),
+		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+providerID+".oauth_extra", extra),
+	); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Printf("You're now authenticated with Claude as %s!\n", claudeAccountLabel(providerID, extra))
+	if account != "" {
+		fmt.Printf("This account is available as the %q provider — select it in the model list to use it.\n", providerID)
+	}
+	return nil
+}
+
+// claudeAccountLabel describes a stored subscription account for CLI
+// output, preferring the email recorded at login over the provider id.
+func claudeAccountLabel(providerID string, extra map[string]string) string {
+	if extra != nil && extra["email"] != "" {
+		return extra["email"]
+	}
+	if account := claudecode.AccountFromProviderID(providerID); account != "" {
+		return account
+	}
+	return providerID
 }
 
 func loginGemini(c *client.Client, wsID string, force bool) error {

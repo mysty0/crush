@@ -15,26 +15,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestUsageProviderAvailable covers every subscription provider with a
-// known usage endpoint. Claude Code only needs to be present and not
-// disabled (it authenticates via its own credentials file); the other
-// three additionally need a stored OAuth token.
+// TestUsageProviderAvailable covers the single-account subscription
+// providers with a known usage endpoint: each needs a stored OAuth token.
+// Claude subscriptions are enumerated separately (see
+// TestUsageSubscriptionProviders) because there can be several of them.
 func TestUsageProviderAvailable(t *testing.T) {
 	t.Parallel()
-
-	t.Run("claude code needs no oauth token", func(t *testing.T) {
-		t.Parallel()
-		cfg := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
-		cfg.Providers.Set(claudecode.ProviderID, config.ProviderConfig{})
-		assert.True(t, usageProviderAvailable(cfg, claudecode.ProviderID))
-	})
-
-	t.Run("claude code disabled", func(t *testing.T) {
-		t.Parallel()
-		cfg := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
-		cfg.Providers.Set(claudecode.ProviderID, config.ProviderConfig{Disable: true})
-		assert.False(t, usageProviderAvailable(cfg, claudecode.ProviderID))
-	})
 
 	for _, id := range []string{codex.ProviderID, geminicli.ProviderID, antigravity.ProviderID} {
 		t.Run(id+" needs an oauth token", func(t *testing.T) {
@@ -52,6 +38,70 @@ func TestUsageProviderAvailable(t *testing.T) {
 		t.Parallel()
 		cfg := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
 		assert.False(t, usageProviderAvailable(cfg, codex.ProviderID))
+	})
+}
+
+// TestUsageSubscriptionProviders covers the enumeration of subscription
+// accounts to report usage for: every configured Claude subscription
+// (there can be several, one provider per account), then the
+// single-account providers. The default Claude provider counts without a
+// token because it authenticates from the Claude Code CLI's credentials
+// file; a named account needs one.
+func TestUsageSubscriptionProviders(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default claude account needs no oauth token", func(t *testing.T) {
+		t.Parallel()
+		cfg := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
+		cfg.Providers.Set(claudecode.ProviderID, config.ProviderConfig{})
+		require.Len(t, usageSubscriptionProviders(cfg), 1)
+		assert.Equal(t, claudecode.ProviderID, usageSubscriptionProviders(cfg)[0].id)
+	})
+
+	t.Run("claude account disabled", func(t *testing.T) {
+		t.Parallel()
+		cfg := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
+		cfg.Providers.Set(claudecode.ProviderID, config.ProviderConfig{Disable: true})
+		assert.Empty(t, usageSubscriptionProviders(cfg))
+	})
+
+	t.Run("named claude account needs an oauth token", func(t *testing.T) {
+		t.Parallel()
+		id := claudecode.ProviderIDForAccount("work")
+		cfg := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
+		cfg.Providers.Set(id, config.ProviderConfig{})
+		assert.Empty(t, usageSubscriptionProviders(cfg), "no token yet")
+
+		cfg.Providers.Set(id, config.ProviderConfig{
+			Name:       "Claude Code (work)",
+			OAuthToken: &oauth.Token{AccessToken: "tok"},
+		})
+		providers := usageSubscriptionProviders(cfg)
+		require.Len(t, providers, 1)
+		assert.Equal(t, id, providers[0].id)
+		assert.Equal(t, "Claude Code (work)", providers[0].name, "each account is labeled by its own provider name")
+	})
+
+	t.Run("every account gets its own section", func(t *testing.T) {
+		t.Parallel()
+		cfg := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
+		cfg.Providers.Set(claudecode.ProviderID, config.ProviderConfig{})
+		cfg.Providers.Set(claudecode.ProviderIDForAccount("work"), config.ProviderConfig{
+			OAuthToken: &oauth.Token{AccessToken: "tok"},
+		})
+		cfg.Providers.Set(codex.ProviderID, config.ProviderConfig{
+			OAuthToken: &oauth.Token{AccessToken: "tok"},
+		})
+
+		var ids []string
+		for _, p := range usageSubscriptionProviders(cfg) {
+			ids = append(ids, p.id)
+		}
+		assert.ElementsMatch(t, []string{
+			claudecode.ProviderID,
+			claudecode.ProviderIDForAccount("work"),
+			codex.ProviderID,
+		}, ids)
 	})
 }
 

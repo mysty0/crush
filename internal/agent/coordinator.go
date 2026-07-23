@@ -1193,13 +1193,16 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 	if hc := c.debugHTTPClient(); hc != nil {
 		base = hc.Transport
 	}
-	// For the native Claude Code subscription provider, inject a fresh
-	// OAuth bearer token (read+refreshed from ~/.claude/.credentials.json)
-	// on every request. No api_key/shell helper is needed.
-	oauthSubscription := providerID == claudecode.ProviderID
+	// For a native Claude Code subscription provider, inject a fresh OAuth
+	// bearer token on every request. No api_key/shell helper is needed.
+	// Each subscription account is its own provider, and the source is
+	// resolved per provider id: accounts added with `crush login
+	// claude-code` draw on their stored token, while the default provider
+	// keeps reading ~/.claude/.credentials.json.
+	oauthSubscription := claudecode.IsProviderID(providerID)
 	if oauthSubscription {
 		os.Setenv("ANTHROPIC_API_KEY", "")
-		base = &claudecode.AuthTransport{Base: base, Source: claudecode.DefaultSource()}
+		base = &claudecode.AuthTransport{Base: base, Source: c.cfg.ClaudeCodeSource(providerID)}
 	}
 	// The subscription-OAuth endpoint requires the Claude Code identity as
 	// a discrete first system block. injectIdentity makes the transport

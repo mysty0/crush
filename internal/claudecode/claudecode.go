@@ -28,7 +28,9 @@ import (
 
 const (
 	// ProviderID is the reserved Crush provider id that activates native
-	// Claude Code subscription handling (auth + model discovery).
+	// Claude Code subscription handling (auth + model discovery). It is
+	// the default account; additional accounts live under
+	// "claude-code-<account>" (see ProviderIDForAccount).
 	ProviderID = "claude-code"
 
 	// BaseURL is the Anthropic API base used for the subscription.
@@ -46,6 +48,54 @@ const (
 	// refreshSkewMS refreshes the token this long (5 min) before expiry.
 	refreshSkewMS = 5 * 60 * 1000
 )
+
+// IsProviderID reports whether providerID addresses a Claude Code
+// subscription account: either the default "claude-code" provider or one
+// of the additional accounts stored as "claude-code-<account>".
+func IsProviderID(providerID string) bool {
+	return providerID == ProviderID || strings.HasPrefix(providerID, ProviderID+"-")
+}
+
+// ProviderIDForAccount returns the provider id holding the named
+// subscription account. An empty (or "default") name maps to the base
+// provider, so `crush login claude-code` without --account keeps using
+// the same provider id it always has.
+func ProviderIDForAccount(account string) string {
+	slug := AccountSlug(account)
+	if slug == "" || slug == "default" {
+		return ProviderID
+	}
+	return ProviderID + "-" + slug
+}
+
+// AccountFromProviderID returns the account name encoded in a Claude Code
+// provider id, or "" for the default provider.
+func AccountFromProviderID(providerID string) string {
+	if providerID == ProviderID || !IsProviderID(providerID) {
+		return ""
+	}
+	return strings.TrimPrefix(providerID, ProviderID+"-")
+}
+
+// AccountSlug normalizes a user-supplied account name into the form used
+// inside a provider id: lowercase, with every run of characters outside
+// [a-z0-9] collapsed to a single dash and the ends trimmed. An account
+// name that normalizes to nothing (e.g. "!!!") yields "".
+func AccountSlug(account string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(account)) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			dash = false
+		case b.Len() > 0 && !dash:
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	return strings.TrimRight(b.String(), "-")
+}
 
 // CredentialsPath returns the path to the Claude Code credentials file,
 // honoring the CLAUDE_CREDENTIALS override. Returns "" if the home
@@ -71,11 +121,33 @@ func Available() bool {
 	return err == nil
 }
 
+// TokenProvider supplies a valid access token for one subscription
+// account. Accounts added with `crush login claude-code` keep their token
+// in Crush's own config instead of the Claude Code credentials file; the
+// config package supplies an implementation that refreshes and persists
+// through the config store.
+type TokenProvider interface {
+	Token(ctx context.Context) (string, error)
+}
+
+// TokenFunc adapts a plain function to TokenProvider, for callers that
+// already hold a valid token and only need to hand it over.
+type TokenFunc func(ctx context.Context) (string, error)
+
+// Token implements TokenProvider.
+func (f TokenFunc) Token(ctx context.Context) (string, error) { return f(ctx) }
+
 // Source reads and refreshes Claude Code OAuth tokens. It is safe for
 // concurrent use; refreshes are serialized so a single rotation is shared.
+//
+// A Source is backed either by the Claude Code CLI credentials file (the
+// default account) or by a TokenProvider (every account Crush logged in
+// itself). Everything downstream — model discovery, usage, the auth
+// transport — works the same way against both.
 type Source struct {
 	mu      sync.Mutex
 	path    string
+	tokens  TokenProvider
 	client  *http.Client
 	baseURL string
 }
@@ -100,10 +172,32 @@ func NewSource() *Source {
 	}
 }
 
+// NewTokenSource creates a Source that draws its token from p rather than
+// from the Claude Code credentials file.
+func NewTokenSource(p TokenProvider) *Source {
+	return &Source{
+		tokens: p,
+		client: &http.Client{Timeout: 30 * time.Second},
+	}
+}
+
+// tokenResponse is the /v1/oauth/token payload. Anthropic echoes the
+// authenticated account and organization alongside the tokens, which is
+// what lets Crush label each subscription account without a second
+// profile round-trip.
 type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int64  `json:"expires_in"`
+	Scope        string `json:"scope"`
+	Account      struct {
+		UUID         string `json:"uuid"`
+		EmailAddress string `json:"email_address"`
+	} `json:"account"`
+	Organization struct {
+		UUID string `json:"uuid"`
+		Name string `json:"name"`
+	} `json:"organization"`
 }
 
 // Token returns a valid access token, refreshing and persisting a new one
@@ -112,6 +206,10 @@ type tokenResponse struct {
 // returned rather than erroring — the API is the source of truth on
 // validity.
 func (s *Source) Token(ctx context.Context) (string, error) {
+	if s.tokens != nil {
+		return s.tokens.Token(ctx)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -175,9 +273,16 @@ func (s *Source) Token(ctx context.Context) (string, error) {
 }
 
 func (s *Source) refresh(ctx context.Context, refreshToken string, scopes []string) (tokenResponse, error) {
-	scope := strings.Join(scopes, " ")
+	return exchangeRefreshToken(ctx, s.client, refreshToken, strings.Join(scopes, " "))
+}
+
+// exchangeRefreshToken runs the refresh_token grant against the OAuth
+// token endpoint. An empty scope falls back to the full subscription set:
+// the backend allows scope expansion on refresh, so tokens minted before
+// a scope existed can still pick it up.
+func exchangeRefreshToken(ctx context.Context, client *http.Client, refreshToken, scope string) (tokenResponse, error) {
 	if scope == "" {
-		scope = "user:inference user:profile"
+		scope = strings.Join(subscriptionScopes, " ")
 	}
 	body, _ := json.Marshal(map[string]any{
 		"grant_type":    "refresh_token",
@@ -185,6 +290,16 @@ func (s *Source) refresh(ctx context.Context, refreshToken string, scopes []stri
 		"client_id":     oauthClientID,
 		"scope":         scope,
 	})
+	tr, err := postToken(ctx, client, body)
+	if err != nil {
+		return tokenResponse{}, fmt.Errorf("claudecode: refresh: %w", err)
+	}
+	return tr, nil
+}
+
+// postToken posts a JSON grant to the OAuth token endpoint and decodes
+// the response, rejecting a 200 that carries no access token.
+func postToken(ctx context.Context, client *http.Client, body []byte) (tokenResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(body))
 	if err != nil {
 		return tokenResponse{}, err
@@ -192,21 +307,24 @@ func (s *Source) refresh(ctx context.Context, refreshToken string, scopes []stri
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 
-	resp, err := s.client.Do(req)
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
-		return tokenResponse{}, fmt.Errorf("claudecode: refresh request: %w", err)
+		return tokenResponse{}, fmt.Errorf("request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return tokenResponse{}, fmt.Errorf("claudecode: refresh failed: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+		return tokenResponse{}, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
 	var tr tokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
-		return tokenResponse{}, fmt.Errorf("claudecode: decode refresh: %w", err)
+		return tokenResponse{}, fmt.Errorf("decode response: %w", err)
 	}
 	if tr.AccessToken == "" {
-		return tokenResponse{}, fmt.Errorf("claudecode: refresh returned empty access token")
+		return tokenResponse{}, fmt.Errorf("response carried no access token")
 	}
 	return tr, nil
 }
@@ -351,31 +469,47 @@ func defaultEffortLevel(levels []string) string {
 	return ""
 }
 
+type modelsCacheEntry struct {
+	models []catwalk.Model
+	at     time.Time
+}
+
 var (
 	modelsCacheMu sync.Mutex
-	modelsCache   []catwalk.Model
-	modelsCacheAt time.Time
+	// modelsCache is keyed by provider id: each subscription account gets
+	// its own entry, since two accounts can be on different plans and so
+	// see different model line-ups.
+	modelsCache = map[string]modelsCacheEntry{}
 )
 
-// CachedModels returns the subscription models, querying the API at most
-// once per hour and falling back to the bundled defaults on any error so a
-// provider is never left without models (e.g. offline at startup).
+// CachedModels returns the default account's subscription models.
 func CachedModels(ctx context.Context) []catwalk.Model {
+	return CachedModelsFor(ctx, ProviderID, DefaultSource())
+}
+
+// CachedModelsFor returns the subscription models for one account,
+// querying the API at most once per hour per provider and falling back to
+// the bundled defaults on any error so a provider is never left without
+// models (e.g. offline at startup).
+func CachedModelsFor(ctx context.Context, providerID string, src *Source) []catwalk.Model {
 	modelsCacheMu.Lock()
 	defer modelsCacheMu.Unlock()
 
-	if len(modelsCache) > 0 && time.Since(modelsCacheAt) < time.Hour {
-		return modelsCache
+	cached := modelsCache[providerID]
+	if len(cached.models) > 0 && time.Since(cached.at) < time.Hour {
+		return cached.models
 	}
-	models, err := DefaultSource().Models(ctx)
+	if src == nil {
+		src = DefaultSource()
+	}
+	models, err := src.Models(ctx)
 	if err != nil || len(models) == 0 {
-		if len(modelsCache) > 0 {
-			return modelsCache
+		if len(cached.models) > 0 {
+			return cached.models
 		}
 		return DefaultModels()
 	}
-	modelsCache = models
-	modelsCacheAt = time.Now()
+	modelsCache[providerID] = modelsCacheEntry{models: models, at: time.Now()}
 	return models
 }
 

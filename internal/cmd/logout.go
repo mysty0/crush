@@ -8,6 +8,7 @@ import (
 	"os/signal"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/claudecode"
 	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/oauth/antigravity"
@@ -30,10 +31,16 @@ var logoutCmd = &cobra.Command{
 	Long: `Logout Crush from a specified platform, removing stored credentials.
 The platform should be provided as an argument.
 If no argument is given, a list of logged-in platforms will be shown.
-Available platforms are: hyper, copilot, codex, gemini, antigravity.`,
+Available platforms are: hyper, copilot, codex, claude, gemini, antigravity.`,
 	Example: `
 # Sign out from Charm Hyper
 crush logout hyper
+
+# Sign out from a Claude subscription
+crush logout claude
+
+# Sign out from a named Claude subscription account
+crush logout claude-code-work
 
 # Sign out from GitHub Copilot
 crush logout copilot
@@ -53,6 +60,8 @@ crush logout antigravity
 		"github",
 		"github-copilot",
 		"codex",
+		"claude",
+		"claude-code",
 		"gemini",
 		"antigravity",
 	},
@@ -105,7 +114,15 @@ crush logout antigravity
 			return logoutProvider(c, ws.ID, geminicli.ProviderID, "Gemini CLI")
 		case "antigravity", "agy", "google-antigravity":
 			return logoutProvider(c, ws.ID, antigravity.ProviderID, "Google Antigravity")
+		case "claude", "claude-code", "claudecode":
+			return logoutProvider(c, ws.ID, claudecode.ProviderID, "Claude")
 		default:
+			// Named Claude subscription accounts are addressed by their
+			// provider id ("claude-code-work"), which is also what the
+			// interactive picker above returns.
+			if claudecode.IsProviderID(provider) {
+				return logoutProvider(c, ws.ID, provider, "Claude ("+claudecode.AccountFromProviderID(provider)+")")
+			}
 			return fmt.Errorf("unknown platform: %s", provider)
 		}
 	},

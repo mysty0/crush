@@ -13,6 +13,7 @@ import (
 
 	"charm.land/catwalk/pkg/catwalk"
 	hyperp "github.com/charmbracelet/crush/internal/agent/hyper"
+	"github.com/charmbracelet/crush/internal/claudecode"
 	"github.com/charmbracelet/crush/internal/env"
 	"github.com/charmbracelet/crush/internal/lock"
 	"github.com/charmbracelet/crush/internal/oauth"
@@ -657,6 +658,12 @@ func (s *ConfigStore) adoptableDiskToken(scope Scope, providerID string, entryTo
 func (s *ConfigStore) exchange(ctx context.Context, providerID, refreshToken string) (*oauth.Token, error) {
 	if s.exchangeToken != nil {
 		return s.exchangeToken(ctx, providerID, refreshToken)
+	}
+	// Every Claude Code subscription account — the default provider and
+	// each named one — refreshes against the same Anthropic grant, so it
+	// is matched by prefix rather than by an exact provider id.
+	if claudecode.IsProviderID(providerID) {
+		return claudecode.RefreshToken(ctx, refreshToken)
 	}
 	switch providerID {
 	case string(catwalk.InferenceProviderCopilot):

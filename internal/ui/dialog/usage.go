@@ -23,32 +23,55 @@ const (
 	usageDialogMaxWidth = 60
 )
 
-// usageProviders lists every subscription provider with a known plan
-// usage endpoint, in display order.
-var usageProviders = []struct {
+// usageProvider is one subscription account to report plan usage for.
+type usageProvider struct {
 	id   string
 	name string
-}{
-	{claudecode.ProviderID, "Claude Code"},
+}
+
+// usageProviders lists the single-account subscription providers with a
+// known plan usage endpoint, in display order. Claude Code is absent
+// because a user can be signed in to several Claude subscriptions at
+// once; those accounts are enumerated from config instead (see
+// usageSubscriptionProviders).
+var usageProviders = []usageProvider{
 	{codex.ProviderID, "OpenAI Codex"},
 	{geminicli.ProviderID, "Gemini CLI"},
 	{antigravity.ProviderID, "Google Antigravity"},
 }
 
-// usageProviderAvailable reports whether the given subscription provider
-// is configured and ready to report usage. Claude Code authenticates via
-// its own credentials file rather than an OAuth token stored in the
-// provider config, so it only needs to be present and not disabled;
-// the others need a stored OAuth token.
+// usageProviderAvailable reports whether the given single-account
+// subscription provider is configured and ready to report usage.
 func usageProviderAvailable(cfg *config.Config, providerID string) bool {
 	pc, ok := cfg.Providers.Get(providerID)
 	if !ok || pc.Disable {
 		return false
 	}
-	if providerID == claudecode.ProviderID {
-		return true
-	}
 	return pc.OAuthToken != nil
+}
+
+// usageSubscriptionProviders returns every subscription account to report
+// usage for, in display order: each configured Claude subscription first
+// (one section per account, since each has its own limits), then the
+// single-account providers.
+func usageSubscriptionProviders(cfg *config.Config) []usageProvider {
+	if cfg == nil {
+		return nil
+	}
+	var providers []usageProvider
+	for _, id := range cfg.ClaudeCodeAccounts() {
+		name := "Claude Code"
+		if pc, ok := cfg.Providers.Get(id); ok && pc.Name != "" {
+			name = pc.Name
+		}
+		providers = append(providers, usageProvider{id: id, name: name})
+	}
+	for _, p := range usageProviders {
+		if usageProviderAvailable(cfg, p.id) {
+			providers = append(providers, p)
+		}
+	}
+	return providers
 }
 
 // usageAnyProviderAvailable reports whether any subscription provider
@@ -56,15 +79,7 @@ func usageProviderAvailable(cfg *config.Config, providerID string) bool {
 // any) is currently selected as the active model's provider. It backs
 // the "Plan Usage" command's visibility.
 func usageAnyProviderAvailable(cfg *config.Config) bool {
-	if cfg == nil {
-		return false
-	}
-	for _, p := range usageProviders {
-		if usageProviderAvailable(cfg, p.id) {
-			return true
-		}
-	}
-	return false
+	return len(usageSubscriptionProviders(cfg)) > 0
 }
 
 // usageLine is one rendered row of the plan usage view: a label and a
@@ -136,10 +151,7 @@ func (u *Usage) fetchUsageCmd() tea.Cmd {
 		}
 
 		var sections []usageSection
-		for _, p := range usageProviders {
-			if !usageProviderAvailable(cfg, p.id) {
-				continue
-			}
+		for _, p := range usageSubscriptionProviders(cfg) {
 			lines, err := u.fetchProviderUsage(ctx, cfg, p.id)
 			sections = append(sections, usageSection{providerName: p.name, lines: lines, err: err})
 		}
@@ -208,8 +220,8 @@ func usageLinesEqual(a, b []usageLine) bool {
 // fetchProviderUsage fetches and formats plan usage for a single
 // subscription provider.
 func (u *Usage) fetchProviderUsage(ctx context.Context, cfg *config.Config, providerID string) ([]usageLine, error) {
-	if providerID == claudecode.ProviderID {
-		usage, err := claudecode.DefaultSource().Usage(ctx)
+	if claudecode.IsProviderID(providerID) {
+		usage, err := u.claudeCodeSource(ctx, cfg, providerID).Usage(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -225,6 +237,29 @@ func (u *Usage) fetchProviderUsage(ctx context.Context, cfg *config.Config, prov
 		}
 	}
 	return fetchOAuthUsageLines(ctx, providerID, pc)
+}
+
+// claudeCodeSource returns the token source for one Claude subscription
+// account. Accounts added with `crush login claude-code` authenticate
+// with the token stored in config, refreshed over the workspace
+// connection first if it has expired; the default account falls back to
+// the credentials file the official Claude Code CLI maintains.
+func (u *Usage) claudeCodeSource(ctx context.Context, cfg *config.Config, providerID string) *claudecode.Source {
+	pc, ok := cfg.Providers.Get(providerID)
+	if !ok || pc.OAuthToken == nil {
+		return claudecode.DefaultSource()
+	}
+	if pc.OAuthToken.IsExpired() {
+		if err := u.com.Workspace.RefreshOAuthToken(ctx, config.ScopeGlobal, providerID); err == nil {
+			if refreshed, ok := u.com.Config().Providers.Get(providerID); ok {
+				pc = refreshed
+			}
+		}
+	}
+	token := pc.OAuthToken.AccessToken
+	return claudecode.NewTokenSource(claudecode.TokenFunc(
+		func(context.Context) (string, error) { return token, nil },
+	))
 }
 
 // fetchOAuthUsageLines dispatches to the provider-specific FetchUsage

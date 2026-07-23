@@ -367,7 +367,11 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 	// from /v1/models (with a built-in fallback) before generic discovery
 	// runs, so the picker shows every subscription model and the provider
 	// is never dropped for having an empty list.
-	if pc, ok := c.Providers.Get(claudecode.ProviderID); ok && !pc.Disable && len(pc.Models) == 0 {
+	//
+	// This covers only the default account authenticating from the Claude
+	// Code CLI's credentials file. Once it holds a token of its own it is
+	// seeded like every other logged-in account, against that token.
+	if pc, ok := c.Providers.Get(claudecode.ProviderID); ok && !pc.Disable && pc.OAuthToken == nil && len(pc.Models) == 0 {
 		mctx, mcancel := context.WithTimeout(ctx, 5*time.Second)
 		pc.Models = claudecode.CachedModels(mctx)
 		mcancel()
