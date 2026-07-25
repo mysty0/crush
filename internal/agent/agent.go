@@ -16,10 +16,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -735,7 +737,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	promptPrefix := a.systemPromptPrefix.Get()
 	var instructions strings.Builder
 
-	for _, server := range mcp.GetStates() {
+	// GetStates returns a map, so iterating it directly would emit the
+	// servers' instructions in a different order on every turn. That text
+	// lands in the system prompt, which sits inside the cached prefix, so
+	// a reshuffle invalidates the whole Anthropic prompt cache and bills
+	// the entire prefix as cache writes again. Iterate by sorted name.
+	states := mcp.GetStates()
+	for _, name := range slices.Sorted(maps.Keys(states)) {
+		server := states[name]
 		if server.State != mcp.StateConnected {
 			continue
 		}
@@ -2068,7 +2077,7 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		cost = 0
 	}
 
-	promptTokens := resp.TotalUsage.InputTokens + resp.TotalUsage.CacheCreationTokens
+	promptTokens := promptTokens(resp.TotalUsage)
 	completionTokens := resp.TotalUsage.OutputTokens
 
 	// Atomically update only title and usage fields to avoid overriding other
@@ -2149,11 +2158,20 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 	return cost
 }
 
+// promptTokens returns the full size of the prompt that was sent. All three
+// buckets are prompt: uncached input, tokens served from the cache, and
+// tokens written to it. Leaving any of them out understates both the context
+// gauge and the cost -- a turn that misses the cache reports its entire
+// prefix under CacheCreationTokens and only a handful of InputTokens.
+func promptTokens(usage fantasy.Usage) int64 {
+	return usage.InputTokens + usage.CacheReadTokens + usage.CacheCreationTokens
+}
+
 func updateSessionTokenCounters(session *session.Session, usage fantasy.Usage) {
 	if usage.OutputTokens != 0 {
 		session.CompletionTokens = usage.OutputTokens
 	}
-	if promptTokens := usage.InputTokens + usage.CacheReadTokens; promptTokens != 0 {
+	if promptTokens := promptTokens(usage); promptTokens != 0 {
 		session.PromptTokens = promptTokens
 	}
 	if usage.CacheCreationTokens != 0 {

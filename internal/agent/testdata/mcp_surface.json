@@ -1,0 +1,2898 @@
+[
+ {
+  "description": "Retrieves and queries up-to-date documentation and code examples from Context7 for any programming library or framework.\n\nYou must call 'Resolve Context7 Library ID' tool first to obtain the exact Context7-compatible library ID required to use this tool, UNLESS the user explicitly provides a library ID in the format '/org/project' or '/org/project/version' in their query.\n\nDo not call this tool more than 3 times per question.",
+  "input_schema": {
+   "properties": {
+    "libraryId": {
+     "description": "Exact Context7-compatible library ID (e.g., '/mongodb/docs', '/vercel/next.js', '/supabase/supabase', '/vercel/next.js/v14.3.0-canary.87') retrieved from 'resolve-library-id' or directly from user query in the format '/org/project' or '/org/project/version'.",
+     "type": "string"
+    },
+    "query": {
+     "description": "The question or task you need help with, scoped to a single concept. Be specific and include relevant details, but keep each query to one topic \u2014 if the user's question spans multiple distinct concepts, make a separate call per concept instead of combining them, unless the question is about how the concepts interact. Good: 'How to set up authentication with JWT in Express.js' or 'React useEffect cleanup function examples'. Bad (too vague): 'auth' or 'hooks'. Bad (too broad): 'routing and auth and caching in Next.js'. The query is sent to the Context7 API for processing. Do not include any sensitive or confidential information such as API keys, passwords, credentials, personal data, or proprietary code in your query.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "libraryId",
+    "query"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__context7__query-docs"
+ },
+ {
+  "description": "Resolves a package/product name to a Context7-compatible library ID and returns matching libraries.\n\nYou MUST call this function before 'Query Documentation' tool to obtain a valid Context7-compatible library ID UNLESS the user explicitly provides a library ID in the format '/org/project' or '/org/project/version' in their query.\n\nEach result includes:\n- Library ID: Context7-compatible identifier (format: /org/project)\n- Name: Library or package name\n- Description: Short summary\n- Code Snippets: Number of available code examples\n- Source Reputation: Authority indicator (High, Medium, Low, or Unknown)\n- Benchmark Score: Quality indicator (100 is the highest score)\n- Versions: List of versions if available. Use one of those versions if the user provides a version in their query. The format of the version is /org/project/version.\n\nFor best results, select libraries based on name match, source reputation, snippet coverage, benchmark score, and relevance to your use case.\n\nSelection Process:\n1. Analyze the query to understand what library/package the user is looking for\n2. Return the most relevant match based on:\n- Name similarity to the query (exact matches prioritized)\n- Description relevance to the query's intent\n- Documentation coverage (prioritize libraries with higher Code Snippet counts)\n- Source reputation (consider libraries with High or Medium reputation more authoritative)\n- Benchmark Score: Quality indicator (100 is the highest score)\n\nResponse Format:\n- Return the selected library ID in a clearly marked section\n- Provide a brief explanation for why this library was chosen\n- If multiple good matches exist, acknowledge this but proceed with the most relevant one\n- If no good matches exist, clearly state this and suggest query refinements\n\nFor ambiguous queries, request clarification before proceeding with a best-guess match.\n\nIMPORTANT: Do not call this tool more than 3 times per question. If you cannot find what you need after 3 calls, use the best result you have.",
+  "input_schema": {
+   "properties": {
+    "libraryName": {
+     "description": "Library name to search for and retrieve a Context7-compatible library ID. Use the official library name with proper punctuation \u2014 e.g., 'Next.js' instead of 'nextjs', 'Customer.io' instead of 'customerio', 'Three.js' instead of 'threejs'.",
+     "type": "string"
+    },
+    "query": {
+     "description": "The question or task you need help with. This is used to rank library results by relevance to what the user is trying to accomplish. The query is sent to the Context7 API for processing. Do not include any sensitive or confidential information such as API keys, passwords, credentials, personal data, or proprietary code in your query.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "query",
+    "libraryName"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__context7__resolve-library-id"
+ },
+ {
+  "description": "Add a note (userNote activity) to an existing incident's timeline using its ID. The note body can include URLs which will be attached as context. Use this to add context to an incident.",
+  "input_schema": {
+   "properties": {
+    "body": {
+     "description": "The body of the activity. URLs will be parsed and attached as context",
+     "type": "string"
+    },
+    "eventTime": {
+     "description": "The time that the activity occurred. If not provided, the current time will be used",
+     "type": "string"
+    },
+    "incidentId": {
+     "description": "The ID of the incident to add the activity to",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__add_activity_to_incident"
+ },
+ {
+  "description": "Creates a new Grafana alert rule with the specified configuration. Requires title, rule group, folder UID, condition, query data, no data state, execution error state, and duration settings.",
+  "input_schema": {
+   "properties": {
+    "annotations": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "description": "Optional annotations",
+     "type": "object"
+    },
+    "condition": {
+     "description": "The query condition identifier (e.g. 'A', 'B')",
+     "type": "string"
+    },
+    "data": {
+     "description": "Array of query data objects"
+    },
+    "execErrState": {
+     "description": "State on execution error (NoData, Alerting, OK)",
+     "type": "string"
+    },
+    "folderUID": {
+     "description": "The folder UID where the rule will be created",
+     "type": "string"
+    },
+    "for": {
+     "description": "Duration before alert fires (e.g. '5m')",
+     "type": "string"
+    },
+    "labels": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "description": "Optional labels",
+     "type": "object"
+    },
+    "noDataState": {
+     "description": "State when no data (NoData, Alerting, OK)",
+     "type": "string"
+    },
+    "orgID": {
+     "description": "The organization ID",
+     "type": "integer"
+    },
+    "ruleGroup": {
+     "description": "The rule group name",
+     "type": "string"
+    },
+    "title": {
+     "description": "The title of the alert rule",
+     "type": "string"
+    },
+    "uid": {
+     "description": "Optional UID for the alert rule",
+     "type": "string"
+    }
+   },
+   "required": [
+    "title",
+    "ruleGroup",
+    "folderUID",
+    "condition",
+    "data",
+    "noDataState",
+    "execErrState",
+    "for",
+    "orgID"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__create_alert_rule"
+ },
+ {
+  "description": "Create a new annotation on a dashboard or panel.",
+  "input_schema": {
+   "properties": {
+    "dashboardId": {
+     "description": "Deprecated. Use dashboardUID",
+     "type": "integer"
+    },
+    "dashboardUID": {
+     "description": "Preferred dashboard UID",
+     "type": "string"
+    },
+    "data": {
+     "description": "Optional JSON payload",
+     "type": "object"
+    },
+    "panelId": {
+     "description": "Panel ID",
+     "type": "integer"
+    },
+    "tags": {
+     "description": "Optional list of tags",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "text": {
+     "description": "Annotation text required",
+     "type": "string"
+    },
+    "time": {
+     "description": "Start time epoch ms",
+     "type": "integer"
+    },
+    "timeEnd": {
+     "description": "End time epoch ms",
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__create_annotation"
+ },
+ {
+  "description": "Create a Grafana folder. Provide a title and optional UID. Returns the created folder.",
+  "input_schema": {
+   "properties": {
+    "parentUid": {
+     "description": "Optional parent folder UID. If set, the folder will be created under this parent.",
+     "type": "string"
+    },
+    "title": {
+     "description": "The title of the folder.",
+     "type": "string"
+    },
+    "uid": {
+     "description": "Optional folder UID. If omitted, Grafana will generate one.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "title"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__create_folder"
+ },
+ {
+  "description": "Create an annotation using Graphite annotation format.",
+  "input_schema": {
+   "properties": {
+    "data": {
+     "description": "Optional payload",
+     "type": "string"
+    },
+    "tags": {
+     "description": "Optional list of tags",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "what": {
+     "description": "Annotation text",
+     "type": "string"
+    },
+    "when": {
+     "description": "Epoch ms timestamp",
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__create_graphite_annotation"
+ },
+ {
+  "description": "Create a new Grafana incident. Requires title, severity, and room prefix. Allows setting status and labels. This tool should be used judiciously and sparingly, and only after confirmation from the user, as it may notify or alarm lots of people.",
+  "input_schema": {
+   "properties": {
+    "attachCaption": {
+     "description": "The caption of the attachment",
+     "type": "string"
+    },
+    "attachUrl": {
+     "description": "The URL of the attachment",
+     "type": "string"
+    },
+    "isDrill": {
+     "description": "Whether the incident is a drill incident",
+     "type": "boolean"
+    },
+    "labels": {
+     "description": "The labels to add to the incident",
+     "items": {
+      "properties": {
+       "colorHex": {
+        "type": "string"
+       },
+       "description": {
+        "type": "string"
+       },
+       "key": {
+        "type": "string"
+       },
+       "label": {
+        "type": "string"
+       }
+      },
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "roomPrefix": {
+     "description": "The prefix of the room to create the incident in",
+     "type": "string"
+    },
+    "severity": {
+     "description": "The severity of the incident",
+     "type": "string"
+    },
+    "status": {
+     "description": "The status of the incident",
+     "type": "string"
+    },
+    "title": {
+     "description": "The title of the incident",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__create_incident"
+ },
+ {
+  "description": "Deletes a Grafana alert rule by its UID. This action cannot be undone.",
+  "input_schema": {
+   "properties": {
+    "uid": {
+     "description": "The UID of the alert rule to delete",
+     "type": "string"
+    }
+   },
+   "required": [
+    "uid"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__delete_alert_rule"
+ },
+ {
+  "description": "\nFetches a profile from a Pyroscope data source for a given time range. By default, the time range is tha past 1 hour.\nThe profile type is required, available profile types can be fetched via the list_pyroscope_profile_types tool. Not all\nprofile types are available for every service. Expect some queries to return empty result sets, this indicates the\nprofile type does not exist for that query. In such a case, consider trying a related profile type or giving up.\nMatchers are not required, but highly recommended, they are generally used to select an application by the service_name\nlabel (e.g. {service_name=\"foo\"}). Use the list_pyroscope_label_names tool to fetch available label names, and the\nlist_pyroscope_label_values tool to fetch available label values. The returned profile is in DOT format.\n",
+  "input_schema": {
+   "properties": {
+    "data_source_uid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "end_rfc_3339": {
+     "description": "Optionally, the end time of the query in RFC3339 format (defaults to now)",
+     "type": "string"
+    },
+    "matchers": {
+     "description": "Optionally, Prometheus style matchers used to filter the result set (defaults to: {})",
+     "type": "string"
+    },
+    "max_node_depth": {
+     "description": "Optionally, the maximum depth of nodes in the resulting profile. Less depth results in smaller profiles that execute faster, more depth result in larger profiles that have more detail. A value of -1 indicates to use an unbounded node depth (default: 100). Reducing max node depth from the default will negatively impact the accuracy of the profile",
+     "type": "integer"
+    },
+    "profile_type": {
+     "description": "Type profile type, use the list_pyroscope_profile_types tool to fetch available profile types",
+     "type": "string"
+    },
+    "start_rfc_3339": {
+     "description": "Optionally, the start time of the query in RFC3339 format (defaults to 1 hour ago)",
+     "type": "string"
+    }
+   },
+   "required": [
+    "data_source_uid",
+    "profile_type"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__fetch_pyroscope_profile"
+ },
+ {
+  "description": "Searches Loki logs for elevated error patterns compared to the last day's average, waits for the analysis to complete, and returns the results including any patterns found.",
+  "input_schema": {
+   "properties": {
+    "end": {
+     "description": "End time for the investigation. Defaults to now if not specified.",
+     "format": "date-time",
+     "type": "string"
+    },
+    "labels": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "description": "Labels to scope the analysis",
+     "type": "object"
+    },
+    "name": {
+     "description": "The name of the investigation",
+     "type": "string"
+    },
+    "start": {
+     "description": "Start time for the investigation. Defaults to 30 minutes ago if not specified.",
+     "format": "date-time",
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "labels"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__find_error_pattern_logs"
+ },
+ {
+  "description": "Searches relevant Tempo datasources for slow requests, waits for the analysis to complete, and returns the results.",
+  "input_schema": {
+   "properties": {
+    "end": {
+     "description": "End time for the investigation. Defaults to now if not specified.",
+     "format": "date-time",
+     "type": "string"
+    },
+    "labels": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "description": "Labels to scope the analysis",
+     "type": "object"
+    },
+    "name": {
+     "description": "The name of the investigation",
+     "type": "string"
+    },
+    "start": {
+     "description": "Start time for the investigation. Defaults to 30 minutes ago if not specified.",
+     "format": "date-time",
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "labels"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__find_slow_requests"
+ },
+ {
+  "description": "Generate deeplink URLs for Grafana resources. Supports dashboards (requires dashboardUid), panels (requires dashboardUid and panelId), and Explore queries (requires datasourceUid). Optionally accepts time range and additional query parameters.",
+  "input_schema": {
+   "properties": {
+    "dashboardUid": {
+     "description": "Dashboard UID (required for dashboard and panel types)",
+     "type": "string"
+    },
+    "datasourceUid": {
+     "description": "Datasource UID (required for explore type)",
+     "type": "string"
+    },
+    "panelId": {
+     "description": "Panel ID (required for panel type)",
+     "type": "integer"
+    },
+    "queryParams": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "description": "Additional query parameters",
+     "type": "object"
+    },
+    "resourceType": {
+     "description": "Type of resource: dashboard, panel, or explore",
+     "type": "string"
+    },
+    "timeRange": {
+     "description": "Time range for the link",
+     "properties": {
+      "from": {
+       "description": "Start time (e.g., 'now-1h')",
+       "type": "string"
+      },
+      "to": {
+       "description": "End time (e.g., 'now')",
+       "type": "string"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "required": [
+    "resourceType"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__generate_deeplink"
+ },
+ {
+  "description": "Get a specific alert group from Grafana OnCall by its ID. Returns the full alert group details.",
+  "input_schema": {
+   "properties": {
+    "alertGroupId": {
+     "description": "The ID of the alert group to retrieve",
+     "type": "string"
+    }
+   },
+   "required": [
+    "alertGroupId"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_alert_group"
+ },
+ {
+  "description": "Retrieves the full configuration and detailed status of a specific Grafana alert rule identified by its unique ID (UID). The response includes fields like title, condition, query data, folder UID, rule group, state settings (no data, error), evaluation interval, annotations, and labels.",
+  "input_schema": {
+   "properties": {
+    "uid": {
+     "description": "The uid of the alert rule",
+     "type": "string"
+    }
+   },
+   "required": [
+    "uid"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_alert_rule_by_uid"
+ },
+ {
+  "description": "Returns annotation tags with optional filtering by tag name. Only the provided filters are applied.",
+  "input_schema": {
+   "properties": {
+    "limit": {
+     "description": "Max results, default 100",
+     "type": "string"
+    },
+    "tag": {
+     "description": "Optional filter by tag name",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_annotation_tags"
+ },
+ {
+  "description": "Fetch Grafana annotations using filters such as dashboard UID, time range and tags.",
+  "input_schema": {
+   "properties": {
+    "AlertID": {
+     "description": "Deprecated. Use AlertUID",
+     "type": "integer"
+    },
+    "AlertUID": {
+     "description": "Filter by alert UID",
+     "type": "string"
+    },
+    "DashboardID": {
+     "description": "Deprecated. Use DashboardUID",
+     "type": "integer"
+    },
+    "DashboardUID": {
+     "description": "Filter by dashboard UID",
+     "type": "string"
+    },
+    "From": {
+     "description": "Epoch ms start time",
+     "type": "integer"
+    },
+    "Limit": {
+     "description": "Max results default 100",
+     "type": "integer"
+    },
+    "MatchAny": {
+     "description": "true OR tag match false AND",
+     "type": "boolean"
+    },
+    "PanelID": {
+     "description": "Filter by panel ID",
+     "type": "integer"
+    },
+    "Tags": {
+     "description": "Multiple tags allowed tags=tag1&tags=tag2",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "To": {
+     "description": "Epoch ms end time",
+     "type": "integer"
+    },
+    "Type": {
+     "description": "annotation or alert",
+     "type": "string"
+    },
+    "UserID": {
+     "description": "Filter by creator user ID",
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_annotations"
+ },
+ {
+  "description": "Get assertion summary for a given entity with its type, name, env, site, namespace, and a time range",
+  "input_schema": {
+   "properties": {
+    "endTime": {
+     "description": "The end time in RFC3339 format",
+     "format": "date-time",
+     "type": "string"
+    },
+    "entityName": {
+     "description": "The name of the entity to list",
+     "type": "string"
+    },
+    "entityType": {
+     "description": "The type of the entity to list (e.g. Service, Node, Pod, etc.)",
+     "type": "string"
+    },
+    "env": {
+     "description": "The env of the entity to list",
+     "type": "string"
+    },
+    "namespace": {
+     "description": "The namespace of the entity to list",
+     "type": "string"
+    },
+    "site": {
+     "description": "The site of the entity to list",
+     "type": "string"
+    },
+    "startTime": {
+     "description": "The start time in RFC3339 format",
+     "format": "date-time",
+     "type": "string"
+    }
+   },
+   "required": [
+    "startTime",
+    "endTime"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_assertions"
+ },
+ {
+  "description": "Get the list of users currently on-call for a specific Grafana OnCall schedule ID. Returns the schedule ID, name, and a list of detailed user objects for those currently on call.",
+  "input_schema": {
+   "properties": {
+    "scheduleId": {
+     "description": "The ID of the schedule to get current on-call users for",
+     "type": "string"
+    }
+   },
+   "required": [
+    "scheduleId"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_current_oncall_users"
+ },
+ {
+  "description": "Retrieves the complete dashboard, including panels, variables, and settings, for a specific dashboard identified by its UID. WARNING: Large dashboards can consume significant context window space. Consider using get_dashboard_summary for overview or get_dashboard_property for specific data instead.",
+  "input_schema": {
+   "properties": {
+    "uid": {
+     "description": "The UID of the dashboard",
+     "type": "string"
+    }
+   },
+   "required": [
+    "uid"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_dashboard_by_uid"
+ },
+ {
+  "description": "Use this tool to retrieve panel queries and information from a Grafana dashboard. When asked about panel queries, queries in a dashboard, or what queries a dashboard contains, call this tool with the dashboard UID. The datasource is an object with fields `uid` (which may be a concrete UID or a template variable like \"$datasource\") and `type`. If the datasource UID is a template variable, it won't be usable directly for queries. Returns an array of objects, each representing a panel, with fields: title, query, and datasource (an object with uid and type).",
+  "input_schema": {
+   "properties": {
+    "uid": {
+     "description": "The UID of the dashboard",
+     "type": "string"
+    }
+   },
+   "required": [
+    "uid"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_dashboard_panel_queries"
+ },
+ {
+  "description": "Get specific parts of a dashboard using JSONPath expressions to minimize context window usage. Common paths: '$.title' (title)\\, '$.panels[*].title' (all panel titles)\\, '$.panels[0]' (first panel)\\, '$.templating.list' (variables)\\, '$.tags' (tags)\\, '$.panels[*].targets[*].expr' (all queries). Use this instead of get_dashboard_by_uid when you only need specific dashboard properties.",
+  "input_schema": {
+   "properties": {
+    "jsonPath": {
+     "description": "JSONPath expression to extract specific data (e.g., '$.panels[0].title' for first panel title, '$.panels[*].title' for all panel titles, '$.templating.list' for variables)",
+     "type": "string"
+    },
+    "uid": {
+     "description": "The UID of the dashboard",
+     "type": "string"
+    }
+   },
+   "required": [
+    "uid",
+    "jsonPath"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_dashboard_property"
+ },
+ {
+  "description": "Get a compact summary of a dashboard including title\\, panel count\\, panel types\\, variables\\, and other metadata without the full JSON. Use this for dashboard overview and planning modifications without consuming large context windows.",
+  "input_schema": {
+   "properties": {
+    "uid": {
+     "description": "The UID of the dashboard",
+     "type": "string"
+    }
+   },
+   "required": [
+    "uid"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_dashboard_summary"
+ },
+ {
+  "description": "Retrieves detailed information about a specific datasource using its name. Returns the full datasource model, including UID, type, URL, access settings, JSON data, and secure JSON field status.",
+  "input_schema": {
+   "properties": {
+    "name": {
+     "description": "The name of the datasource",
+     "type": "string"
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_datasource_by_name"
+ },
+ {
+  "description": "Retrieves detailed information about a specific datasource using its UID. Returns the full datasource model, including name, type, URL, access settings, JSON data, and secure JSON field status.",
+  "input_schema": {
+   "properties": {
+    "uid": {
+     "description": "The uid of the datasource",
+     "type": "string"
+    }
+   },
+   "required": [
+    "uid"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_datasource_by_uid"
+ },
+ {
+  "description": "Get a single incident by ID. Returns the full incident details including title, status, severity, labels, timestamps, and other metadata.",
+  "input_schema": {
+   "properties": {
+    "id": {
+     "description": "The ID of the incident to retrieve",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_incident"
+ },
+ {
+  "description": "Get detailed information for a specific Grafana OnCall shift using its ID. A shift represents a designated time period within a schedule when users are actively on-call. Returns the full shift details.",
+  "input_schema": {
+   "properties": {
+    "shiftId": {
+     "description": "The ID of the shift to get details for",
+     "type": "string"
+    }
+   },
+   "required": [
+    "shiftId"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_oncall_shift"
+ },
+ {
+  "description": "Retrieves a specific analysis from an investigation by its UUID. The investigation ID and analysis ID should be provided as strings in UUID format.",
+  "input_schema": {
+   "properties": {
+    "analysisId": {
+     "description": "The UUID of the specific analysis to retrieve",
+     "type": "string"
+    },
+    "investigationId": {
+     "description": "The UUID of the investigation as a string (e.g. '02adab7c-bf5b-45f2-9459-d71a2c29e11b')",
+     "type": "string"
+    }
+   },
+   "required": [
+    "investigationId",
+    "analysisId"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_sift_analysis"
+ },
+ {
+  "description": "Retrieves an existing Sift investigation by its UUID. The ID should be provided as a string in UUID format (e.g. '02adab7c-bf5b-45f2-9459-d71a2c29e11b').",
+  "input_schema": {
+   "properties": {
+    "id": {
+     "description": "The UUID of the investigation as a string (e.g. '02adab7c-bf5b-45f2-9459-d71a2c29e11b')",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__get_sift_investigation"
+ },
+ {
+  "description": "List alert groups from Grafana OnCall with filtering options. Supports filtering by alert group ID, route ID, integration ID, state (new, acknowledged, resolved, silenced), team ID, time range, labels, and name. For time ranges, use format '{start}_{end}' ISO 8601 timestamp range (e.g., '2025-01-19T00:00:00_2025-01-19T23:59:59' for a specific day). For labels, use format 'key:value' (e.g., ['env:prod', 'severity:high']). Returns a list of alert group objects with their details. Supports pagination.",
+  "input_schema": {
+   "properties": {
+    "id": {
+     "description": "Filter by specific alert group ID",
+     "type": "string"
+    },
+    "integrationId": {
+     "description": "Filter by integration ID",
+     "type": "string"
+    },
+    "labels": {
+     "description": "Filter by labels in format key:value (e.g., ['env:prod', 'severity:high'])",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "name": {
+     "description": "Filter by alert group name",
+     "type": "string"
+    },
+    "page": {
+     "description": "The page number to return",
+     "type": "integer"
+    },
+    "routeId": {
+     "description": "Filter by route ID",
+     "type": "string"
+    },
+    "startedAt": {
+     "description": "Filter by time range in format '{start}_{end}' ISO 8601 timestamp range (UTC assumed, no timezone indicator needed) (e.g., '2025-01-19T00:00:00_2025-01-19T23:59:59')",
+     "type": "string"
+    },
+    "state": {
+     "description": "Filter by alert group state (one of: new, acknowledged, resolved, silenced)",
+     "type": "string"
+    },
+    "teamId": {
+     "description": "Filter by team ID",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_alert_groups"
+ },
+ {
+  "description": "Lists Grafana alert rules, returning a summary including UID, title, current state (e.g., 'pending', 'firing', 'inactive'), and labels. Optionally query datasource-managed rules from Prometheus or Loki by providing datasourceUid. Supports filtering by labels using selectors and pagination. Example label selector: `[{'name': 'severity', 'type': '=', 'value': 'critical'}]`. Inactive state means the alert state is normal, not firing",
+  "input_schema": {
+   "properties": {
+    "datasourceUid": {
+     "description": "Optional: UID of a Prometheus or Loki datasource to query for datasource-managed alert rules. If omitted, returns Grafana-managed rules.",
+     "type": "string"
+    },
+    "label_selectors": {
+     "description": "Optionally, a list of matchers to filter alert rules by labels",
+     "items": {
+      "properties": {
+       "filters": {
+        "items": {
+         "properties": {
+          "name": {
+           "description": "The name of the label to match against",
+           "type": "string"
+          },
+          "type": {
+           "description": "One of the '=' or '!=' or '=~' or '!~'",
+           "type": "string"
+          },
+          "value": {
+           "description": "The value to match against",
+           "type": "string"
+          }
+         },
+         "required": [
+          "name",
+          "value",
+          "type"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       }
+      },
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "limit": {
+     "default": 100,
+     "description": "The maximum number of results to return",
+     "type": "integer"
+    },
+    "page": {
+     "default": 1,
+     "description": "The page number to return",
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_alert_rules"
+ },
+ {
+  "description": "Lists Grafana notification contact points, returning a summary including UID, name, and type for each. Optionally query Alertmanager receivers by providing datasourceUid. Supports filtering by name - exact match - and limiting the number of results.",
+  "input_schema": {
+   "properties": {
+    "datasourceUid": {
+     "description": "Optional: UID of an Alertmanager-compatible datasource to query for receivers. If omitted, returns Grafana-managed contact points.",
+     "type": "string"
+    },
+    "limit": {
+     "description": "The maximum number of results to return. Default is 100.",
+     "type": "integer"
+    },
+    "name": {
+     "description": "Filter contact points by name",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_contact_points"
+ },
+ {
+  "description": "List available Grafana datasources. Optionally filter by datasource type (e.g., 'prometheus', 'loki'). Returns a summary list including ID, UID, name, type, and default status.",
+  "input_schema": {
+   "properties": {
+    "type": {
+     "description": "The type of datasources to search for. For example, 'prometheus', 'loki', 'tempo', etc...",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_datasources"
+ },
+ {
+  "description": "List Grafana incidents. Allows filtering by status ('active', 'resolved') and optionally including drill incidents. Returns a preview list with basic details.",
+  "input_schema": {
+   "properties": {
+    "drill": {
+     "description": "Whether to include drill incidents",
+     "type": "boolean"
+    },
+    "limit": {
+     "default": 10,
+     "description": "The maximum number of incidents to return",
+     "type": "integer"
+    },
+    "status": {
+     "description": "The status of the incidents to include. Valid values: 'active', 'resolved'",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_incidents"
+ },
+ {
+  "description": "Lists all available label names (keys) found in logs within a specified Loki datasource and time range. Returns a list of unique label strings (e.g., `[\"app\", \"env\", \"pod\"]`). If the time range is not provided, it defaults to the last hour.",
+  "input_schema": {
+   "properties": {
+    "datasourceUid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "endRfc3339": {
+     "description": "Optionally, the end time of the query in RFC3339 format (defaults to now)",
+     "type": "string"
+    },
+    "startRfc3339": {
+     "description": "Optionally, the start time of the query in RFC3339 format (defaults to 1 hour ago)",
+     "type": "string"
+    }
+   },
+   "required": [
+    "datasourceUid"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_loki_label_names"
+ },
+ {
+  "description": "Retrieves all unique values associated with a specific `labelName` within a Loki datasource and time range. Returns a list of string values (e.g., for `labelName=\"env\"`, might return `[\"prod\", \"staging\", \"dev\"]`). Useful for discovering filter options. Defaults to the last hour if the time range is omitted.",
+  "input_schema": {
+   "properties": {
+    "datasourceUid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "endRfc3339": {
+     "description": "Optionally, the end time of the query in RFC3339 format (defaults to now)",
+     "type": "string"
+    },
+    "labelName": {
+     "description": "The name of the label to retrieve values for (e.g. 'app', 'env', 'pod')",
+     "type": "string"
+    },
+    "startRfc3339": {
+     "description": "Optionally, the start time of the query in RFC3339 format (defaults to 1 hour ago)",
+     "type": "string"
+    }
+   },
+   "required": [
+    "datasourceUid",
+    "labelName"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_loki_label_values"
+ },
+ {
+  "description": "List Grafana OnCall schedules, optionally filtering by team ID. If a specific schedule ID is provided, retrieves details for only that schedule. Returns a list of schedule summaries including ID, name, team ID, timezone, and shift IDs. Supports pagination.",
+  "input_schema": {
+   "properties": {
+    "page": {
+     "description": "The page number to return (1-based)",
+     "type": "integer"
+    },
+    "scheduleId": {
+     "description": "The ID of the schedule to get details for. If provided, returns only that schedule's details",
+     "type": "string"
+    },
+    "teamId": {
+     "description": "The ID of the team to list schedules for",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_oncall_schedules"
+ },
+ {
+  "description": "List teams configured in Grafana OnCall. Returns a list of team objects with their details. Supports pagination.",
+  "input_schema": {
+   "properties": {
+    "page": {
+     "description": "The page number to return",
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_oncall_teams"
+ },
+ {
+  "description": "List users from Grafana OnCall. Can retrieve all users, a specific user by ID, or filter by username. Returns a list of user objects with their details. Supports pagination.",
+  "input_schema": {
+   "properties": {
+    "page": {
+     "description": "The page number to return",
+     "type": "integer"
+    },
+    "userId": {
+     "description": "The ID of the user to get details for. If provided, returns only that user's details",
+     "type": "string"
+    },
+    "username": {
+     "description": "The username to filter users by. If provided, returns only the user matching this username",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_oncall_users"
+ },
+ {
+  "description": "List label names in a Prometheus datasource. Allows filtering by series selectors and time range.",
+  "input_schema": {
+   "properties": {
+    "datasourceUid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "endRfc3339": {
+     "description": "Optionally, the end time of the time range to filter the results by",
+     "type": "string"
+    },
+    "limit": {
+     "default": 100,
+     "description": "Optionally, the maximum number of results to return",
+     "type": "integer"
+    },
+    "matches": {
+     "description": "Optionally, a list of label matchers to filter the results by",
+     "items": {
+      "properties": {
+       "filters": {
+        "items": {
+         "properties": {
+          "name": {
+           "description": "The name of the label to match against",
+           "type": "string"
+          },
+          "type": {
+           "description": "One of the '=' or '!=' or '=~' or '!~'",
+           "type": "string"
+          },
+          "value": {
+           "description": "The value to match against",
+           "type": "string"
+          }
+         },
+         "required": [
+          "name",
+          "value",
+          "type"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       }
+      },
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "startRfc3339": {
+     "description": "Optionally, the start time of the time range to filter the results by",
+     "type": "string"
+    }
+   },
+   "required": [
+    "datasourceUid"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_prometheus_label_names"
+ },
+ {
+  "description": "Get the values for a specific label name in Prometheus. Allows filtering by series selectors and time range.",
+  "input_schema": {
+   "properties": {
+    "datasourceUid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "endRfc3339": {
+     "description": "Optionally, the end time of the query",
+     "type": "string"
+    },
+    "labelName": {
+     "description": "The name of the label to query",
+     "type": "string"
+    },
+    "limit": {
+     "default": 100,
+     "description": "Optionally, the maximum number of results to return",
+     "type": "integer"
+    },
+    "matches": {
+     "description": "Optionally, a list of selectors to filter the results by",
+     "items": {
+      "properties": {
+       "filters": {
+        "items": {
+         "properties": {
+          "name": {
+           "description": "The name of the label to match against",
+           "type": "string"
+          },
+          "type": {
+           "description": "One of the '=' or '!=' or '=~' or '!~'",
+           "type": "string"
+          },
+          "value": {
+           "description": "The value to match against",
+           "type": "string"
+          }
+         },
+         "required": [
+          "name",
+          "value",
+          "type"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       }
+      },
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "startRfc3339": {
+     "description": "Optionally, the start time of the query",
+     "type": "string"
+    }
+   },
+   "required": [
+    "datasourceUid",
+    "labelName"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_prometheus_label_values"
+ },
+ {
+  "description": "List Prometheus metric metadata. Returns metadata about metrics currently scraped from targets. Note: This endpoint is experimental.",
+  "input_schema": {
+   "properties": {
+    "datasourceUid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "limit": {
+     "default": 10,
+     "description": "The maximum number of metrics to return",
+     "type": "integer"
+    },
+    "limitPerMetric": {
+     "description": "The maximum number of metrics to return per metric",
+     "type": "integer"
+    },
+    "metric": {
+     "description": "The metric to query",
+     "type": "string"
+    }
+   },
+   "required": [
+    "datasourceUid"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_prometheus_metric_metadata"
+ },
+ {
+  "description": "List metric names in a Prometheus datasource. Retrieves all metric names and then filters them locally using the provided regex. Supports pagination.",
+  "input_schema": {
+   "properties": {
+    "datasourceUid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "limit": {
+     "default": 10,
+     "description": "The maximum number of results to return",
+     "type": "integer"
+    },
+    "page": {
+     "default": 1,
+     "description": "The page number to return",
+     "type": "integer"
+    },
+    "regex": {
+     "description": "The regex to match against the metric names",
+     "type": "string"
+    }
+   },
+   "required": [
+    "datasourceUid"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_prometheus_metric_names"
+ },
+ {
+  "description": "\nLists all available label names (keys) found in profiles within a specified Pyroscope datasource, time range, and\noptional label matchers. Label matchers are typically used to qualify a service name ({service_name=\"foo\"}). Returns a\nlist of unique label strings (e.g., [\"app\", \"env\", \"pod\"]). Label names with double underscores (e.g. __name__) are\ninternal and rarely useful to users. If the time range is not provided, it defaults to the last hour.\n",
+  "input_schema": {
+   "properties": {
+    "data_source_uid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "end_rfc_3339": {
+     "description": "Optionally, the end time of the query in RFC3339 format (defaults to now)",
+     "type": "string"
+    },
+    "matchers": {
+     "type": "string"
+    },
+    "start_rfc_3339": {
+     "description": "Optionally, the start time of the query in RFC3339 format (defaults to 1 hour ago)",
+     "type": "string"
+    }
+   },
+   "required": [
+    "data_source_uid"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_pyroscope_label_names"
+ },
+ {
+  "description": "\nLists all available label values for a particular label name found in profiles within a specified Pyroscope datasource,\ntime range, and optional label matchers. Label matchers are typically used to qualify a service name ({service_name=\"foo\"}).\nReturns a list of unique label strings (e.g. for label name \"env\": [\"dev\", \"staging\", \"prod\"]). If the time range\nis not provided, it defaults to the last hour.\n",
+  "input_schema": {
+   "properties": {
+    "data_source_uid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "end_rfc_3339": {
+     "description": "Optionally, the end time of the query in RFC3339 format (defaults to now)",
+     "type": "string"
+    },
+    "matchers": {
+     "description": "Optionally, Prometheus style matchers used to filter the result set (defaults to: {})",
+     "type": "string"
+    },
+    "name": {
+     "description": "A label name",
+     "type": "string"
+    },
+    "start_rfc_3339": {
+     "description": "Optionally, the start time of the query in RFC3339 format (defaults to 1 hour ago)",
+     "type": "string"
+    }
+   },
+   "required": [
+    "data_source_uid",
+    "name"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_pyroscope_label_values"
+ },
+ {
+  "description": "\nLists all available profile types available in a specified Pyroscope datasource and time range. Returns a list of all\navailable profile types (example profile type: \"process_cpu:cpu:nanoseconds:cpu:nanoseconds\"). A profile type has the\nfollowing structure: <name>:<sample type>:<sample unit>:<period type>:<period unit>. Not all profile types are available\nfor every service. If the time range is not provided, it defaults to the last hour.\n",
+  "input_schema": {
+   "properties": {
+    "data_source_uid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "end_rfc_3339": {
+     "description": "Optionally, the end time of the query in RFC3339 format (defaults to now)",
+     "type": "string"
+    },
+    "start_rfc_3339": {
+     "description": "Optionally, the start time of the query in RFC3339 format (defaults to 1 hour ago)",
+     "type": "string"
+    }
+   },
+   "required": [
+    "data_source_uid"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_pyroscope_profile_types"
+ },
+ {
+  "description": "Retrieves a list of Sift investigations with an optional limit. If no limit is specified, defaults to 10 investigations.",
+  "input_schema": {
+   "properties": {
+    "limit": {
+     "default": 10,
+     "description": "Maximum number of investigations to return",
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_sift_investigations"
+ },
+ {
+  "description": "Search for Grafana teams by a query string. Returns a list of matching teams with details like name, ID, and URL.",
+  "input_schema": {
+   "properties": {
+    "query": {
+     "description": "The query to search for teams. Can be left empty to fetch all teams",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_teams"
+ },
+ {
+  "description": "List users by organization. Returns a list of users with details like userid, email, role etc.",
+  "input_schema": {
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__list_users_by_org"
+ },
+ {
+  "description": "Updates only the provided properties of an annotation. Fields omitted are not modified. Use update_annotation for full replacement.",
+  "input_schema": {
+   "properties": {
+    "data": {
+     "description": "Optional metadata",
+     "type": "object"
+    },
+    "id": {
+     "description": "Annotation ID",
+     "type": "integer"
+    },
+    "tags": {
+     "description": "Optional replace tags",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "text": {
+     "description": "Optional new text",
+     "type": "string"
+    },
+    "time": {
+     "description": "Optional new start epoch ms",
+     "type": "integer"
+    },
+    "timeEnd": {
+     "description": "Optional new end epoch ms",
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__patch_annotation"
+ },
+ {
+  "description": "Executes a LogQL query against a Loki datasource to retrieve log entries or metric values. Returns a list of results, each containing a timestamp, labels, and either a log line (`line`) or a numeric metric value (`value`). Defaults to the last hour, a limit of 10 entries, and 'backward' direction (newest first). Supports full LogQL syntax for log and metric queries (e.g., `{app=\"foo\"} |= \"error\"`, `rate({app=\"bar\"}[1m])`). Prefer using `query_loki_stats` first to check stream size and `list_loki_label_names` and `list_loki_label_values` to verify labels exist.",
+  "input_schema": {
+   "properties": {
+    "datasourceUid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "direction": {
+     "description": "Optionally, the direction of the query: 'forward' (oldest first) or 'backward' (newest first, default)",
+     "type": "string"
+    },
+    "endRfc3339": {
+     "description": "Optionally, the end time of the query in RFC3339 format",
+     "type": "string"
+    },
+    "limit": {
+     "default": 10,
+     "description": "Optionally, the maximum number of log lines to return (max: 100)",
+     "type": "integer"
+    },
+    "logql": {
+     "description": "The LogQL query to execute against Loki. This can be a simple label matcher or a complex query with filters, parsers, and expressions. Supports full LogQL syntax including label matchers, filter operators, pattern expressions, and pipeline operations.",
+     "type": "string"
+    },
+    "startRfc3339": {
+     "description": "Optionally, the start time of the query in RFC3339 format",
+     "type": "string"
+    }
+   },
+   "required": [
+    "datasourceUid",
+    "logql"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__query_loki_logs"
+ },
+ {
+  "description": "Retrieves statistics about log streams matching a given LogQL *selector* within a Loki datasource and time range. Returns an object containing the count of streams, chunks, entries, and total bytes (e.g., `{\"streams\": 5, \"chunks\": 50, \"entries\": 10000, \"bytes\": 512000}`). The `logql` parameter **must** be a simple label selector (e.g., `{app=\"nginx\", env=\"prod\"}`) and does not support line filters, parsers, or aggregations. Defaults to the last hour if the time range is omitted.",
+  "input_schema": {
+   "properties": {
+    "datasourceUid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "endRfc3339": {
+     "description": "Optionally, the end time of the query in RFC3339 format",
+     "type": "string"
+    },
+    "logql": {
+     "description": "The LogQL matcher expression to execute. This parameter only accepts label matcher expressions and does not support full LogQL queries. Line filters, pattern operations, and metric aggregations are not supported by the stats API endpoint. Only simple label selectors can be used here.",
+     "type": "string"
+    },
+    "startRfc3339": {
+     "description": "Optionally, the start time of the query in RFC3339 format",
+     "type": "string"
+    }
+   },
+   "required": [
+    "datasourceUid",
+    "logql"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__query_loki_stats"
+ },
+ {
+  "description": "Query Prometheus using a PromQL expression. Supports both instant queries (at a single point in time) and range queries (over a time range). Time can be specified either in RFC3339 format or as relative time expressions like 'now', 'now-1h', 'now-30m', etc.",
+  "input_schema": {
+   "properties": {
+    "datasourceUid": {
+     "description": "The UID of the datasource to query",
+     "type": "string"
+    },
+    "endTime": {
+     "description": "The end time. Required if queryType is 'range', ignored if queryType is 'instant' Supported formats are RFC3339 or relative to now (e.g. 'now', 'now-1.5h', 'now-2h45m'). Valid time units are 'ns', 'us' (or '\u00b5s'), 'ms', 's', 'm', 'h', 'd'.",
+     "type": "string"
+    },
+    "expr": {
+     "description": "The PromQL expression to query",
+     "type": "string"
+    },
+    "queryType": {
+     "description": "The type of query to use. Either 'range' or 'instant'",
+     "type": "string"
+    },
+    "startTime": {
+     "description": "The start time. Supported formats are RFC3339 or relative to now (e.g. 'now', 'now-1.5h', 'now-2h45m'). Valid time units are 'ns', 'us' (or '\u00b5s'), 'ms', 's', 'm', 'h', 'd'.",
+     "type": "string"
+    },
+    "stepSeconds": {
+     "description": "The time series step size in seconds. Required if queryType is 'range', ignored if queryType is 'instant'",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "datasourceUid",
+    "expr",
+    "startTime"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__query_prometheus"
+ },
+ {
+  "description": "Search for Grafana dashboards by a query string. Returns a list of matching dashboards with details like title, UID, folder, tags, and URL.",
+  "input_schema": {
+   "properties": {
+    "query": {
+     "description": "The query to search for",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__search_dashboards"
+ },
+ {
+  "description": "Search for Grafana folders by a query string. Returns matching folders with details like title, UID, and URL.",
+  "input_schema": {
+   "properties": {
+    "query": {
+     "description": "The query to search for",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__search_folders"
+ },
+ {
+  "description": "Updates an existing Grafana alert rule identified by its UID. Requires all the same parameters as creating a new rule.",
+  "input_schema": {
+   "properties": {
+    "annotations": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "description": "Optional annotations",
+     "type": "object"
+    },
+    "condition": {
+     "description": "The query condition identifier (e.g. 'A', 'B')",
+     "type": "string"
+    },
+    "data": {
+     "description": "Array of query data objects"
+    },
+    "execErrState": {
+     "description": "State on execution error (NoData, Alerting, OK)",
+     "type": "string"
+    },
+    "folderUID": {
+     "description": "The folder UID where the rule will be created",
+     "type": "string"
+    },
+    "for": {
+     "description": "Duration before alert fires (e.g. '5m')",
+     "type": "string"
+    },
+    "labels": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "description": "Optional labels",
+     "type": "object"
+    },
+    "noDataState": {
+     "description": "State when no data (NoData, Alerting, OK)",
+     "type": "string"
+    },
+    "orgID": {
+     "description": "The organization ID",
+     "type": "integer"
+    },
+    "ruleGroup": {
+     "description": "The rule group name",
+     "type": "string"
+    },
+    "title": {
+     "description": "The title of the alert rule",
+     "type": "string"
+    },
+    "uid": {
+     "description": "The UID of the alert rule to update",
+     "type": "string"
+    }
+   },
+   "required": [
+    "uid",
+    "title",
+    "ruleGroup",
+    "folderUID",
+    "condition",
+    "data",
+    "noDataState",
+    "execErrState",
+    "for",
+    "orgID"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__grafana__update_alert_rule"
+ },
+ {
+  "description": "Updates all properties of an annotation that matches the specified ID. Sends a full update (PUT). For partial updates, use patch_annotation instead.",
+  "input_schema": {
+   "properties": {
+    "data": {
+     "description": "Optional JSON payload",
+     "type": "object"
+    },
+    "id": {
+     "description": "Annotation ID to update",
+     "type": "integer"
+    },
+    "tags": {
+     "description": "Tags to replace existing tags",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "text": {
+     "description": "Annotation text",
+     "type": "string"
+    },
+    "time": {
+     "description": "Start time epoch ms",
+     "type": "integer"
+    },
+    "timeEnd": {
+     "description": "End time epoch ms",
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__update_annotation"
+ },
+ {
+  "description": "Create or update a dashboard using either full JSON or efficient patch operations. For new dashboards\\, provide the 'dashboard' field. For updating existing dashboards\\, use 'uid' + 'operations' for better context window efficiency. Patch operations support complex JSONPaths like '$.panels[0].targets[0].expr'\\, '$.panels[1].title'\\, '$.panels[2].targets[0].datasource'\\, etc. Supports appending to arrays using '/- ' syntax: '$.panels/- ' appends to panels array\\, '$.panels[2]/- ' appends to nested array at index 2.",
+  "input_schema": {
+   "properties": {
+    "dashboard": {
+     "description": "The full dashboard JSON. Use for creating new dashboards or complete updates. Large dashboards consume significant context - consider using patches for small changes.",
+     "type": "object"
+    },
+    "folderUid": {
+     "description": "The UID of the dashboard's folder",
+     "type": "string"
+    },
+    "message": {
+     "description": "Set a commit message for the version history",
+     "type": "string"
+    },
+    "operations": {
+     "description": "Array of patch operations for targeted updates. More efficient than full dashboard JSON for small changes.",
+     "items": {
+      "properties": {
+       "op": {
+        "description": "Operation type: 'replace', 'add', 'remove'",
+        "type": "string"
+       },
+       "path": {
+        "description": "JSONPath to the property to modify. Supports: '$.title', '$.panels[0].title', '$.panels[0].targets[0].expr', '$.panels[1].targets[0].datasource', etc. For appending to arrays, use '/- ' syntax: '$.panels/- ' (append to panels array) or '$.panels[2]/- ' (append to nested array at index 2).",
+        "type": "string"
+       },
+       "value": {
+        "description": "New value for replace/add operations"
+       }
+      },
+      "required": [
+       "op",
+       "path"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "overwrite": {
+     "description": "Overwrite the dashboard if it exists. Otherwise create one",
+     "type": "boolean"
+    },
+    "uid": {
+     "description": "UID of existing dashboard to update. Required when using patch operations.",
+     "type": "string"
+    },
+    "userId": {
+     "description": "ID of the user making the change",
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__grafana__update_dashboard"
+ },
+ {
+  "description": "Search long-term memory for facts relevant to a question.\n\n    Returns the most relevant stored memories with similarity scores. Call this\n    before answering questions about the workspace, projects, or user\n    preferences, so answers use remembered context instead of guessing.\n    ",
+  "input_schema": {
+   "properties": {
+    "limit": {
+     "default": 5,
+     "title": "Limit",
+     "type": "integer"
+    },
+    "query": {
+     "title": "Query",
+     "type": "string"
+    },
+    "user_id": {
+     "default": "tyten-workspace",
+     "title": "User Id",
+     "type": "string"
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__mem0__recall"
+ },
+ {
+  "description": "Store a durable fact or preference in long-term memory.\n\n    Pass a single natural-language statement (e.g. \"helpdesk exposes /api/analyze\n    on port 8000\"). Mem0 extracts the salient fact(s) and stores them. Use for\n    stable project/workspace knowledge and user preferences worth recalling in\n    future sessions \u2014 not transient chatter.\n    ",
+  "input_schema": {
+   "properties": {
+    "text": {
+     "title": "Text",
+     "type": "string"
+    },
+    "user_id": {
+     "default": "tyten-workspace",
+     "title": "User Id",
+     "type": "string"
+    }
+   },
+   "required": [
+    "text"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__mem0__remember"
+ },
+ {
+  "description": "Snapshot of the desk: your unread count, all open requests, open questions, and recent reports. Call this when you start work or feel blocked.",
+  "input_schema": {
+   "properties": {
+    "channel": {
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__mom__mom_board"
+ },
+ {
+  "description": "Read messages from MOM and mark them read for you. By default shows only messages you haven't seen yet. Set open_only=true to see just unresolved questions/requests, or channel to scope it.",
+  "input_schema": {
+   "properties": {
+    "channel": {
+     "type": "string"
+    },
+    "limit": {
+     "description": "Default 30",
+     "type": "integer"
+    },
+    "open_only": {
+     "description": "Only open questions/requests. Default false",
+     "type": "boolean"
+    },
+    "unread_only": {
+     "description": "Default true",
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__mom__mom_inbox"
+ },
+ {
+  "description": "Close out an open question or request with a resolution note (e.g. the answer, or what you did about it).",
+  "input_schema": {
+   "properties": {
+    "id": {
+     "type": "integer"
+    },
+    "resolution": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "id",
+    "resolution"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__mom__mom_resolve"
+ },
+ {
+  "description": "Post to the MOM coordination desk (centered on the ffm-scheduler). Use kind='question' to ask how to do something, kind='request' to ask another agent to do something, kind='report' to tell others what you did or share status, or kind='reply' to respond in a thread (set reply_to). Questions and requests stay OPEN until resolved with mom_resolve.",
+  "input_schema": {
+   "properties": {
+    "body": {
+     "description": "Full details",
+     "type": "string"
+    },
+    "channel": {
+     "description": "Default 'ffm-scheduler'",
+     "type": "string"
+    },
+    "kind": {
+     "enum": [
+      "question",
+      "request",
+      "report",
+      "reply"
+     ],
+     "type": "string"
+    },
+    "reply_to": {
+     "description": "ID of the message this replies to",
+     "type": "integer"
+    },
+    "subject": {
+     "description": "One-line summary",
+     "type": "string"
+    }
+   },
+   "required": [
+    "kind",
+    "subject",
+    "body"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__mom__mom_send"
+ },
+ {
+  "description": "Perform click on a web page",
+  "input_schema": {
+   "properties": {
+    "button": {
+     "description": "Button to click, defaults to left",
+     "enum": [
+      "left",
+      "right",
+      "middle"
+     ],
+     "type": "string"
+    },
+    "doubleClick": {
+     "description": "Whether to perform a double click instead of a single click",
+     "type": "boolean"
+    },
+    "element": {
+     "description": "Human-readable element description used to obtain permission to interact with the element",
+     "type": "string"
+    },
+    "modifiers": {
+     "description": "Modifier keys to press",
+     "items": {
+      "enum": [
+       "Alt",
+       "Control",
+       "ControlOrMeta",
+       "Meta",
+       "Shift"
+      ],
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "target": {
+     "description": "Exact target element reference from the page snapshot, or a unique element selector",
+     "type": "string"
+    }
+   },
+   "required": [
+    "target"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_click"
+ },
+ {
+  "description": "Close the page",
+  "input_schema": {
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_close"
+ },
+ {
+  "description": "Returns all console messages",
+  "input_schema": {
+   "properties": {
+    "all": {
+     "description": "Return all console messages since the beginning of the session, not just since the last navigation. Defaults to false.",
+     "type": "boolean"
+    },
+    "filename": {
+     "description": "Filename to save the console messages to. If not provided, messages are returned as text.",
+     "type": "string"
+    },
+    "level": {
+     "default": "info",
+     "description": "Level of the console messages to return. Each level includes the messages of more severe levels. Defaults to \"info\".",
+     "enum": [
+      "error",
+      "warning",
+      "info",
+      "debug"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "level"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_console_messages"
+ },
+ {
+  "description": "Perform drag and drop between two elements",
+  "input_schema": {
+   "properties": {
+    "endElement": {
+     "description": "Human-readable target element description used to obtain the permission to interact with the element",
+     "type": "string"
+    },
+    "endTarget": {
+     "description": "Exact target element reference from the page snapshot, or a unique element selector",
+     "type": "string"
+    },
+    "startElement": {
+     "description": "Human-readable source element description used to obtain the permission to interact with the element",
+     "type": "string"
+    },
+    "startTarget": {
+     "description": "Exact target element reference from the page snapshot, or a unique element selector",
+     "type": "string"
+    }
+   },
+   "required": [
+    "startTarget",
+    "endTarget"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_drag"
+ },
+ {
+  "description": "Drop files or MIME-typed data onto an element, as if dragged from outside the page. At least one of \"paths\" or \"data\" must be provided.",
+  "input_schema": {
+   "properties": {
+    "data": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "description": "Data to drop, as a map of MIME type to string value (e.g. {\"text/plain\": \"hello\", \"text/uri-list\": \"https://example.com\"}).",
+     "propertyNames": {
+      "type": "string"
+     },
+     "type": "object"
+    },
+    "element": {
+     "description": "Human-readable element description used to obtain permission to interact with the element",
+     "type": "string"
+    },
+    "paths": {
+     "description": "Absolute paths to files to drop onto the element.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "target": {
+     "description": "Exact target element reference from the page snapshot, or a unique element selector",
+     "type": "string"
+    }
+   },
+   "required": [
+    "target"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_drop"
+ },
+ {
+  "description": "Evaluate JavaScript expression on page or element",
+  "input_schema": {
+   "properties": {
+    "element": {
+     "description": "Human-readable element description used to obtain permission to interact with the element",
+     "type": "string"
+    },
+    "filename": {
+     "description": "Filename to save the result to. If not provided, result is returned as text.",
+     "type": "string"
+    },
+    "function": {
+     "description": "() => { /* code */ } or (element) => { /* code */ } when element is provided",
+     "type": "string"
+    },
+    "target": {
+     "description": "Exact target element reference from the page snapshot, or a unique element selector",
+     "type": "string"
+    }
+   },
+   "required": [
+    "function"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_evaluate"
+ },
+ {
+  "description": "Upload one or multiple files",
+  "input_schema": {
+   "properties": {
+    "paths": {
+     "description": "The absolute paths to the files to upload. Can be single file or multiple files. If omitted, file chooser is cancelled.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_file_upload"
+ },
+ {
+  "description": "Fill multiple form fields",
+  "input_schema": {
+   "properties": {
+    "fields": {
+     "description": "Fields to fill in",
+     "items": {
+      "additionalProperties": false,
+      "properties": {
+       "element": {
+        "description": "Human-readable element description used to obtain permission to interact with the element",
+        "type": "string"
+       },
+       "name": {
+        "description": "Human-readable field name",
+        "type": "string"
+       },
+       "target": {
+        "description": "Exact target element reference from the page snapshot, or a unique element selector",
+        "type": "string"
+       },
+       "type": {
+        "description": "Type of the field",
+        "enum": [
+         "textbox",
+         "checkbox",
+         "radio",
+         "combobox",
+         "slider"
+        ],
+        "type": "string"
+       },
+       "value": {
+        "description": "Value to fill in the field. If the field is a checkbox, the value should be `true` or `false`. If the field is a combobox, the value should be the text of the option.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "target",
+       "name",
+       "type",
+       "value"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "fields"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_fill_form"
+ },
+ {
+  "description": "Search the accessibility snapshot of the current page for text or a regular expression. Returns matching snapshot nodes with a few lines of surrounding context (like search snippets), each shown under its path from the root of the tree, which is cheaper than capturing the whole snapshot when you only need to locate an element and its ref.",
+  "input_schema": {
+   "properties": {
+    "regex": {
+     "description": "Regular expression to search for in the page snapshot. Matching is case-sensitive by default; wrap the pattern in slashes to add flags, e.g. \"/error/i\" for case-insensitive. Provide either text or regex, not both.",
+     "type": "string"
+    },
+    "text": {
+     "description": "Plain text to search for in the page snapshot (case-insensitive substring match). Provide either text or regex, not both.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_find"
+ },
+ {
+  "description": "Handle a dialog",
+  "input_schema": {
+   "properties": {
+    "accept": {
+     "description": "Whether to accept the dialog.",
+     "type": "boolean"
+    },
+    "promptText": {
+     "description": "The text of the prompt in case of a prompt dialog.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "accept"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_handle_dialog"
+ },
+ {
+  "description": "Hover over element on page",
+  "input_schema": {
+   "properties": {
+    "element": {
+     "description": "Human-readable element description used to obtain permission to interact with the element",
+     "type": "string"
+    },
+    "target": {
+     "description": "Exact target element reference from the page snapshot, or a unique element selector",
+     "type": "string"
+    }
+   },
+   "required": [
+    "target"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_hover"
+ },
+ {
+  "description": "Navigate to a URL",
+  "input_schema": {
+   "properties": {
+    "url": {
+     "description": "The URL to navigate to",
+     "type": "string"
+    }
+   },
+   "required": [
+    "url"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_navigate"
+ },
+ {
+  "description": "Go back to the previous page in the history",
+  "input_schema": {
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_navigate_back"
+ },
+ {
+  "description": "Returns full details (headers and body) of a single network request, or a single part if `part` is set. Use the number from browser_network_requests.",
+  "input_schema": {
+   "properties": {
+    "filename": {
+     "description": "Filename to save the result to. If not provided, output is returned as text.",
+     "type": "string"
+    },
+    "index": {
+     "description": "1-based index of the request, as printed by browser_network_requests.",
+     "maximum": 9007199254740991,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "part": {
+     "description": "Return only this part of the request. Omit to return full details.",
+     "enum": [
+      "request-headers",
+      "request-body",
+      "response-headers",
+      "response-body"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "index"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_network_request"
+ },
+ {
+  "description": "Returns a numbered list of network requests since loading the page. Use browser_network_request with the number to get full details.",
+  "input_schema": {
+   "properties": {
+    "filename": {
+     "description": "Filename to save the network requests to. If not provided, requests are returned as text.",
+     "type": "string"
+    },
+    "filter": {
+     "description": "Only return requests whose URL matches this regexp (e.g. \"/api/.*user\").",
+     "type": "string"
+    },
+    "static": {
+     "default": false,
+     "description": "Whether to include successful static resources like images, fonts, scripts, etc. Defaults to false.",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "static"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_network_requests"
+ },
+ {
+  "description": "Press a key on the keyboard",
+  "input_schema": {
+   "properties": {
+    "key": {
+     "description": "Name of the key to press or a character to generate, such as `ArrowLeft` or `a`",
+     "type": "string"
+    }
+   },
+   "required": [
+    "key"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_press_key"
+ },
+ {
+  "description": "Resize the browser window",
+  "input_schema": {
+   "properties": {
+    "height": {
+     "description": "Height of the browser window",
+     "type": "number"
+    },
+    "width": {
+     "description": "Width of the browser window",
+     "type": "number"
+    }
+   },
+   "required": [
+    "width",
+    "height"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_resize"
+ },
+ {
+  "description": "Run a Playwright code snippet. Unsafe: executes arbitrary JavaScript in the Playwright server process and is RCE-equivalent.",
+  "input_schema": {
+   "properties": {
+    "code": {
+     "description": "A JavaScript function containing Playwright code to execute. It will be invoked with a single argument, page, which you can use for any page interaction. For example: `async (page) => { await page.getByRole('button', { name: 'Submit' }).click(); return await page.title(); }`",
+     "type": "string"
+    },
+    "filename": {
+     "description": "Load code from the specified file. If both code and filename are provided, code will be ignored.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_run_code_unsafe"
+ },
+ {
+  "description": "Select an option in a dropdown",
+  "input_schema": {
+   "properties": {
+    "element": {
+     "description": "Human-readable element description used to obtain permission to interact with the element",
+     "type": "string"
+    },
+    "target": {
+     "description": "Exact target element reference from the page snapshot, or a unique element selector",
+     "type": "string"
+    },
+    "values": {
+     "description": "Array of values to select in the dropdown. This can be a single value or multiple values.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "target",
+    "values"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_select_option"
+ },
+ {
+  "description": "Capture accessibility snapshot of the current page, this is better than screenshot",
+  "input_schema": {
+   "properties": {
+    "boxes": {
+     "description": "Include each element's bounding box as [box=x,y,width,height] in the snapshot. Coordinates are viewport-relative, in CSS pixels (Element.getBoundingClientRect)",
+     "type": "boolean"
+    },
+    "depth": {
+     "description": "Limit the depth of the snapshot tree",
+     "type": "number"
+    },
+    "filename": {
+     "description": "Save snapshot to markdown file instead of returning it in the response.",
+     "type": "string"
+    },
+    "target": {
+     "description": "Exact target element reference from the page snapshot, or a unique element selector",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_snapshot"
+ },
+ {
+  "description": "List, create, close, or select a browser tab.",
+  "input_schema": {
+   "properties": {
+    "action": {
+     "description": "Operation to perform",
+     "enum": [
+      "list",
+      "new",
+      "close",
+      "select"
+     ],
+     "type": "string"
+    },
+    "index": {
+     "description": "Tab index, used for close/select. If omitted for close, current tab is closed.",
+     "type": "number"
+    },
+    "url": {
+     "description": "URL to navigate to in the new tab, used for new.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "action"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_tabs"
+ },
+ {
+  "description": "Take a screenshot of the current page. You can't perform actions based on the screenshot, use browser_snapshot for actions.",
+  "input_schema": {
+   "properties": {
+    "element": {
+     "description": "Human-readable element description used to obtain permission to interact with the element",
+     "type": "string"
+    },
+    "filename": {
+     "description": "File name to save the screenshot to. Defaults to `page-{timestamp}.{png|jpeg}` if not specified. Prefer relative file names to stay within the output directory.",
+     "type": "string"
+    },
+    "fullPage": {
+     "description": "When true, takes a screenshot of the full scrollable page, instead of the currently visible viewport. Cannot be used with element screenshots.",
+     "type": "boolean"
+    },
+    "scale": {
+     "default": "css",
+     "description": "Image resolution scale. \"css\" produces a screenshot sized in CSS pixels (smaller, consistent across devices). \"device\" produces a high-resolution screenshot using device pixels (larger, accounts for the device pixel ratio). Default is css.",
+     "enum": [
+      "css",
+      "device"
+     ],
+     "type": "string"
+    },
+    "target": {
+     "description": "Exact target element reference from the page snapshot, or a unique element selector",
+     "type": "string"
+    },
+    "type": {
+     "default": "png",
+     "description": "Image format for the screenshot. Default is png.",
+     "enum": [
+      "png",
+      "jpeg"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "scale"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_take_screenshot"
+ },
+ {
+  "description": "Type text into editable element",
+  "input_schema": {
+   "properties": {
+    "element": {
+     "description": "Human-readable element description used to obtain permission to interact with the element",
+     "type": "string"
+    },
+    "slowly": {
+     "description": "Whether to type one character at a time. Useful for triggering key handlers in the page. By default entire text is filled in at once.",
+     "type": "boolean"
+    },
+    "submit": {
+     "description": "Whether to submit entered text (press Enter after)",
+     "type": "boolean"
+    },
+    "target": {
+     "description": "Exact target element reference from the page snapshot, or a unique element selector",
+     "type": "string"
+    },
+    "text": {
+     "description": "Text to type into the element",
+     "type": "string"
+    }
+   },
+   "required": [
+    "target",
+    "text"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_type"
+ },
+ {
+  "description": "Wait for text to appear or disappear or a specified time to pass",
+  "input_schema": {
+   "properties": {
+    "text": {
+     "description": "The text to wait for",
+     "type": "string"
+    },
+    "textGone": {
+     "description": "The text to wait for to disappear",
+     "type": "string"
+    },
+    "time": {
+     "description": "The time to wait in seconds",
+     "type": "number"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__playwright__browser_wait_for"
+ },
+ {
+  "description": "Create a card. Cookie mode: `id_list` must be a list ARI from trello_get_board_lists.",
+  "input_schema": {
+   "properties": {
+    "desc": {
+     "default": "",
+     "title": "Desc",
+     "type": "string"
+    },
+    "due": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Due"
+    },
+    "due_complete": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Due Complete"
+    },
+    "id_labels": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Id Labels"
+    },
+    "id_list": {
+     "title": "Id List",
+     "type": "string"
+    },
+    "id_members": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Id Members"
+    },
+    "name": {
+     "title": "Name",
+     "type": "string"
+    },
+    "pos": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "default": "bottom",
+     "title": "Pos"
+    },
+    "start": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Start"
+    }
+   },
+   "required": [
+    "id_list",
+    "name"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__trello__trello_create_card"
+ },
+ {
+  "description": "Create a native Trello checklist on a card (renders in the card sidebar with a progress bar).\n\n    Cookie mode: `card_id` may be a card ARI, 24-char hex id, or shortlink \u2014 full ARIs are\n    accepted and reduced to the short id. `items` is an optional list of dicts like\n    `[{\"name\": \"step 1\", \"checked\": false}, {\"name\": \"step 2\", \"checked\": true}]`; each item\n    is POSTed sequentially and bottom-appended unless `pos` is passed.\n    ",
+  "input_schema": {
+   "properties": {
+    "card_id": {
+     "title": "Card Id",
+     "type": "string"
+    },
+    "items": {
+     "anyOf": [
+      {
+       "items": {
+        "additionalProperties": true,
+        "type": "object"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Items"
+    },
+    "name": {
+     "title": "Name",
+     "type": "string"
+    }
+   },
+   "required": [
+    "card_id",
+    "name"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__trello__trello_create_checklist"
+ },
+ {
+  "description": "Delete a checklist from its card by checklist id (24-char hex).",
+  "input_schema": {
+   "properties": {
+    "checklist_id": {
+     "title": "Checklist Id",
+     "type": "string"
+    }
+   },
+   "required": [
+    "checklist_id"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__trello__trello_delete_checklist"
+ },
+ {
+  "description": "List columns. Cookie mode: `board_id` is board ARI or shortLink.",
+  "input_schema": {
+   "properties": {
+    "board_id": {
+     "title": "Board Id",
+     "type": "string"
+    }
+   },
+   "required": [
+    "board_id"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__trello__trello_get_board_lists"
+ },
+ {
+  "description": "Fetch one card. Cookie mode: `card_id` must be a full ARI (`ari:cloud:trello::card/...`).",
+  "input_schema": {
+   "properties": {
+    "card_id": {
+     "title": "Card Id",
+     "type": "string"
+    },
+    "fields": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Fields"
+    }
+   },
+   "required": [
+    "card_id"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__trello__trello_get_card"
+ },
+ {
+  "description": "List cards on a board. Cookie mode: `board_id` is board ARI or shortLink (e.g. `2oWd3nQf` from /b/SHORT/name).",
+  "input_schema": {
+   "properties": {
+    "board_id": {
+     "title": "Board Id",
+     "type": "string"
+    },
+    "cards_filter": {
+     "default": "visible",
+     "title": "Cards Filter",
+     "type": "string"
+    }
+   },
+   "required": [
+    "board_id"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__trello__trello_list_board_cards"
+ },
+ {
+  "description": "List cards in a list. Cookie mode: `list_id` must be a list ARI.",
+  "input_schema": {
+   "properties": {
+    "list_id": {
+     "title": "List Id",
+     "type": "string"
+    }
+   },
+   "required": [
+    "list_id"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__trello__trello_list_list_cards"
+ },
+ {
+  "description": "Update a card. Cookie mode: `card_id` must be a card ARI. Supports name, desc, closed (GraphQL) and id_list, pos, due, due_complete (cookie REST).",
+  "input_schema": {
+   "properties": {
+    "card_id": {
+     "title": "Card Id",
+     "type": "string"
+    },
+    "closed": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Closed"
+    },
+    "desc": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Desc"
+    },
+    "due": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Due"
+    },
+    "due_complete": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Due Complete"
+    },
+    "id_board": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Id Board"
+    },
+    "id_list": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Id List"
+    },
+    "name": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Name"
+    },
+    "pos": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Pos"
+    },
+    "start": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Start"
+    },
+    "subscribed": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Subscribed"
+    }
+   },
+   "required": [
+    "card_id"
+   ],
+   "type": "object"
+  },
+  "name": "mcp__trello__trello_update_card"
+ },
+ {
+  "description": "Verify credentials: REST /members/me if API key+token; otherwise GraphQL `me` (cookie).",
+  "input_schema": {
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__trello__trello_verify_auth"
+ },
+ {
+  "description": "With browser cookies: calls Atlassian GraphQL `me` on trello.com (not api.trello.com REST). Proves the session works for the web gateway.",
+  "input_schema": {
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "name": "mcp__trello__trello_verify_session_cookie"
+ }
+]

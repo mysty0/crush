@@ -37,6 +37,12 @@ type ModelContextInfo struct {
 	ModelContext   int64
 	Cost           float64
 	EstimatedUsage bool
+	// PromptTokens is the last turn's full prompt: uncached input plus
+	// cache reads plus cache writes. CacheReadTokens and
+	// CacheCreationTokens are the two cached shares of it.
+	PromptTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
 }
 
 // ModelInfo renders model information including name, provider, reasoning
@@ -77,6 +83,9 @@ func ModelInfo(t *styles.Styles, modelName, providerName, reasoningInfo string, 
 	if context != nil {
 		formattedInfo := formatTokensAndCost(t, context.ContextUsed, context.ModelContext, context.Cost, context.EstimatedUsage)
 		parts = append(parts, lipgloss.NewStyle().PaddingLeft(2).Render(formattedInfo))
+		if cacheInfo := formatCacheUsage(t, context.CacheReadTokens, context.CacheCreationTokens, context.PromptTokens); cacheInfo != "" {
+			parts = append(parts, lipgloss.NewStyle().PaddingLeft(2).Render(cacheInfo))
+		}
 	}
 
 	if providerName == hyper.DisplayName && hyperCredits != nil {
@@ -91,25 +100,53 @@ func ModelInfo(t *styles.Styles, modelName, providerName, reasoningInfo string, 
 	)
 }
 
+// formatTokenCount abbreviates a token count with K/M units.
+func formatTokenCount(tokens int64) string {
+	var formatted string
+	switch {
+	case tokens >= 1_000_000:
+		formatted = fmt.Sprintf("%.1fM", float64(tokens)/1_000_000)
+	case tokens >= 1_000:
+		formatted = fmt.Sprintf("%.1fK", float64(tokens)/1_000)
+	default:
+		return fmt.Sprintf("%d", tokens)
+	}
+
+	formatted = strings.Replace(formatted, ".0K", "K", 1)
+	formatted = strings.Replace(formatted, ".0M", "M", 1)
+	return formatted
+}
+
+// formatCacheUsage renders the last turn's prompt cache split: what share of
+// the prompt the cache served, and how much had to be written to it. A turn
+// that reads nothing and writes everything is the expensive case -- cache
+// writes bill above the base input rate while reads bill far below it -- so
+// it is worth surfacing rather than hiding inside the total.
+func formatCacheUsage(t *styles.Styles, read, creation, prompt int64) string {
+	if read == 0 && creation == 0 {
+		return ""
+	}
+
+	hitRate := "—"
+	if prompt > 0 {
+		hitRate = fmt.Sprintf("%d%%", int(float64(read)/float64(prompt)*100))
+	}
+
+	return fmt.Sprintf(
+		"%s %s",
+		t.ModelInfo.TokenPercentage.Render(hitRate),
+		t.ModelInfo.TokenCount.Render(fmt.Sprintf(
+			"cached (%s read • %s write)",
+			formatTokenCount(read),
+			formatTokenCount(creation),
+		)),
+	)
+}
+
 // formatTokensAndCost formats token usage and cost with appropriate units
 // (K/M) and percentage of context window.
 func formatTokensAndCost(t *styles.Styles, tokens, contextWindow int64, cost float64, estimated bool) string {
-	var formattedTokens string
-	switch {
-	case tokens >= 1_000_000:
-		formattedTokens = fmt.Sprintf("%.1fM", float64(tokens)/1_000_000)
-	case tokens >= 1_000:
-		formattedTokens = fmt.Sprintf("%.1fK", float64(tokens)/1_000)
-	default:
-		formattedTokens = fmt.Sprintf("%d", tokens)
-	}
-
-	if strings.HasSuffix(formattedTokens, ".0K") {
-		formattedTokens = strings.Replace(formattedTokens, ".0K", "K", 1)
-	}
-	if strings.HasSuffix(formattedTokens, ".0M") {
-		formattedTokens = strings.Replace(formattedTokens, ".0M", "M", 1)
-	}
+	formattedTokens := formatTokenCount(tokens)
 
 	var percentage float64
 	if contextWindow > 0 {

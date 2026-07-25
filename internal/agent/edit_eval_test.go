@@ -16,8 +16,15 @@ package agent
 //   CRUSH_EDIT_EVAL=1        enable the eval (required)
 //   CRUSH_EDIT_EVAL_LIMIT=N  only run the first N fixtures (0 = all 80)
 //   CRUSH_EDIT_EVAL_MODES=…  comma list of modes to run (default "string,hashline")
+//   CRUSH_EDIT_EVAL_MCP_PAD= pad the tool list with the real captured MCP
+//                            schemas: none|all|unused|<server,…>. See
+//                            eval_toolpad_test.go — this is how the
+//                            tool-surface A/B is run.
+//   CRUSH_EDIT_EVAL_RESULTS= append per-fixture outcomes as JSONL to this path,
+//                            so two arms can be paired for a significance test
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -28,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -143,9 +151,14 @@ func readFile(t *testing.T, path string) string {
 	return string(b)
 }
 
-// evalTools builds the tool set for a given edit mode, mirroring how the
-// coordinator wires them.
-func evalTools(env fakeEnv, mode string, store *hashline.Store) []fantasy.AgentTool {
+// evalTools returns the task tools plus any inert MCP padding, so an A/B run
+// can measure whether carrying an unused tool surface costs task accuracy.
+// Padding goes last, mirroring production where MCP tools sort after natives.
+func evalTools(env fakeEnv, mode string, store *hashline.Store, pad []fantasy.AgentTool) []fantasy.AgentTool {
+	return append(evalTaskTools(env, mode, store), pad...)
+}
+
+func evalTaskTools(env fakeEnv, mode string, store *hashline.Store) []fantasy.AgentTool {
 	base := []fantasy.AgentTool{
 		tools.NewLsTool(env.permissions, env.workingDir, config.ToolLs{}),
 		tools.NewGrepTool(env.workingDir, config.ToolGrep{}),
@@ -175,9 +188,10 @@ type evalResult struct {
 	runErr     error
 	editInputs []string // raw edit tool-call inputs (for failure diagnostics)
 	errSamples []string // error tool-result contents
+	misfires   int64    // calls the model made into the inert MCP padding
 }
 
-func runEditTask(t *testing.T, model fantasy.LanguageModel, mode string, fx evalFixture) evalResult {
+func runEditTask(t *testing.T, model fantasy.LanguageModel, mode string, fx evalFixture, pad []fantasy.AgentTool, misfires *atomic.Int64) evalResult {
 	env := testEnv(t)
 
 	// Seed the working directory with the fixture input under its real name.
@@ -187,7 +201,8 @@ func runEditTask(t *testing.T, model fantasy.LanguageModel, mode string, fx eval
 	require.NoError(t, err)
 
 	store := hashline.NewStore()
-	agent := testSessionAgent(env, model, model, sysPrompt, evalTools(env, mode, store)...)
+	before := misfires.Load()
+	agent := testSessionAgent(env, model, model, sysPrompt, evalTools(env, mode, store, pad)...)
 
 	session, err := env.sessions.Create(t.Context(), "eval")
 	require.NoError(t, err)
@@ -218,23 +233,32 @@ func runEditTask(t *testing.T, model fantasy.LanguageModel, mode string, fx eval
 	got := readFile(t, filepath.Join(env.workingDir, fx.fileName))
 	out.success = normalizeLF(got) == normalizeLF(fx.expected)
 
-	// Count edit tool calls and edit errors from the transcript.
+	// Count edit tool calls and edit errors from the transcript. The inert MCP
+	// padding also returns error results, so classify each error by the name of
+	// the call it answers — otherwise a misfire would inflate the edit-error
+	// rate and look like an edit-tool regression.
 	msgs, _ := env.messages.List(t.Context(), session.ID)
 	editNames := map[string]bool{tools.EditToolName: true, tools.MultiEditToolName: true}
+	callName := map[string]string{}
 	for _, m := range msgs {
 		for _, tc := range m.ToolCalls() {
+			callName[tc.ID] = tc.Name
 			if editNames[tc.Name] {
 				out.editCalls++
 				out.editInputs = append(out.editInputs, tc.Input)
 			}
 		}
+	}
+	for _, m := range msgs {
 		for _, tr := range m.ToolResults() {
-			if tr.IsError {
-				out.editErrors++
-				out.errSamples = append(out.errSamples, tr.Content)
+			if !tr.IsError || strings.HasPrefix(callName[tr.ToolCallID], "mcp__") {
+				continue
 			}
+			out.editErrors++
+			out.errSamples = append(out.errSamples, tr.Content)
 		}
 	}
+	out.misfires = misfires.Load() - before
 
 	if dir := os.Getenv("CRUSH_EDIT_EVAL_DUMP"); dir != "" {
 		dumpTranscript(dir, mode, fx, msgs, got, out)
@@ -317,7 +341,24 @@ type modeAgg struct {
 	editCalls, editErrors int
 	tokens                int64
 	runErrors             int
+	misfires              int64
 	failed                []string
+}
+
+// evalRecord is one fixture's machine-readable outcome. Runs are compared
+// across tool-surface arms by pairing these on (mode, fixture), which is what
+// makes a paired significance test possible rather than eyeballing two pass
+// rates.
+type evalRecord struct {
+	Mode     string `json:"mode"`
+	Fixture  string `json:"fixture"`
+	Pad      string `json:"pad"`
+	Pass     bool   `json:"pass"`
+	Edits    int    `json:"edits"`
+	EditErrs int    `json:"edit_errors"`
+	Misfires int64  `json:"misfires"`
+	Tokens   int64  `json:"tokens"`
+	RunErr   string `json:"run_error,omitempty"`
 }
 
 func TestEditEval(t *testing.T) {
@@ -368,6 +409,15 @@ func TestEditEval(t *testing.T) {
 		aggs[mode] = &modeAgg{}
 	}
 
+	var misfires atomic.Int64
+	pad, padBytes := mcpPadTools(t, &misfires)
+	padLabel := cmp.Or(os.Getenv("CRUSH_EDIT_EVAL_MCP_PAD"), "none")
+	t.Logf("tool surface: %d padding schemas (%d B) from CRUSH_EDIT_EVAL_MCP_PAD=%q",
+		len(pad), padBytes, padLabel)
+
+	// Per-fixture records, for pairing arms in analysis.
+	var records []evalRecord
+
 	// Run tasks concurrently with a bounded worker pool. Each task is fully
 	// isolated (own temp dir, DB, session), so the only shared state is the
 	// aggregators, guarded by mu. Concurrency is capped to stay within the
@@ -384,7 +434,7 @@ func TestEditEval(t *testing.T) {
 					sem <- struct{}{}
 					defer func() { <-sem }()
 
-					r := runEditTask(t, model, mode, fx)
+					r := runEditTask(t, model, mode, fx, pad, &misfires)
 
 					mu.Lock()
 					defer mu.Unlock()
@@ -393,6 +443,19 @@ func TestEditEval(t *testing.T) {
 					agg.editCalls += r.editCalls
 					agg.editErrors += r.editErrors
 					agg.tokens += r.tokens
+					agg.misfires += r.misfires
+					rec := evalRecord{
+						Mode: mode, Fixture: fx.name, Pad: padLabel, Pass: r.success,
+						Edits: r.editCalls, EditErrs: r.editErrors,
+						Misfires: r.misfires, Tokens: r.tokens,
+					}
+					if r.runErr != nil {
+						rec.RunErr = r.runErr.Error()
+					}
+					records = append(records, rec)
+					if r.misfires > 0 {
+						t.Logf("[%s] %s: %d call(s) into the inert MCP surface", mode, fx.name, r.misfires)
+					}
 					if r.runErr != nil {
 						agg.runErrors++
 						t.Logf("[%s] %s: run error: %v", mode, fx.name, r.runErr)
@@ -417,23 +480,48 @@ func TestEditEval(t *testing.T) {
 	// The "runs" subtest returns only after all its parallel children finish,
 	// so the aggregates are complete here.
 	printScoreboard(t, evalModelID, len(fixtures), modes, aggs)
+	writeEvalRecords(t, records)
+}
+
+// writeEvalRecords appends per-fixture outcomes as JSONL when
+// CRUSH_EDIT_EVAL_RESULTS is set, so two arms can be paired for analysis.
+func writeEvalRecords(t *testing.T, records []evalRecord) {
+	path := os.Getenv("CRUSH_EDIT_EVAL_RESULTS")
+	if path == "" || len(records) == 0 {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Logf("could not write eval records: %v", err)
+		return
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, r := range records {
+		if err := enc.Encode(r); err != nil {
+			t.Logf("could not encode eval record: %v", err)
+			return
+		}
+	}
+	t.Logf("wrote %d eval records to %s", len(records), path)
 }
 
 func printScoreboard(t *testing.T, modelID string, n int, modes []string, aggs map[string]*modeAgg) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n=== Edit-tool eval — %s — %d fixtures ===\n", modelID, n)
-	fmt.Fprintf(&b, "%-10s  %8s  %10s  %11s  %9s  %8s\n", "mode", "pass", "pass%", "avg edits", "edit err", "avg tok")
+	fmt.Fprintf(&b, "%-10s  %8s  %10s  %11s  %9s  %8s  %9s\n", "mode", "pass", "pass%", "avg edits", "edit err", "avg tok", "misfires")
 	for _, mode := range modes {
 		a := aggs[mode]
 		if a.total == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "%-10s  %4d/%-3d  %9.1f%%  %11.2f  %9.2f  %8d\n",
+		fmt.Fprintf(&b, "%-10s  %4d/%-3d  %9.1f%%  %11.2f  %9.2f  %8d  %9d\n",
 			mode, a.passed, a.total,
 			100*float64(a.passed)/float64(a.total),
 			float64(a.editCalls)/float64(a.total),
 			float64(a.editErrors)/float64(a.total),
 			a.tokens/int64(a.total),
+			a.misfires,
 		)
 	}
 	for _, mode := range modes {

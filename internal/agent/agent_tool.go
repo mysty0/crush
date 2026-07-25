@@ -5,7 +5,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"charm.land/fantasy"
@@ -320,7 +320,7 @@ func (c *coordinator) availableModelIDs() []string {
 			ids = append(ids, m.ID)
 		}
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 	return ids
 }
 
@@ -328,10 +328,24 @@ func (c *coordinator) availableModelIDs() []string {
 // by provider, to append to the tool description so the LLM knows which IDs
 // it may pass in the "model" parameter.
 func (c *coordinator) availableModelsDescription() string {
-	providers := c.cfg.Config().EnabledProviders()
+	return renderAvailableModels(c.cfg.Config().EnabledProviders())
+}
+
+// renderAvailableModels renders providers and their models in a stable order.
+// The order matters beyond tidiness: this text is embedded in the
+// agent/agentic_fetch/Workflow tool schemas, which sit inside the cached
+// prompt prefix. EnabledProviders iterates a map, so without sorting the
+// groups come out shuffled on every rebuild, and a single reordered group
+// invalidates the Anthropic prompt cache for the whole request -- turning
+// what should be a cheap cache read into a full cache write.
+func renderAvailableModels(providers []config.ProviderConfig) string {
 	if len(providers) == 0 {
 		return ""
 	}
+
+	providers = slices.SortedFunc(slices.Values(providers), func(a, b config.ProviderConfig) int {
+		return strings.Compare(a.ID, b.ID)
+	})
 
 	var b strings.Builder
 	b.WriteString("\n\nAvailable models for the `model` parameter, grouped by provider:\n")

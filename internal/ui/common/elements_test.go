@@ -33,3 +33,29 @@ func TestFormatTokensAndCostOmitsEstimatedPrefix(t *testing.T) {
 	require.Contains(t, actual, "12%")
 	require.NotContains(t, actual, "~12%")
 }
+
+func TestFormatCacheUsageShowsHitRateAndSplit(t *testing.T) {
+	t.Parallel()
+
+	sty := styles.CharmtonePantera()
+
+	// A healthy turn: nearly the whole prompt came back from the cache.
+	actual := ansi.Strip(formatCacheUsage(&sty, 33_876, 0, 33_878))
+	require.Contains(t, actual, "99%")
+	require.Contains(t, actual, "33.9K read")
+	require.Contains(t, actual, "0 write")
+
+	// The expensive turn this readout exists to expose: nothing read, the
+	// entire prefix rewritten.
+	actual = ansi.Strip(formatCacheUsage(&sty, 0, 51_461, 51_463))
+	require.Contains(t, actual, "0%")
+	require.Contains(t, actual, "51.5K write")
+}
+
+func TestFormatCacheUsageEmptyWithoutCacheActivity(t *testing.T) {
+	t.Parallel()
+
+	sty := styles.CharmtonePantera()
+
+	require.Empty(t, formatCacheUsage(&sty, 0, 0, 1_200))
+}

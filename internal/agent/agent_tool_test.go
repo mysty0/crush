@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -161,4 +162,45 @@ func TestResolveFetchModelSelection(t *testing.T) {
 		_, err := coord.resolveFetchModelSelection("")
 		require.Error(t, err)
 	})
+}
+
+func TestRenderAvailableModelsIsOrderStable(t *testing.T) {
+	t.Parallel()
+
+	// The caller feeds this from EnabledProviders(), which iterates a map
+	// and hands back a different order on every call. The rendered text
+	// goes into tool schemas inside the cached prompt prefix, so any
+	// reordering silently invalidates the whole prompt cache.
+	providers := []config.ProviderConfig{
+		{ID: "openai", Name: "OpenAI", Models: []catwalk.Model{{ID: "gpt-5", Name: "GPT-5"}}},
+		{ID: "anthropic", Name: "Anthropic", Models: []catwalk.Model{{ID: "claude-sonnet-5", Name: "Claude Sonnet 5"}}},
+		{ID: "bedrock", Name: "AWS Bedrock", Models: []catwalk.Model{{ID: "us.anthropic.claude-sonnet-5", Name: "Claude Sonnet 5"}}},
+	}
+
+	want := renderAvailableModels(providers)
+	require.Contains(t, want, "Anthropic:")
+	require.Less(t, strings.Index(want, "Anthropic:"), strings.Index(want, "AWS Bedrock:"))
+	require.Less(t, strings.Index(want, "AWS Bedrock:"), strings.Index(want, "OpenAI:"))
+
+	for _, order := range [][]int{{2, 0, 1}, {1, 2, 0}, {2, 1, 0}} {
+		shuffled := make([]config.ProviderConfig, 0, len(providers))
+		for _, i := range order {
+			shuffled = append(shuffled, providers[i])
+		}
+		assert.Equal(t, want, renderAvailableModels(shuffled))
+	}
+}
+
+func TestRenderAvailableModelsDoesNotReorderCaller(t *testing.T) {
+	t.Parallel()
+
+	providers := []config.ProviderConfig{
+		{ID: "openai", Models: []catwalk.Model{{ID: "gpt-5"}}},
+		{ID: "anthropic", Models: []catwalk.Model{{ID: "claude-sonnet-5"}}},
+	}
+
+	renderAvailableModels(providers)
+
+	assert.Equal(t, "openai", providers[0].ID)
+	assert.Equal(t, "anthropic", providers[1].ID)
 }
