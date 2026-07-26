@@ -20,6 +20,10 @@ package agent
 //                            schemas: none|all|unused|<server,…>. See
 //                            eval_toolpad_test.go — this is how the
 //                            tool-surface A/B is run.
+//   CRUSH_EDIT_EVAL_MAX_TOKENS= output cap (default 8000). Raise it on models
+//                            where thinking is on by default, since max_tokens
+//                            covers thinking plus the response and a tight cap
+//                            truncates mid-edit and scores as a task failure.
 //   CRUSH_EDIT_EVAL_RESULTS= append per-fixture outcomes as JSONL to this path,
 //                            so two arms can be paired for a significance test
 
@@ -65,11 +69,18 @@ func envOr(key, def string) string {
 // mirroring coordinator.buildAnthropicProvider.
 func haikuSubscriptionModel(t *testing.T) fantasy.LanguageModel {
 	t.Helper()
+	return subscriptionModel(t, evalModelID)
+}
+
+// subscriptionModel builds a subscription-authenticated model by id, mirroring
+// coordinator.buildAnthropicProvider.
+func subscriptionModel(t *testing.T, modelID string) fantasy.LanguageModel {
+	t.Helper()
 	base := &claudecode.AuthTransport{Base: http.DefaultTransport, Source: claudecode.DefaultSource()}
 	httpClient := &http.Client{Transport: &ccSystemSplitTransport{base: base, injectIdentity: true}}
 	prov, err := anthropic.New(anthropic.WithHTTPClient(httpClient))
 	require.NoError(t, err)
-	m, err := prov.LanguageModel(t.Context(), evalModelID)
+	m, err := prov.LanguageModel(t.Context(), modelID)
 	require.NoError(t, err)
 	return m
 }
@@ -213,7 +224,7 @@ func runEditTask(t *testing.T, model fantasy.LanguageModel, mode string, fx eval
 	res, runErr := agent.Run(ctx, SessionAgentCall{
 		Prompt:          fx.prompt,
 		SessionID:       session.ID,
-		MaxOutputTokens: 8000,
+		MaxOutputTokens: int64(envInt("CRUSH_EDIT_EVAL_MAX_TOKENS", 8000)),
 		NonInteractive:  true,
 		ProviderOptions: evalThinkingOptions(),
 	})
