@@ -370,6 +370,10 @@ type Options struct {
 	// Memory configures the native long-term memory. Nil means defaults
 	// (enabled).
 	Memory *MemoryOptions `json:"memory,omitempty" jsonschema:"description=Long-term memory options"`
+
+	// ToolSearch configures on-demand loading of MCP tool schemas. Nil means
+	// defaults (auto-enable once enough MCP tools are connected).
+	ToolSearch *ToolSearchOptions `json:"tool_search,omitempty" jsonschema:"description=On-demand MCP tool schema loading"`
 }
 
 // ReadOptions configures the Read tool.
@@ -403,6 +407,74 @@ type MemoryOptions struct {
 	// MaxPerScope caps the number of live memories kept per project (or
 	// global) scope; the lowest-value ones are evicted past it. Defaults to 500.
 	MaxPerScope int `json:"max_per_scope,omitempty" jsonschema:"description=Maximum memories retained per scope,default=500"`
+}
+
+// ToolSearchOptions configures on-demand loading of MCP tool schemas.
+//
+// Every connected MCP tool's full JSON schema is otherwise sent on every
+// request. That is the single largest block in a typical prompt, and it is
+// billed on every turn -- cheaply as a cache read, but the cold write and the
+// per-turn read are both proportional to it. With tool search on, MCP tools are
+// sent as name plus a one-line summary, and the model loads a full schema only
+// when it actually needs one.
+type ToolSearchOptions struct {
+	// Enabled forces tool search on or off. Nil auto-enables it once the number
+	// of connected MCP tools reaches MinTools, which keeps small setups (where
+	// the schemas are cheap and discovery would only add a round-trip) eager.
+	Enabled *bool `json:"enabled,omitempty" jsonschema:"description=Force on-demand MCP tool loading on or off. Omit to enable automatically past min_tools"`
+	// MinTools is the connected-MCP-tool count at which tool search
+	// auto-enables. Defaults to 25.
+	MinTools int `json:"min_tools,omitempty" jsonschema:"description=Auto-enable tool search at this many connected MCP tools,default=25"`
+	// AlwaysLoad names MCP servers (e.g. "context7") whose tools keep their full
+	// schemas. Use it for servers called often enough that the discovery
+	// round-trip costs more than the schema bytes.
+	AlwaysLoad []string `json:"always_load,omitempty" jsonschema:"description=MCP server names whose tools keep full schemas,example=context7"`
+	// MaxResults caps how many schemas one tool_search call returns. Defaults to 5.
+	MaxResults int `json:"max_results,omitempty" jsonschema:"description=Maximum tool schemas returned per search,default=5"`
+}
+
+const (
+	defaultToolSearchMinTools   = 25
+	defaultToolSearchMaxResults = 5
+)
+
+// ToolSearchEnabled reports whether MCP schemas should be loaded on demand,
+// given how many MCP tools are connected. An explicit Enabled always wins.
+func (o Options) ToolSearchEnabled(mcpToolCount int) bool {
+	if o.ToolSearch != nil && o.ToolSearch.Enabled != nil {
+		return *o.ToolSearch.Enabled
+	}
+	return mcpToolCount >= o.ToolSearchMinTools()
+}
+
+// ToolSearchMinTools returns the auto-enable threshold. Defaults to 25.
+func (o Options) ToolSearchMinTools() int {
+	if o.ToolSearch != nil && o.ToolSearch.MinTools > 0 {
+		return o.ToolSearch.MinTools
+	}
+	return defaultToolSearchMinTools
+}
+
+// ToolSearchMaxResults returns the per-search schema cap. Defaults to 5.
+func (o Options) ToolSearchMaxResults() int {
+	if o.ToolSearch != nil && o.ToolSearch.MaxResults > 0 {
+		return o.ToolSearch.MaxResults
+	}
+	return defaultToolSearchMaxResults
+}
+
+// ToolSearchAlwaysLoaded reports whether an MCP server's tools keep their full
+// schemas rather than being deferred.
+func (o Options) ToolSearchAlwaysLoaded(server string) bool {
+	if o.ToolSearch == nil {
+		return false
+	}
+	for _, s := range o.ToolSearch.AlwaysLoad {
+		if strings.EqualFold(strings.TrimSpace(s), server) {
+			return true
+		}
+	}
+	return false
 }
 
 // MemoryEnabled reports whether long-term memory is on. Defaults to true.
@@ -1039,6 +1111,7 @@ func allToolNames() []string {
 		"ReadMcpResourceTool",
 		"skill",
 		"retrieve_full_output",
+		"tool_search",
 	}
 }
 
