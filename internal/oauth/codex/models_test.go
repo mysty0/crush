@@ -19,8 +19,8 @@ func TestModels_CodexPath(t *testing.T) {
 	})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-require.Equal(t, "/codex/models", r.URL.Path)
-require.Equal(t, "client_version=1.0.0", r.URL.RawQuery)
+		require.Equal(t, "/codex/models", r.URL.Path)
+		require.Equal(t, "client_version=1.0.0", r.URL.RawQuery)
 		require.Equal(t, "Bearer "+access, r.Header.Get("Authorization"))
 		require.Equal(t, "acct-models", r.Header.Get("chatgpt-account-id"))
 		require.Equal(t, "responses=experimental", r.Header.Get("OpenAI-Beta"))

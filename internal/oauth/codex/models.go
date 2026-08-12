@@ -53,9 +53,9 @@ func newAccountAPIRequest(ctx context.Context, url, accessToken string) (*http.R
 		req.Header.Set(headerAccountID, accountID)
 	}
 	req.Header.Set(headerOpenAIBeta, openAIBetaResponses)
-req.Header.Set(headerOriginator, originator)
-req.Header.Set("User-Agent", "codex_cli_rs/1.0.0 (Linux; x86_64)")
-req.Header.Set("Accept", "application/json")
+	req.Header.Set(headerOriginator, originator)
+	req.Header.Set("User-Agent", "codex_cli_rs/1.0.0 (Linux; x86_64)")
+	req.Header.Set("Accept", "application/json")
 	return req, nil
 }
 
@@ -68,7 +68,7 @@ type modelEntry struct {
 	ContextWindow            int64    `json:"context_window"`
 	SupportedInAPI           *bool    `json:"supported_in_api"`
 	Priority                 *float64 `json:"priority"`
-SupportedReasoningLevels []any `json:"supported_reasoning_levels"`
+	SupportedReasoningLevels []any    `json:"supported_reasoning_levels"`
 	DefaultReasoningLevel    string   `json:"default_reasoning_level"`
 	InputModalities          []string `json:"input_modalities"`
 }
@@ -107,18 +107,18 @@ func DefaultModels() []catwalk.Model {
 func Models(ctx context.Context, accessToken string) ([]catwalk.Model, error) {
 	// Try the Codex-scoped path first, then the generic path; the first
 	// success wins.
-urls := []string{
-accountAPIBaseURL + "/codex/models?client_version=1.0.0",
-accountAPIBaseURL + "/models",
-}
+	urls := []string{
+		accountAPIBaseURL + "/codex/models?client_version=1.0.0",
+		accountAPIBaseURL + "/models",
+	}
 
 	var lastErr error
-for _, url := range urls {
-entries, err := fetchModels(ctx, url, accessToken)
-if err != nil {
-lastErr = err
-continue
-}
+	for _, url := range urls {
+		entries, err := fetchModels(ctx, url, accessToken)
+		if err != nil {
+			lastErr = err
+			continue
+		}
 		models := normalizeModels(entries)
 		if len(models) == 0 {
 			lastErr = fmt.Errorf("codex: model discovery at %s returned no usable models", url)

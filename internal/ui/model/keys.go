@@ -24,14 +24,14 @@ type KeyMap struct {
 	}
 
 	Chat struct {
-		NewSession     key.Binding
-		AddAttachment  key.Binding
-		Cancel         key.Binding
+		NewSession    key.Binding
+		AddAttachment key.Binding
+		Cancel        key.Binding
 		// Background implements Ctrl+B's double-tap gesture: send
 		// whatever's currently blocking (a foreground bash command, or a
 		// synchronous sub-agent turn) to the background without
 		// canceling the turn. See UI.backgroundNow.
-		Background key.Binding
+		Background     key.Binding
 		Tab            key.Binding
 		Details        key.Binding
 		TogglePills    key.Binding
