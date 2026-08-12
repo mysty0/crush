@@ -4,7 +4,7 @@ package agent
 //
 // The tool-surface A/B (see eval_toolpad_test.go) measured only the *cost* of
 // carrying 98 MCP schemas: on single-file edit tasks the surface is dead weight,
-// and it showed no accuracy effect and zero misfires. That is half the trade.
+// and it showed no accuracy effect and zero calls into it. That is half the trade.
 // The other half is what the surface buys on tasks that genuinely need an MCP
 // tool, where eagerly-loaded schemas save a discovery round-trip.
 //
@@ -15,6 +15,9 @@ package agent
 //	          parameters — roughly what Claude Code sends for deferred tools —
 //	          plus a tool_search tool that returns a tool's real schema on
 //	          demand. Costs a round-trip instead of prefix tokens.
+//	crush     the shipped implementation (tools.NewDeferredTool +
+//	          tools.NewToolSearchTool + tools.WorthDeferring), so the result
+//	          applies to the code that ships rather than to the shim above.
 //	absent    target tool not present at all. This is a validity control: if a
 //	          task passes here, the task did not actually require the tool and
 //	          the fixture is broken.
@@ -32,16 +35,24 @@ package agent
 // Env knobs:
 //
 //	CRUSH_MCP_BENEFIT_EVAL=1      enable (required; makes real model calls)
-//	CRUSH_MCP_BENEFIT_ARMS=…      comma list (default "eager,deferred,absent")
+//	CRUSH_MCP_BENEFIT_ARMS=…      comma list of eager|deferred|crush|absent
+//	                              (default "eager,deferred,absent")
 //	CRUSH_MCP_BENEFIT_MODEL=…     model id (default: the edit eval's model)
+//	CRUSH_MCP_BENEFIT_MAX_TOKENS= output cap; must leave room for thinking on
+//	                              models where it is on by default (default 12000)
 //	CRUSH_MCP_BENEFIT_RESULTS=…   append per-task JSONL here
 //	CRUSH_MCP_BENEFIT_CONCURRENCY=N
+//	CRUSH_MCP_BENEFIT_DUMP=dir    write a full transcript per task (always, not
+//	                              only on failure -- diagnosing why a model
+//	                              *skipped* a tool needs the passing runs to
+//	                              compare against)
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,6 +60,8 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/require"
 )
 
@@ -177,11 +190,13 @@ var benefitTasks = []benefitTask{
 
 // cannedTool serves a fixed payload and records that it was called.
 type cannedTool struct {
-	info   fantasy.ToolInfo
-	body   string
-	called *atomic.Int64
-	args   *sync.Map // call index -> raw input, for well-formedness checks
-	opts   fantasy.ProviderOptions
+	info     fantasy.ToolInfo
+	body     string
+	called   *atomic.Int64
+	args     *sync.Map // call index -> raw input, for well-formedness checks
+	required []string  // enforced like a real MCP server would
+	badArgs  *atomic.Int64
+	opts     fantasy.ProviderOptions
 }
 
 func (c *cannedTool) Info() fantasy.ToolInfo { return c.info }
@@ -189,6 +204,28 @@ func (c *cannedTool) Info() fantasy.ToolInfo { return c.info }
 func (c *cannedTool) Run(_ context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	n := c.called.Add(1)
 	c.args.Store(n, call.Input)
+
+	// Enforce the required arguments the way a real MCP server would. Without
+	// this the eval scores a lucky guess as a pass: a deferred tool is sent with
+	// an empty schema, so a model that skips tool_search can still call it and
+	// get data back, and the harness would report success for a call production
+	// would reject.
+	var got map[string]any
+	if call.Input != "" {
+		_ = json.Unmarshal([]byte(call.Input), &got)
+	}
+	var missing []string
+	for _, req := range c.required {
+		if v, ok := got[req]; !ok || v == nil || v == "" {
+			missing = append(missing, req)
+		}
+	}
+	if len(missing) > 0 {
+		c.badArgs.Add(1)
+		return fantasy.NewTextErrorResponse(fmt.Sprintf(
+			"missing required parameter(s): %s. Load this tool's schema before calling it.",
+			strings.Join(missing, ", "))), nil
+	}
 	return fantasy.NewTextResponse(c.body), nil
 }
 
@@ -246,8 +283,9 @@ func (s *searchTool) SetProviderOptions(o fantasy.ProviderOptions) { s.opts = o 
 type benefitArmTools struct {
 	tools       []fantasy.AgentTool
 	targetCalls *atomic.Int64
+	badArgs     *atomic.Int64
 	searchCalls *atomic.Int64
-	misfires    *atomic.Int64
+	auxCalls    *atomic.Int64
 	args        *sync.Map
 	promptBytes int
 }
@@ -264,8 +302,9 @@ func buildBenefitTools(t *testing.T, arm string, task benefitTask) benefitArmToo
 
 	out := benefitArmTools{
 		targetCalls: &atomic.Int64{},
+		badArgs:     &atomic.Int64{},
 		searchCalls: &atomic.Int64{},
-		misfires:    &atomic.Int64{},
+		auxCalls:    &atomic.Int64{},
 		args:        &sync.Map{},
 	}
 
@@ -276,6 +315,10 @@ func buildBenefitTools(t *testing.T, arm string, task benefitTask) benefitArmToo
 				Parameters: params, Required: required,
 			},
 			body: task.canned, called: out.targetCalls, args: out.args,
+			// Required args come from the real schema even when the arm hides it,
+			// so a call that skipped discovery fails exactly as it would in
+			// production.
+			required: requiredOf(s), badArgs: out.badArgs,
 		}
 	}
 	props := func(s mcpSchema) (map[string]any, []string) {
@@ -296,6 +339,46 @@ func buildBenefitTools(t *testing.T, arm string, task benefitTask) benefitArmToo
 		// Validity control: no MCP tools at all.
 		return out
 
+	case "crush":
+		// The shipped implementation: tools.NewDeferredTool for presentation,
+		// tools.WorthDeferring to skip tools a stub would not shrink, and
+		// tools.NewToolSearchTool for discovery. This arm exists so the result
+		// applies to the code that actually runs, not to the hand-rolled shim
+		// the "deferred" arm uses.
+		var deferred []fantasy.AgentTool
+		for _, s := range surface {
+			p, req := props(s)
+			var real fantasy.AgentTool
+			if s.Name == task.wantTool {
+				real = mkCanned(s, p, req)
+			} else {
+				real = &padTool{
+					info:     fantasy.ToolInfo{Name: s.Name, Description: s.Description, Parameters: p, Required: req},
+					misfires: out.auxCalls, body: auxResponse(s.Name),
+				}
+			}
+			if !tools.WorthDeferring(real) {
+				out.tools = append(out.tools, real)
+				if b, err := json.Marshal(real.Info()); err == nil {
+					out.promptBytes += len(b)
+				}
+				continue
+			}
+			d := tools.NewDeferredTool(real)
+			deferred = append(deferred, d)
+			out.tools = append(out.tools, d)
+			if b, err := json.Marshal(d.Info()); err == nil {
+				out.promptBytes += len(b)
+			}
+		}
+		if len(deferred) > 0 {
+			search := tools.NewToolSearchTool(deferred, 5)
+			out.tools = append(out.tools, search)
+			if b, err := json.Marshal(search.Info()); err == nil {
+				out.promptBytes += len(b)
+			}
+		}
+
 	case "eager":
 		for _, s := range surface {
 			p, req := props(s)
@@ -304,7 +387,7 @@ func buildBenefitTools(t *testing.T, arm string, task benefitTask) benefitArmToo
 			} else {
 				out.tools = append(out.tools, &padTool{
 					info:     fantasy.ToolInfo{Name: s.Name, Description: s.Description, Parameters: p, Required: req},
-					misfires: out.misfires,
+					misfires: out.auxCalls, body: auxResponse(s.Name),
 				})
 			}
 			if b, err := json.Marshal(s); err == nil {
@@ -327,7 +410,7 @@ func buildBenefitTools(t *testing.T, arm string, task benefitTask) benefitArmToo
 				c.info = stub
 				out.tools = append(out.tools, c)
 			} else {
-				out.tools = append(out.tools, &padTool{info: stub, misfires: out.misfires})
+				out.tools = append(out.tools, &padTool{info: stub, misfires: out.auxCalls, body: auxResponse(s.Name)})
 			}
 			if b, err := json.Marshal(stub); err == nil {
 				out.promptBytes += len(b)
@@ -345,8 +428,9 @@ type benefitRecord struct {
 	Task        string `json:"task"`
 	Pass        bool   `json:"pass"`
 	CalledTool  bool   `json:"called_target_tool"`
-	SearchCalls int64  `json:"search_calls"`
-	Misfires    int64  `json:"misfires"`
+	SearchCalls int    `json:"search_calls"`
+	AuxCalls    int64  `json:"aux_mcp_calls"`
+	BadArgs     int64  `json:"bad_arg_calls"`
 	Assistant   int    `json:"assistant_turns"`
 	ToolCalls   int    `json:"tool_calls"`
 	InTokens    int64  `json:"input_tokens"`
@@ -364,7 +448,9 @@ func TestMCPBenefitEval(t *testing.T) {
 	}
 
 	arms := strings.Split(envOr("CRUSH_MCP_BENEFIT_ARMS", "eager,deferred,absent"), ",")
-	model := haikuSubscriptionModel(t)
+	modelID := envOr("CRUSH_MCP_BENEFIT_MODEL", evalModelID)
+	model := subscriptionModel(t, modelID)
+	t.Logf("model: %s", modelID)
 
 	sem := make(chan struct{}, envInt("CRUSH_MCP_BENEFIT_CONCURRENCY", 4))
 	var mu sync.Mutex
@@ -393,6 +479,7 @@ func TestMCPBenefitEval(t *testing.T) {
 		}
 	})
 
+	t.Logf("model: %s", modelID)
 	printBenefitScoreboard(t, arms, records)
 	writeBenefitRecords(t, records)
 }
@@ -414,14 +501,14 @@ func runBenefitTask(t *testing.T, model fantasy.LanguageModel, arm string, task 
 	res, runErr := agent.Run(ctx, SessionAgentCall{
 		Prompt:          task.prompt,
 		SessionID:       session.ID,
-		MaxOutputTokens: 4000,
+		MaxOutputTokens: int64(envInt("CRUSH_MCP_BENEFIT_MAX_TOKENS", 12000)),
 		NonInteractive:  true,
 	})
 
 	rec := benefitRecord{
 		Arm: arm, Task: task.name,
-		SearchCalls: at.searchCalls.Load(),
-		Misfires:    at.misfires.Load(),
+		AuxCalls:    at.auxCalls.Load(),
+		BadArgs:     at.badArgs.Load(),
 		CalledTool:  at.targetCalls.Load() > 0,
 		PromptBytes: at.promptBytes,
 	}
@@ -442,15 +529,26 @@ func runBenefitTask(t *testing.T, model fantasy.LanguageModel, arm string, task 
 	msgs, _ := env.messages.List(t.Context(), session.ID)
 	var lastText string
 	for _, m := range msgs {
-		if m.Role == "assistant" {
-			rec.Assistant++
-			rec.ToolCalls += len(m.ToolCalls())
-			if txt := strings.TrimSpace(m.Content().Text); txt != "" {
-				lastText = txt
+		if m.Role != "assistant" {
+			continue
+		}
+		rec.Assistant++
+		for _, tc := range m.ToolCalls() {
+			rec.ToolCalls++
+			// Counted from the transcript rather than an injected counter, so the
+			// figure is comparable across the shim arm and the shipped one.
+			if tc.Name == tools.ToolSearchToolName {
+				rec.SearchCalls++
 			}
 		}
+		if txt := strings.TrimSpace(m.Content().Text); txt != "" {
+			lastText = txt
+		}
 	}
-	rec.Pass = strings.Contains(strings.ToLower(lastText), strings.ToLower(task.wantAnswer))
+	rec.Pass = containsAnswer(lastText, task.wantAnswer)
+	if dir := os.Getenv("CRUSH_MCP_BENEFIT_DUMP"); dir != "" {
+		dumpBenefitTranscript(dir, arm, task, msgs, lastText, rec, len(at.tools))
+	}
 	return rec
 }
 
@@ -461,8 +559,8 @@ func printBenefitScoreboard(t *testing.T, arms []string, records []benefitRecord
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n=== MCP benefit eval — %d tasks ===\n", len(benefitTasks))
-	fmt.Fprintf(&b, "%-9s %9s %9s %8s %8s %8s %9s %10s %9s\n",
-		"arm", "pass", "used tool", "searches", "turns", "calls", "misfires", "units/task", "schema B")
+	fmt.Fprintf(&b, "%-9s %9s %9s %8s %8s %8s %9s %9s %10s %9s\n",
+		"arm", "pass", "used tool", "searches", "turns", "calls", "aux calls", "bad args", "units/task", "schema B")
 	for _, arm := range arms {
 		arm = strings.TrimSpace(arm)
 		rs := byArm[arm]
@@ -470,8 +568,8 @@ func printBenefitScoreboard(t *testing.T, arms []string, records []benefitRecord
 			continue
 		}
 		var pass, used int
-		var searches, misfires, units int64
-		var turns, calls, bytes int
+		var auxCalls, badArgs, units int64
+		var searches, turns, calls, bytes int
 		for _, r := range rs {
 			if r.Pass {
 				pass++
@@ -480,16 +578,17 @@ func printBenefitScoreboard(t *testing.T, arms []string, records []benefitRecord
 				used++
 			}
 			searches += r.SearchCalls
-			misfires += r.Misfires
+			auxCalls += r.AuxCalls
+			badArgs += r.BadArgs
 			units += r.Units
 			turns += r.Assistant
 			calls += r.ToolCalls
 			bytes = r.PromptBytes
 		}
 		n := len(rs)
-		fmt.Fprintf(&b, "%-9s %4d/%-4d %9d %8.2f %8.2f %8.2f %9d %10d %9d\n",
+		fmt.Fprintf(&b, "%-9s %4d/%-4d %9d %8.2f %8.2f %8.2f %9d %9d %10d %9d\n",
 			arm, pass, n, used, float64(searches)/float64(n), float64(turns)/float64(n),
-			float64(calls)/float64(n), misfires, units/int64(n), bytes)
+			float64(calls)/float64(n), auxCalls, badArgs, units/int64(n), bytes)
 	}
 	t.Log(b.String())
 }
@@ -514,3 +613,119 @@ func writeBenefitRecords(t *testing.T, records []benefitRecord) {
 	}
 	t.Logf("wrote %d benefit records to %s", len(records), path)
 }
+
+// requiredOf extracts a schema's required parameter names.
+func requiredOf(s mcpSchema) []string {
+	raw, ok := s.InputSchema["required"].([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, r := range raw {
+		if str, ok := r.(string); ok {
+			out = append(out, str)
+		}
+	}
+	return out
+}
+
+// dumpBenefitTranscript writes the full exchange for one task. Unlike the edit
+// eval's dump this runs for passes too: the question "why did the model not call
+// the tool at all" can only be answered by contrasting a skip against a run where
+// it did call, so failure-only dumps are not enough.
+func dumpBenefitTranscript(dir, arm string, task benefitTask, msgs []message.Message, answer string, rec benefitRecord, toolCount int) {
+	_ = os.MkdirAll(dir, 0o755)
+	var b strings.Builder
+	status := "PASS"
+	if !rec.Pass {
+		status = "FAIL"
+	}
+	fmt.Fprintf(&b, "# %s / %s — %s\n", arm, task.name, status)
+	fmt.Fprintf(&b, "tools in request: %d   target: %s   called target: %v\n",
+		toolCount, task.wantTool, rec.CalledTool)
+	fmt.Fprintf(&b, "turns: %d   tool calls: %d   searches: %d   non-target MCP calls: %d\n",
+		rec.Assistant, rec.ToolCalls, rec.SearchCalls, rec.AuxCalls)
+	fmt.Fprintf(&b, "tokens: in=%d out=%d cacheR=%d cacheW=%d\n",
+		rec.InTokens, rec.OutTokens, rec.CacheRead, rec.CacheWrite)
+	if rec.RunErr != "" {
+		fmt.Fprintf(&b, "run error: %s\n", rec.RunErr)
+	}
+	fmt.Fprintf(&b, "\n## PROMPT\n%s\n", task.prompt)
+	fmt.Fprintf(&b, "\n## TRANSCRIPT\n")
+	for _, m := range msgs {
+		if txt := strings.TrimSpace(m.Content().Text); txt != "" {
+			fmt.Fprintf(&b, "\n[%s] %s\n", m.Role, txt)
+		}
+		for _, tc := range m.ToolCalls() {
+			fmt.Fprintf(&b, "\n[%s → %s] %s\n", m.Role, tc.Name, tc.Input)
+		}
+		for _, tr := range m.ToolResults() {
+			tag := "ok"
+			if tr.IsError {
+				tag = "ERROR"
+			}
+			fmt.Fprintf(&b, "\n[result %s %s] %s\n", tr.Name, tag, truncate(tr.Content, 1200))
+		}
+	}
+	fmt.Fprintf(&b, "\n## EXPECTED TOKEN\n%s\n", task.wantAnswer)
+	fmt.Fprintf(&b, "\n## FINAL ANSWER\n%s\n", answer)
+	_ = os.WriteFile(filepath.Join(dir, arm+"__"+task.name+".txt"), []byte(b.String()), 0o644)
+}
+
+// auxResponses gives coherent answers to the discovery tools a model actually
+// reaches for on these tasks, so exploring the environment confirms what the
+// prompts assert instead of contradicting it. The tool names and their call
+// counts came from reading transcripts of earlier runs, not from guessing:
+// list_datasources (10 calls), list_prometheus_metric_names (6),
+// get_datasource_by_uid (2), get_datasource_by_name (2).
+//
+// A task whose target tool is one of these still gets its own canned response --
+// targets are cannedTool, not padTool -- so there is no conflict.
+var auxResponses = map[string]string{
+	"mcp__grafana__list_datasources": `[{"name":"Prod Metrics","type":"prometheus","uid":"prod-metrics"},` +
+		`{"name":"Prod Logs","type":"loki","uid":"prod-logs"}]`,
+	"mcp__grafana__get_datasource_by_name": `{"name":"Prod Metrics","type":"prometheus","uid":"prod-metrics"}`,
+	"mcp__grafana__get_datasource_by_uid":  `{"name":"Prod Metrics","type":"prometheus","uid":"prod-metrics"}`,
+	"mcp__grafana__list_prometheus_metric_names": `{"metrics":["kube_pod_container_status_restarts_total",` +
+		`"http_request_duration_seconds_bucket","ingest_queue_depth","http_requests_total"]}`,
+}
+
+// auxResponse returns a plausible payload for a non-target tool. The generic
+// fallback is an empty result, which is safe for tools the model only pokes at
+// incidentally -- the failure mode above came from the *discovery* tools above
+// answering emptily, which the map now prevents.
+func auxResponse(name string) string {
+	if b, ok := auxResponses[name]; ok {
+		return b
+	}
+	return `{"result": [], "note": "no matching data"}`
+}
+
+// containsAnswer reports whether a response states the expected token.
+//
+// A plain substring check scored a correct answer as a failure: the model wrote
+// "**8,241**" for the token "8241". Digit grouping is normal prose formatting, so
+// the comparison strips thousands separators from both sides. It stays a
+// substring check otherwise -- the tokens are deliberately distinctive enough
+// ("dpl-9f4c21", "zodStrictParseV7") that looser matching would risk false
+// positives rather than fix false negatives.
+func containsAnswer(response, want string) bool {
+	norm := func(s string) string {
+		s = strings.ToLower(s)
+		// Remove separators only between digits, so "8,241" matches "8241"
+		// while "dpl-9f4c21" and "/org/project" survive intact.
+		var b strings.Builder
+		for i := 0; i < len(s); i++ {
+			c := s[i]
+			if (c == ',' || c == ' ' || c == '_') && i > 0 && i+1 < len(s) &&
+				isDigit(s[i-1]) && isDigit(s[i+1]) {
+				continue
+			}
+			b.WriteByte(c)
+		}
+		return b.String()
+	}
+	return strings.Contains(norm(response), norm(want))
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
