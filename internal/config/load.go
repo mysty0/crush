@@ -148,6 +148,14 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 			return nil, fmt.Errorf("failed to update preferred small model: %w", err)
 		}
 	}
+
+	// Resolve the inline model set once, after providers and the
+	// selected slots have settled. Warnings ride the same startup-toast
+	// channel as OAuth model-discovery fallbacks.
+	inlineModels, inlineWarnings := cfg.ResolveInlineModels()
+	cfg.InlineModels = inlineModels
+	cfg.OAuthModelWarnings = append(cfg.OAuthModelWarnings, inlineWarnings...)
+
 	store.SetupAgents()
 
 	// Capture initial staleness snapshot

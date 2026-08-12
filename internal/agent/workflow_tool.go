@@ -122,10 +122,7 @@ func (c *coordinator) workflowTool(ctx context.Context, client *http.Client) (fa
 
 			if params.Model != "" {
 				if _, ok := c.resolveTaskModel(params.Model); !ok {
-					return fantasy.NewTextErrorResponse(fmt.Sprintf(
-						"unknown model %q; choose one of the available model IDs: %s",
-						params.Model, strings.Join(c.availableModelIDs(), ", "),
-					)), nil
+					return fantasy.NewTextErrorResponse(unknownModelError(params.Model).Error()), nil
 				}
 			}
 
@@ -489,10 +486,7 @@ func (r *workflowRunner) agentFor(ctx context.Context, modelID string) (SessionA
 	default:
 		selected, ok := r.c.resolveTaskModel(modelID)
 		if !ok {
-			return nil, Model{}, fmt.Errorf(
-				"unknown model %q; choose one of the available model IDs: %s",
-				modelID, strings.Join(r.c.availableModelIDs(), ", "),
-			)
+			return nil, Model{}, unknownModelError(modelID)
 		}
 		built, err := r.c.buildModelFromSelected(ctx, selected, true)
 		if err != nil {

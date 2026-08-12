@@ -977,6 +977,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		allTools,
 		tools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
 		tools.NewSourcegraphTool(nil),
+		c.listModelsTool(),
 		c.scheduleCronTool(),
 		c.scheduleWakeupTool(),
 		c.scheduleListTool(),

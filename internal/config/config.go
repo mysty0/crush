@@ -280,6 +280,35 @@ func (Attribution) JSONSchemaExtend(schema *jsonschema.Schema) {
 	}
 }
 
+// InlineModelRef selects a single model to advertise inline in the tool
+// descriptions that accept a "model" parameter (agent, Workflow,
+// agentic_fetch), instead of listing every model every provider exposes.
+//
+// Match is a glob against the model ID and the FIRST match in provider
+// order wins. That ordering is the whole point: provider model lists are
+// curated newest-first, so a pattern like "*opus*" keeps resolving to the
+// current flagship as new models ship, with no reconfiguration. See
+// ResolveInlineModels for the ordering contract this depends on.
+type InlineModelRef struct {
+	// Source restricts matching to one provider. For Claude Code it
+	// matches every subscription account (claude-code, claude-code-work,
+	// ...), not just the base provider. Empty matches any provider.
+	Source string `json:"source,omitempty" jsonschema:"description=Restrict matching to this provider ID. For claude-code this covers every subscription account. Empty matches any provider.,example=claude-code"`
+	// Match is a glob pattern tested against the model ID.
+	Match string `json:"match" jsonschema:"required,description=Glob pattern matched against the model ID. The first match in provider order wins.,example=*opus*"`
+}
+
+// AgentModelsOptions configures which models are advertised inline in the
+// tool descriptions that take a "model" parameter.
+type AgentModelsOptions struct {
+	// Inline lists the models to name directly in those tool
+	// descriptions. The configured large and small models are always
+	// included. Everything else stays reachable via the list_models
+	// tool, which keeps the full catalog out of the cached prompt
+	// prefix.
+	Inline []InlineModelRef `json:"inline,omitempty" jsonschema:"description=Models to advertise inline in tool descriptions. The configured large and small models are always included."`
+}
+
 type Options struct {
 	ContextPaths         []string    `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=.cursorrules,example=CRUSH.md"`
 	GlobalContextPaths   []string    `json:"global_context_paths,omitempty" jsonschema:"description=Paths to files containing global context information for the AI,default=~/.config/crush/CRUSH.md,default=~/.config/AGENTS.md"`
@@ -304,6 +333,10 @@ type Options struct {
 	DisableNotifications      bool         `json:"disable_notifications,omitempty" jsonschema:"description=Deprecated: Use notification_style instead. Disable desktop notifications,default=false"`
 	NotificationStyle         string       `json:"notification_style,omitempty" jsonschema:"description=Notification style to use. Options: auto (default), native, osc, bell, disabled. Auto selects based on environment: native for local sessions, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
 	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
+	// AgentModels controls which models are named inline in the tool
+	// descriptions that take a "model" parameter. When unset, those
+	// descriptions fall back to the configured large and small models.
+	AgentModels *AgentModelsOptions `json:"agent_models,omitzero" jsonschema:"description=Controls which models are advertised inline in tool descriptions that accept a model parameter"`
 	// CompressToolDescriptions strips filler words, pleasantries, hedging
 	// phrases, and redundant articles from MCP tool, prompt, and resource
 	// descriptions before they are sent to the model, to reduce token
@@ -898,6 +931,15 @@ type Config struct {
 	// UI can surface a one-time startup toast instead of the fallback
 	// being invisible. Transient in-memory state, never persisted.
 	OAuthModelWarnings []string `json:"-"`
+
+	// InlineModels is the resolved set of models advertised inline in
+	// the agent/Workflow/agentic_fetch tool descriptions. It is
+	// computed once at load, after providers and the selected model
+	// slots settle, and then held fixed: those descriptions sit inside
+	// the cached prompt prefix, so re-resolving mid-session would
+	// rewrite the prefix and turn a cheap cache read into a full cache
+	// write. Transient in-memory state, never persisted.
+	InlineModels []SelectedModel `json:"-"`
 }
 
 // cloneForWrite returns a copy of c that the store's typed field mutators
@@ -1019,6 +1061,7 @@ func allToolNames() []string {
 		"fetch",
 		"agentic_fetch",
 		"Workflow",
+		"list_models",
 		"ScheduleCron",
 		"ScheduleWakeup",
 		"ScheduleList",
@@ -1051,7 +1094,10 @@ func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 }
 
 func resolveReadOnlyTools(tools []string) []string {
-	readOnlyTools := []string{"Glob", "Grep", "ls", "sourcegraph", "Read", "agentic_fetch"}
+	// list_models accompanies agentic_fetch: that tool takes a "model"
+	// parameter whose description names only a few models, so the
+	// lookup must be reachable to pick any other one.
+	readOnlyTools := []string{"Glob", "Grep", "ls", "sourcegraph", "Read", "agentic_fetch", "list_models"}
 	// filter to only include tools that are in allowedtools (include mode)
 	return filterSlice(tools, readOnlyTools, true)
 }

@@ -692,11 +692,11 @@ func TestConfig_setupAgentsWithNoDisabledTools(t *testing.T) {
 
 	taskAgent, ok := cfg.Agents[AgentTask]
 	require.True(t, ok)
-	assert.Equal(t, []string{"agentic_fetch", "Glob", "Grep", "ls", "sourcegraph", "Read"}, taskAgent.AllowedTools)
+	assert.Equal(t, []string{"agentic_fetch", "list_models", "Glob", "Grep", "ls", "sourcegraph", "Read"}, taskAgent.AllowedTools)
 
 	taskWriteAgent, ok := cfg.Agents[AgentTaskWrite]
 	require.True(t, ok)
-	assert.Equal(t, []string{"Bash", "crush_info", "crush_logs", "job_output", "job_kill", "download", "Edit", "MultiEdit", "lsp_diagnostics", "lsp_references", "lsp_restart", "fetch", "agentic_fetch", "Remember", "Recall", "Forget", "Glob", "Grep", "ls", "sourcegraph", "TodoWrite", "Read", "Write", "ListMcpResourcesTool", "ReadMcpResourceTool", "skill", "retrieve_full_output"}, taskWriteAgent.AllowedTools)
+	assert.Equal(t, []string{"Bash", "crush_info", "crush_logs", "job_output", "job_kill", "download", "Edit", "MultiEdit", "lsp_diagnostics", "lsp_references", "lsp_restart", "fetch", "agentic_fetch", "list_models", "Remember", "Recall", "Forget", "Glob", "Grep", "ls", "sourcegraph", "TodoWrite", "Read", "Write", "ListMcpResourcesTool", "ReadMcpResourceTool", "skill", "retrieve_full_output"}, taskWriteAgent.AllowedTools)
 }
 
 func TestConfig_setupAgentsWithDisabledTools(t *testing.T) {
@@ -714,11 +714,11 @@ func TestConfig_setupAgentsWithDisabledTools(t *testing.T) {
 	coderAgent, ok := cfg.Agents[AgentCoder]
 	require.True(t, ok)
 
-	assert.Equal(t, []string{"agent", "Bash", "crush_info", "crush_logs", "job_output", "job_kill", "MultiEdit", "lsp_diagnostics", "lsp_references", "lsp_restart", "fetch", "agentic_fetch", "Workflow", "ScheduleCron", "ScheduleWakeup", "ScheduleList", "ScheduleCancel", "AgentList", "AgentProgress", "Remember", "Recall", "Forget", "Glob", "ls", "sourcegraph", "TodoWrite", "Read", "Write", "ListMcpResourcesTool", "ReadMcpResourceTool", "skill", "retrieve_full_output"}, coderAgent.AllowedTools)
+	assert.Equal(t, []string{"agent", "Bash", "crush_info", "crush_logs", "job_output", "job_kill", "MultiEdit", "lsp_diagnostics", "lsp_references", "lsp_restart", "fetch", "agentic_fetch", "Workflow", "list_models", "ScheduleCron", "ScheduleWakeup", "ScheduleList", "ScheduleCancel", "AgentList", "AgentProgress", "Remember", "Recall", "Forget", "Glob", "ls", "sourcegraph", "TodoWrite", "Read", "Write", "ListMcpResourcesTool", "ReadMcpResourceTool", "skill", "retrieve_full_output"}, coderAgent.AllowedTools)
 
 	taskAgent, ok := cfg.Agents[AgentTask]
 	require.True(t, ok)
-	assert.Equal(t, []string{"agentic_fetch", "Glob", "ls", "sourcegraph", "Read"}, taskAgent.AllowedTools)
+	assert.Equal(t, []string{"agentic_fetch", "list_models", "Glob", "ls", "sourcegraph", "Read"}, taskAgent.AllowedTools)
 }
 
 func TestConfig_setupAgentsWithEveryReadOnlyToolDisabled(t *testing.T) {
@@ -731,6 +731,7 @@ func TestConfig_setupAgentsWithEveryReadOnlyToolDisabled(t *testing.T) {
 				"sourcegraph",
 				"Read",
 				"agentic_fetch",
+				"list_models",
 			},
 		},
 	}

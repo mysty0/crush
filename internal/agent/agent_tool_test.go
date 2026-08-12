@@ -164,43 +164,41 @@ func TestResolveFetchModelSelection(t *testing.T) {
 	})
 }
 
-func TestRenderAvailableModelsIsOrderStable(t *testing.T) {
+func TestRenderInlineModels(t *testing.T) {
 	t.Parallel()
 
-	// The caller feeds this from EnabledProviders(), which iterates a map
-	// and hands back a different order on every call. The rendered text
-	// goes into tool schemas inside the cached prompt prefix, so any
-	// reordering silently invalidates the whole prompt cache.
-	providers := []config.ProviderConfig{
-		{ID: "openai", Name: "OpenAI", Models: []catwalk.Model{{ID: "gpt-5", Name: "GPT-5"}}},
-		{ID: "anthropic", Name: "Anthropic", Models: []catwalk.Model{{ID: "claude-sonnet-5", Name: "Claude Sonnet 5"}}},
-		{ID: "bedrock", Name: "AWS Bedrock", Models: []catwalk.Model{{ID: "us.anthropic.claude-sonnet-5", Name: "Claude Sonnet 5"}}},
+	// This text goes into tool schemas inside the cached prompt prefix,
+	// so it must depend only on the resolved set -- same input, same
+	// bytes -- or the whole prompt cache is invalidated on every
+	// rebuild. The resolution itself is pinned at config load; see
+	// config.ResolveInlineModels.
+	models := []config.SelectedModel{
+		{Provider: "claude-code", Model: "claude-opus-5"},
+		{Provider: "claude-code", Model: "claude-sonnet-5"},
 	}
 
-	want := renderAvailableModels(providers)
-	require.Contains(t, want, "Anthropic:")
-	require.Less(t, strings.Index(want, "Anthropic:"), strings.Index(want, "AWS Bedrock:"))
-	require.Less(t, strings.Index(want, "AWS Bedrock:"), strings.Index(want, "OpenAI:"))
+	got := renderInlineModels(models)
 
-	for _, order := range [][]int{{2, 0, 1}, {1, 2, 0}, {2, 1, 0}} {
-		shuffled := make([]config.ProviderConfig, 0, len(providers))
-		for _, i := range order {
-			shuffled = append(shuffled, providers[i])
-		}
-		assert.Equal(t, want, renderAvailableModels(shuffled))
+	require.Contains(t, got, "claude-opus-5")
+	require.Contains(t, got, "claude-sonnet-5")
+	require.Contains(t, got, "list_models")
+	// Entries are provider-qualified: the same model ID can be served
+	// by several providers, and resolveTaskModel binds the first
+	// enabled provider that has it.
+	require.Contains(t, got, "provider: claude-code")
+	require.Less(t, strings.Index(got, "claude-opus-5"), strings.Index(got, "claude-sonnet-5"))
+
+	for range 3 {
+		assert.Equal(t, got, renderInlineModels(models))
 	}
 }
 
-func TestRenderAvailableModelsDoesNotReorderCaller(t *testing.T) {
+func TestRenderInlineModelsEmptyPointsAtLookup(t *testing.T) {
 	t.Parallel()
 
-	providers := []config.ProviderConfig{
-		{ID: "openai", Models: []catwalk.Model{{ID: "gpt-5"}}},
-		{ID: "anthropic", Models: []catwalk.Model{{ID: "claude-sonnet-5"}}},
-	}
+	// With nothing resolved the model must still learn how to find a
+	// model ID, or the "model" parameter becomes unusable.
+	got := renderInlineModels(nil)
 
-	renderAvailableModels(providers)
-
-	assert.Equal(t, "openai", providers[0].ID)
-	assert.Equal(t, "anthropic", providers[1].ID)
+	require.Contains(t, got, "list_models")
 }

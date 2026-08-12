@@ -3,6 +3,19 @@
   "$id": "https://github.com/charmbracelet/crush/internal/config/config",
   "$ref": "#/$defs/Config",
   "$defs": {
+    "AgentModelsOptions": {
+      "properties": {
+        "inline": {
+          "items": {
+            "$ref": "#/$defs/InlineModelRef"
+          },
+          "type": "array",
+          "description": "Models to advertise inline in tool descriptions. The configured large and small models are always included."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "Attribution": {
       "properties": {
         "trailer_style": {
@@ -141,6 +154,29 @@
       },
       "additionalProperties": false,
       "type": "object"
+    },
+    "InlineModelRef": {
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Restrict matching to this provider ID. For claude-code this covers every subscription account. Empty matches any provider.",
+          "examples": [
+            "claude-code"
+          ]
+        },
+        "match": {
+          "type": "string",
+          "description": "Glob pattern matched against the model ID. The first match in provider order wins.",
+          "examples": [
+            "*opus*"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "match"
+      ]
     },
     "LSPConfig": {
       "properties": {
@@ -559,6 +595,10 @@
           },
           "type": "array",
           "description": "List of skill names to disable and hide from the agent"
+        },
+        "agent_models": {
+          "$ref": "#/$defs/AgentModelsOptions",
+          "description": "Controls which models are advertised inline in tool descriptions that accept a model parameter"
         },
         "compress_tool_descriptions": {
           "type": "boolean",

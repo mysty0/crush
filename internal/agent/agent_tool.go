@@ -5,7 +5,6 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 
 	"charm.land/fantasy"
@@ -169,10 +168,7 @@ func (c *coordinator) taskAgentFor(ctx context.Context, mode, modelID string) (S
 		var ok bool
 		selected, ok = c.resolveTaskModel(modelID)
 		if !ok {
-			return nil, fmt.Errorf(
-				"unknown model %q; choose one of the available model IDs: %s",
-				modelID, strings.Join(c.availableModelIDs(), ", "),
-			)
+			return nil, unknownModelError(modelID)
 		}
 	}
 
@@ -287,10 +283,7 @@ func (c *coordinator) resolveFetchModelSelection(modelID string) (config.Selecte
 	if modelID != "" {
 		selected, ok := c.resolveTaskModel(modelID)
 		if !ok {
-			return config.SelectedModel{}, fmt.Errorf(
-				"unknown model %q; choose one of the available model IDs: %s",
-				modelID, strings.Join(c.availableModelIDs(), ", "),
-			)
+			return config.SelectedModel{}, unknownModelError(modelID)
 		}
 		return selected, nil
 	}
@@ -306,65 +299,56 @@ func (c *coordinator) resolveFetchModelSelection(modelID string) (config.Selecte
 	return small, nil
 }
 
-// availableModelIDs returns the sorted, de-duplicated set of model IDs the
-// "agent" tool can dispatch to (every model on an enabled provider).
-func (c *coordinator) availableModelIDs() []string {
-	seen := make(map[string]struct{})
-	var ids []string
-	for _, providerCfg := range c.cfg.Config().EnabledProviders() {
-		for _, m := range providerCfg.Models {
-			if _, ok := seen[m.ID]; ok {
-				continue
-			}
-			seen[m.ID] = struct{}{}
-			ids = append(ids, m.ID)
-		}
-	}
-	slices.Sort(ids)
-	return ids
+// unknownModelError builds the error returned when the model passes a
+// model ID that no enabled provider serves.
+//
+// It deliberately does not enumerate the valid IDs. The tool descriptions
+// now advertise only a few models inline, so a wrong guess is an expected
+// outcome rather than a rare one, and on a configuration with many
+// providers spelling out every ID would dump tens of kilobytes into the
+// conversation on each miss. Pointing at list_models keeps the recovery
+// path one cheap tool call away.
+func unknownModelError(modelID string) error {
+	return fmt.Errorf(
+		"unknown model %q; call the list_models tool to look up a valid model ID (it accepts a provider or filter to narrow the results)",
+		modelID,
+	)
 }
 
-// availableModelsDescription renders the list of selectable models, grouped
-// by provider, to append to the tool description so the LLM knows which IDs
-// it may pass in the "model" parameter.
+// availableModelsDescription renders the models advertised inline in the
+// description of a tool that takes a "model" parameter.
+//
+// This deliberately names only a handful of models rather than the whole
+// catalog. These descriptions sit inside the cached prompt prefix of every
+// request, and on a configuration with many providers -- especially any
+// using discover_models -- the full catalog dwarfs every other tool schema
+// combined. Anything not named here stays reachable through the
+// list_models tool, which serves the catalog as a tool result instead, so
+// it costs nothing until it is actually needed.
 func (c *coordinator) availableModelsDescription() string {
-	return renderAvailableModels(c.cfg.Config().EnabledProviders())
+	return renderInlineModels(c.cfg.Config().InlineModels)
 }
 
-// renderAvailableModels renders providers and their models in a stable order.
-// The order matters beyond tidiness: this text is embedded in the
-// agent/agentic_fetch/Workflow tool schemas, which sit inside the cached
-// prompt prefix. EnabledProviders iterates a map, so without sorting the
-// groups come out shuffled on every rebuild, and a single reordered group
-// invalidates the Anthropic prompt cache for the whole request -- turning
-// what should be a cheap cache read into a full cache write.
-func renderAvailableModels(providers []config.ProviderConfig) string {
-	if len(providers) == 0 {
-		return ""
+// renderInlineModels renders the inline model set in the order resolved at
+// config load. That order is fixed for the life of the session: this text
+// is part of the cached prompt prefix, and re-ordering or re-resolving it
+// mid-session invalidates the Anthropic prompt cache for the whole
+// request -- turning what should be a cheap cache read into a full cache
+// write.
+//
+// Each entry is provider-qualified because the same model ID can be served
+// by several providers (a subscription and an aggregator, say), and
+// resolveTaskModel would otherwise bind whichever enabled provider it
+// happened to scan first.
+func renderInlineModels(models []config.SelectedModel) string {
+	if len(models) == 0 {
+		return "\n\nCall the `list_models` tool to discover the IDs accepted by the `model` parameter.\n"
 	}
-
-	providers = slices.SortedFunc(slices.Values(providers), func(a, b config.ProviderConfig) int {
-		return strings.Compare(a.ID, b.ID)
-	})
 
 	var b strings.Builder
-	b.WriteString("\n\nAvailable models for the `model` parameter, grouped by provider:\n")
-	for _, providerCfg := range providers {
-		if len(providerCfg.Models) == 0 {
-			continue
-		}
-		name := providerCfg.Name
-		if name == "" {
-			name = providerCfg.ID
-		}
-		b.WriteString(fmt.Sprintf("\n%s:\n", name))
-		for _, m := range providerCfg.Models {
-			modelName := m.Name
-			if modelName == "" {
-				modelName = m.ID
-			}
-			b.WriteString(fmt.Sprintf("- %s (%s)\n", m.ID, modelName))
-		}
+	b.WriteString("\n\nCommon values for the `model` parameter (call `list_models` for anything else):\n")
+	for _, m := range models {
+		fmt.Fprintf(&b, "- %s (provider: %s)\n", m.Model, m.Provider)
 	}
 	return b.String()
 }
