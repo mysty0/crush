@@ -210,6 +210,11 @@ type coordinator struct {
 	// that compressd replaced with a summary + compressed text, so the
 	// retrieve_full_output tool can return it if the model asks.
 	retrieveStore *compressd.RetrievalStore
+	// compressCache memoizes those replacements by session and content
+	// hash, so re-compressing the same prior tool result on a later turn
+	// costs nothing. Held on the coordinator rather than in the closure so
+	// it survives rebuilding the agents (e.g. on a model switch).
+	compressCache compressedOutputCache
 
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
