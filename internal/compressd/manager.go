@@ -73,6 +73,11 @@ type Manager struct {
 	mu     sync.Mutex
 	cmd    *exec.Cmd
 	client *Client
+	// cmdDone is closed by the reaper goroutine once it has reaped cmd.
+	// The reaper is the sole caller of cmd.Wait -- exec.Cmd.Wait may not
+	// be called twice, let alone concurrently -- so Close waits on this
+	// instead of calling Wait itself. Non-nil exactly when cmd is.
+	cmdDone chan struct{}
 
 	state      atomic.Value // State
 	socketPath string
@@ -254,17 +259,24 @@ func (m *Manager) startLocked(ctx context.Context) error {
 		return fmt.Errorf("start headroomd: %w", err)
 	}
 
+	done := make(chan struct{})
 	m.cmd = cmd
+	m.cmdDone = done
 	m.state.Store(StateStarting)
 
 	// Reap the process and reset state if it exits on its own (crash,
 	// killed externally, etc) so the next Client call retries a fresh
 	// start rather than reusing a dead client.
+	//
+	// done is closed before taking m.mu so a Close holding the lock can
+	// wait on it without deadlocking.
 	go func() {
 		_ = cmd.Wait()
+		close(done)
 		m.mu.Lock()
 		if m.cmd == cmd {
 			m.cmd = nil
+			m.cmdDone = nil
 			m.client = nil
 			m.state.Store(StateStopped)
 		}
@@ -345,8 +357,14 @@ func (m *Manager) Close(ctx context.Context) error {
 		return nil
 	}
 	err := m.cmd.Process.Kill()
-	_ = m.cmd.Wait()
+	// The reaper goroutine started in startLocked owns cmd.Wait; block
+	// until it has reaped, so Close still returns only once the process
+	// is gone.
+	if m.cmdDone != nil {
+		<-m.cmdDone
+	}
 	m.cmd = nil
+	m.cmdDone = nil
 	m.client = nil
 	m.state.Store(StateStopped)
 	if err != nil && !errors.Is(err, os.ErrProcessDone) {
