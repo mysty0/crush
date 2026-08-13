@@ -23,7 +23,7 @@ func TestToolStopwatchAppearsAfterThreshold(t *testing.T) {
 		Input:    `{"command":"sleep 60"}`,
 		Finished: true,
 	}
-	item := NewBashToolMessageItem(&sty, toolCall, nil, false).(*BashToolMessageItem)
+	item := NewBashToolMessageItem(&sty, toolCall, nil, false, "").(*BashToolMessageItem)
 
 	// The anim's label fades in glyph-by-glyph over its ~1s birth
 	// animation (see anim.maxBirthSteps); advance past it so the label is
@@ -88,7 +88,7 @@ func TestAgentToolBareTrailingSpinnerGetsHint(t *testing.T) {
 	// instead of the "no nested tools yet" pendingTool branch.
 	item.AddNestedTool(NewBashToolMessageItem(&sty, message.ToolCall{
 		ID: "tc-nested", Name: "Bash", Finished: true,
-	}, &message.ToolResult{ToolCallID: "tc-nested", Content: "done"}, false))
+	}, &message.ToolResult{ToolCallID: "tc-nested", Content: "done"}, false, ""))
 	// The label fades in over the anim's ~1s birth animation (see
 	// anim.maxBirthSteps); advance past it before asserting on rendered
 	// text, matching what a real render loop looks like a moment after

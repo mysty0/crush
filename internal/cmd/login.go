@@ -9,7 +9,6 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/claudecode"
-	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/oauth"
@@ -18,7 +17,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 	"github.com/charmbracelet/crush/internal/oauth/hyper"
-	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/crush/internal/workspace"
 	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
 )
@@ -78,17 +77,11 @@ crush login -f copilot
 	},
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, ws, cleanup, err := connectToServer(cmd)
+		ws, cleanup, err := setupWorkspaceWithProgressBar(cmd)
 		if err != nil {
 			return err
 		}
 		defer cleanup()
-
-		progressEnabled := ws.Config.Options.Progress == nil || *ws.Config.Options.Progress
-		if progressEnabled && supportsProgressBar() {
-			_, _ = fmt.Fprintf(os.Stderr, ansi.SetIndeterminateProgressBar)
-			defer func() { _, _ = fmt.Fprintf(os.Stderr, ansi.ResetProgressBar) }()
-		}
 
 		provider := "hyper"
 		if len(args) > 0 {
@@ -100,17 +93,17 @@ crush login -f copilot
 		account, _ := cmd.Flags().GetString("account")
 		switch provider {
 		case "hyper":
-			return loginHyper(c, ws.ID, force)
+			return loginHyper(ws, force)
 		case "copilot", "github", "github-copilot":
-			return loginCopilot(c, ws.ID, force)
+			return loginCopilot(ws, force)
 		case "codex", "openai-codex", "chatgpt":
-			return loginCodex(c, ws.ID, force, device)
+			return loginCodex(ws, force, device)
 		case "claude", "claude-code", "claudecode", "claude-max", "claude-pro":
-			return loginClaudeCode(c, ws.ID, force, manual, account)
+			return loginClaudeCode(ws, force, manual, account)
 		case "gemini", "gemini-cli", "google-gemini-cli":
-			return loginGemini(c, ws.ID, force)
+			return loginGemini(ws, force)
 		case "antigravity", "agy", "google-antigravity":
-			return loginAntigravity(c, ws.ID, force, device)
+			return loginAntigravity(ws, force, device)
 		default:
 			return fmt.Errorf("unknown platform: %s", provider)
 		}
@@ -124,12 +117,12 @@ func init() {
 	loginCmd.Flags().String("account", "", "Name a second (third, ...) Claude subscription account to log in alongside the first")
 }
 
-func loginHyper(c *client.Client, wsID string, force bool) error {
+func loginHyper(ws workspace.Workspace, force bool) error {
 	ctx := getLoginContext()
 
 	if !force {
-		cfg, err := c.GetConfig(ctx, wsID)
-		if err == nil && cfg != nil {
+		cfg := ws.Config()
+		if cfg != nil {
 			if pc, ok := cfg.Providers.Get("hyper"); ok && pc.OAuthToken != nil {
 				fmt.Println("You are already logged in to Hyper.")
 				fmt.Println("Use --force to re-authenticate.")
@@ -147,11 +140,11 @@ func loginHyper(c *client.Client, wsID string, force bool) error {
 	fmt.Println("The following code should be on clipboard already:")
 
 	fmt.Println()
-	fmt.Println(lipgloss.NewStyle().Bold(true).Render(resp.UserCode))
+	lipgloss.Println(lipgloss.NewStyle().Bold(true).Render(resp.UserCode))
 	fmt.Println()
 	fmt.Println("Press enter to open this URL, and then paste it there:")
 	fmt.Println()
-	fmt.Println(lipgloss.NewStyle().Hyperlink(resp.VerificationURL, "id=hyper").Render(resp.VerificationURL))
+	lipgloss.Println(lipgloss.NewStyle().Hyperlink(resp.VerificationURL, "id=hyper").Render(resp.VerificationURL))
 	fmt.Println()
 	waitEnter()
 	if err := browser.OpenURL(resp.VerificationURL); err != nil {
@@ -179,10 +172,7 @@ func loginHyper(c *client.Client, wsID string, force bool) error {
 		return fmt.Errorf("access token is not active")
 	}
 
-	if err := cmp.Or(
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers.hyper.api_key", token.AccessToken),
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers.hyper.oauth", token),
-	); err != nil {
+	if err := ws.SetProviderAPIKey(config.ScopeGlobal, "hyper", token); err != nil {
 		return err
 	}
 
@@ -191,12 +181,12 @@ func loginHyper(c *client.Client, wsID string, force bool) error {
 	return nil
 }
 
-func loginCopilot(c *client.Client, wsID string, force bool) error {
+func loginCopilot(ws workspace.Workspace, force bool) error {
 	loginCtx := getLoginContext()
 
 	if !force {
-		cfg, err := c.GetConfig(loginCtx, wsID)
-		if err == nil && cfg != nil {
+		cfg := ws.Config()
+		if cfg != nil {
 			if pc, ok := cfg.Providers.Get("copilot"); ok && pc.OAuthToken != nil {
 				fmt.Println("You are already logged in to GitHub Copilot.")
 				fmt.Println("Use --force to re-authenticate.")
@@ -224,13 +214,21 @@ func loginCopilot(c *client.Client, wsID string, force bool) error {
 			return err
 		}
 
+		clipboard.WriteText(dc.UserCode)
 		fmt.Println()
-		fmt.Println("Open the following URL and follow the instructions to authenticate with GitHub Copilot:")
+		fmt.Println("The following code should be on clipboard already:")
 		fmt.Println()
-		fmt.Println(lipgloss.NewStyle().Hyperlink(dc.VerificationURI, "id=copilot").Render(dc.VerificationURI))
+		lipgloss.Println(lipgloss.NewStyle().Bold(true).Render(dc.UserCode))
 		fmt.Println()
-		fmt.Println("Code:", lipgloss.NewStyle().Bold(true).Render(dc.UserCode))
+		fmt.Println("Press enter to open this URL and authenticate with GitHub Copilot:")
 		fmt.Println()
+		lipgloss.Println(lipgloss.NewStyle().Hyperlink(dc.VerificationURI, "id=copilot").Render(dc.VerificationURI))
+		fmt.Println()
+		waitEnter()
+		if err := browser.OpenURL(dc.VerificationURI); err != nil {
+			fmt.Println("Could not open the URL. You'll need to manually open the URL in your browser.")
+		}
+
 		fmt.Println("Waiting for authorization...")
 
 		t, err := copilot.PollForToken(loginCtx, dc)
@@ -238,11 +236,11 @@ func loginCopilot(c *client.Client, wsID string, force bool) error {
 			fmt.Println()
 			fmt.Println("GitHub Copilot is unavailable for this account. To signup, go to the following page:")
 			fmt.Println()
-			fmt.Println(lipgloss.NewStyle().Hyperlink(copilot.SignupURL, "id=copilot-signup").Render(copilot.SignupURL))
+			lipgloss.Println(lipgloss.NewStyle().Hyperlink(copilot.SignupURL, "id=copilot-signup").Render(copilot.SignupURL))
 			fmt.Println()
 			fmt.Println("You may be able to request free access if eligible. For more information, see:")
 			fmt.Println()
-			fmt.Println(lipgloss.NewStyle().Hyperlink(copilot.FreeURL, "id=copilot-free").Render(copilot.FreeURL))
+			lipgloss.Println(lipgloss.NewStyle().Hyperlink(copilot.FreeURL, "id=copilot-free").Render(copilot.FreeURL))
 		}
 		if err != nil {
 			return err
@@ -250,10 +248,7 @@ func loginCopilot(c *client.Client, wsID string, force bool) error {
 		token = t
 	}
 
-	if err := cmp.Or(
-		c.SetConfigField(loginCtx, wsID, config.ScopeGlobal, "providers.copilot.api_key", token.AccessToken),
-		c.SetConfigField(loginCtx, wsID, config.ScopeGlobal, "providers.copilot.oauth", token),
-	); err != nil {
+	if err := ws.SetProviderAPIKey(config.ScopeGlobal, "copilot", token); err != nil {
 		return err
 	}
 
@@ -262,12 +257,12 @@ func loginCopilot(c *client.Client, wsID string, force bool) error {
 	return nil
 }
 
-func loginCodex(c *client.Client, wsID string, force, device bool) error {
+func loginCodex(ws workspace.Workspace, force, device bool) error {
 	ctx := getLoginContext()
 
 	if !force {
-		cfg, err := c.GetConfig(ctx, wsID)
-		if err == nil && cfg != nil {
+		cfg := ws.Config()
+		if cfg != nil {
 			if pc, ok := cfg.Providers.Get(codex.ProviderID); ok && pc.OAuthToken != nil {
 				fmt.Println("You are already logged in to OpenAI Codex.")
 				fmt.Println("Use --force to re-authenticate.")
@@ -290,8 +285,8 @@ func loginCodex(c *client.Client, wsID string, force, device bool) error {
 	}
 
 	if err := cmp.Or(
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+codex.ProviderID+".api_key", token.AccessToken),
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+codex.ProviderID+".oauth", token),
+		ws.SetConfigField(config.ScopeGlobal, "providers."+codex.ProviderID+".api_key", token.AccessToken),
+		ws.SetConfigField(config.ScopeGlobal, "providers."+codex.ProviderID+".oauth", token),
 	); err != nil {
 		return err
 	}
@@ -306,7 +301,7 @@ func loginCodex(c *client.Client, wsID string, force, device bool) error {
 // "claude-code" and every named one under "claude-code-<account>" — so
 // several subscriptions can be configured at once and switched between by
 // picking the matching provider in the model list.
-func loginClaudeCode(c *client.Client, wsID string, force, manual bool, account string) error {
+func loginClaudeCode(ws workspace.Workspace, force, manual bool, account string) error {
 	ctx := getLoginContext()
 
 	if account != "" && claudecode.AccountSlug(account) == "" {
@@ -314,8 +309,8 @@ func loginClaudeCode(c *client.Client, wsID string, force, manual bool, account 
 	}
 	providerID := claudecode.ProviderIDForAccount(account)
 
-	cfg, cfgErr := c.GetConfig(ctx, wsID)
-	if !force && cfgErr == nil && cfg != nil {
+	cfg := ws.Config()
+	if !force && cfg != nil {
 		if pc, ok := cfg.Providers.Get(providerID); ok && pc.OAuthToken != nil {
 			fmt.Printf("You are already logged in to Claude as %s.\n", claudeAccountLabel(providerID, pc.OAuthExtra))
 			fmt.Println("Use --force to re-authenticate, or --account <name> to add another account.")
@@ -363,8 +358,8 @@ func loginClaudeCode(c *client.Client, wsID string, force, manual bool, account 
 	}
 
 	if err := cmp.Or(
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+providerID+".oauth", token),
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+providerID+".oauth_extra", extra),
+		ws.SetConfigField(config.ScopeGlobal, "providers."+providerID+".oauth", token),
+		ws.SetConfigField(config.ScopeGlobal, "providers."+providerID+".oauth_extra", extra),
 	); err != nil {
 		return err
 	}
@@ -389,12 +384,12 @@ func claudeAccountLabel(providerID string, extra map[string]string) string {
 	return providerID
 }
 
-func loginGemini(c *client.Client, wsID string, force bool) error {
+func loginGemini(ws workspace.Workspace, force bool) error {
 	ctx := getLoginContext()
 
 	if !force {
-		cfg, err := c.GetConfig(ctx, wsID)
-		if err == nil && cfg != nil {
+		cfg := ws.Config()
+		if cfg != nil {
 			if pc, ok := cfg.Providers.Get(geminicli.ProviderID); ok && pc.OAuthToken != nil {
 				fmt.Println("You are already logged in to Gemini CLI.")
 				fmt.Println("Use --force to re-authenticate.")
@@ -414,9 +409,9 @@ func loginGemini(c *client.Client, wsID string, force bool) error {
 	}
 
 	if err := cmp.Or(
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+geminicli.ProviderID+".api_key", token.AccessToken),
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+geminicli.ProviderID+".oauth", token),
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+geminicli.ProviderID+".oauth_extra", extra),
+		ws.SetConfigField(config.ScopeGlobal, "providers."+geminicli.ProviderID+".api_key", token.AccessToken),
+		ws.SetConfigField(config.ScopeGlobal, "providers."+geminicli.ProviderID+".oauth", token),
+		ws.SetConfigField(config.ScopeGlobal, "providers."+geminicli.ProviderID+".oauth_extra", extra),
 	); err != nil {
 		return err
 	}
@@ -426,12 +421,12 @@ func loginGemini(c *client.Client, wsID string, force bool) error {
 	return nil
 }
 
-func loginAntigravity(c *client.Client, wsID string, force, device bool) error {
+func loginAntigravity(ws workspace.Workspace, force, device bool) error {
 	ctx := getLoginContext()
 
 	if !force {
-		cfg, err := c.GetConfig(ctx, wsID)
-		if err == nil && cfg != nil {
+		cfg := ws.Config()
+		if cfg != nil {
 			if pc, ok := cfg.Providers.Get(antigravity.ProviderID); ok && pc.OAuthToken != nil {
 				fmt.Println("You are already logged in to Google Antigravity.")
 				fmt.Println("Use --force to re-authenticate.")
@@ -466,9 +461,9 @@ func loginAntigravity(c *client.Client, wsID string, force, device bool) error {
 	extra := map[string]string{"project_id": projectID}
 
 	if err := cmp.Or(
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+antigravity.ProviderID+".api_key", token.AccessToken),
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+antigravity.ProviderID+".oauth", token),
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers."+antigravity.ProviderID+".oauth_extra", extra),
+		ws.SetConfigField(config.ScopeGlobal, "providers."+antigravity.ProviderID+".api_key", token.AccessToken),
+		ws.SetConfigField(config.ScopeGlobal, "providers."+antigravity.ProviderID+".oauth", token),
+		ws.SetConfigField(config.ScopeGlobal, "providers."+antigravity.ProviderID+".oauth_extra", extra),
 	); err != nil {
 		return err
 	}

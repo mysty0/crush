@@ -17,7 +17,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
@@ -37,6 +36,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/rewind"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
@@ -46,7 +46,6 @@ import (
 	"github.com/charmbracelet/crush/internal/update"
 	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/exp/charmtone"
 	"github.com/charmbracelet/x/term"
 )
 
@@ -72,6 +71,7 @@ type App struct {
 	Messages    message.Service
 	History     history.Service
 	Permissions permission.Service
+	Questions   question.Service
 	FileTracker filetracker.Service
 	Rewind      rewind.Service
 
@@ -136,6 +136,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		Messages:    messages,
 		History:     files,
 		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
+		Questions:   question.NewService(),
 		FileTracker: filetracker.NewService(q),
 		Rewind:      rewind.NewService(sessions, messages, files),
 		LSPManager:  lsp.NewManager(store),
@@ -169,6 +170,10 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	// (see seedOAuthProviders/config.Load) as a one-time startup toast.
 	go app.reportOAuthModelWarnings(ctx, store.Config().OAuthModelWarnings)
 
+	// Arm initialization synchronously before launching it so WaitForInit
+	// blocks for the in-flight init instead of racing the goroutine and
+	// returning before any MCP tools register.
+	mcp.ArmInit()
 	go mcp.Initialize(ctx, app.Permissions, store)
 
 	// Start herdr integration when running inside a herdr pane.
@@ -207,7 +212,10 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		client.SetDiagnosticsCallback(updateLSPDiagnostics)
 		updateLSPState(name, client.GetServerState(), nil, client, 0)
 	})
-	go app.LSPManager.TrackConfigured()
+
+	// TrackConfigured must run after SetCallback so the callback is already
+	// installed when configured-but-not-yet-started LSPs are announced.
+	go app.LSPManager.TrackConfigured(ctx)
 
 	return app, nil
 }
@@ -291,6 +299,11 @@ func (app *App) resolveSession(ctx context.Context, continueSessionID string, us
 func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt, largeModel, smallModel string, hideSpinner bool, continueSessionID string, useLast bool) error {
 	slog.Info("Running in non-interactive mode")
 
+	// Re-initialize the coder agent without interactive-only tools.
+	if err := app.InitCoderAgentNonInteractive(ctx); err != nil {
+		return fmt.Errorf("failed to reinitialize agent for non-interactive mode: %w", err)
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -302,35 +315,19 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 
 	var (
 		spinner   *format.Spinner
-		stdoutTTY bool
 		stderrTTY bool
-		stdinTTY  bool
 		progress  bool
 	)
 
-	if f, ok := output.(*os.File); ok {
-		stdoutTTY = term.IsTerminal(f.Fd())
-	}
 	stderrTTY = term.IsTerminal(os.Stderr.Fd())
-	stdinTTY = term.IsTerminal(os.Stdin.Fd())
 	progress = app.config.Config().Options.Progress == nil || *app.config.Config().Options.Progress
 
 	if !hideSpinner && stderrTTY {
 		t := styles.ThemeForProvider(app.config.Config().Models[config.SelectedModelTypeLarge].Provider)
 
-		// Detect background color to set the appropriate color for the
-		// spinner's 'Generating...' text. Without this, that text would be
-		// unreadable in light terminals.
-		hasDarkBG := true
-		if f, ok := output.(*os.File); ok && stdinTTY && stdoutTTY {
-			hasDarkBG = lipgloss.HasDarkBackground(os.Stdin, f)
-		}
-		defaultFG := lipgloss.LightDark(hasDarkBG)(charmtone.Pepper, t.WorkingLabelColor)
-
 		spinner = format.NewSpinner(ctx, cancel, anim.Settings{
 			Size:        10,
 			Label:       "Generating",
-			LabelColor:  defaultFG,
 			GradColorA:  t.WorkingGradFromColor,
 			GradColorB:  t.WorkingGradToColor,
 			CycleColors: true,
@@ -346,7 +343,11 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 		}
 	}
 
-	// Wait for MCP initialization to complete before reading MCP tools.
+	// Non-interactive runs get a single shot at the tool palette, so wait for
+	// MCP initialization to settle before reading MCP tools. The coordinator
+	// waits again for the same reason (it is the gate the client/server path
+	// goes through); doing it here too surfaces the failure before we create a
+	// session, and lets the UpdateModels below see every MCP tool.
 	if err := mcp.WaitForInit(ctx); err != nil {
 		return fmt.Errorf("failed to wait for MCP initialization: %w", err)
 	}
@@ -363,6 +364,14 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 
 	if continueSessionID != "" || useLast {
 		slog.Info("Continuing session for non-interactive run", "session_id", sess.ID)
+		// If no explicit model override was requested, restore the
+		// model/provider from the last assistant message in the
+		// session, provided it is still available.
+		if largeModel == "" && smallModel == "" {
+			if err := app.restoreModelFromSession(ctx, sess.ID); err != nil {
+				slog.Warn("Failed to restore model from session", "error", err)
+			}
+		}
 	} else {
 		slog.Info("Created session for non-interactive run", "session_id", sess.ID)
 	}
@@ -467,6 +476,54 @@ func (app *App) UpdateAgentModel(ctx context.Context) error {
 	return app.AgentCoordinator.UpdateModels(ctx)
 }
 
+// restoreModelFromSession reads the last assistant message in the
+// session and, if it used a different provider/model than the current
+// config, overrides the preferred model in-memory (non-persistent)
+// provided the provider/model is still available. This ensures that
+// continuing a session uses the same model that produced the last
+// response.
+func (app *App) restoreModelFromSession(ctx context.Context, sessionID string) error {
+	lastMsg, err := app.Messages.GetLastAssistantMessage(ctx, sessionID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("failed to get last assistant message: %w", err)
+	}
+	if lastMsg.Provider == "" || lastMsg.Model == "" {
+		return nil
+	}
+
+	cfg := app.config.Config()
+	currentLarge := cfg.Models[config.SelectedModelTypeLarge]
+	if currentLarge.Provider == lastMsg.Provider && currentLarge.Model == lastMsg.Model {
+		return nil
+	}
+
+	if !cfg.IsModelAvailable(lastMsg.Provider, lastMsg.Model) {
+		slog.Debug("Skipping model restoration: provider/model not available",
+			"provider", lastMsg.Provider,
+			"model", lastMsg.Model)
+		return nil
+	}
+
+	app.config.OverridePreferredModel(config.SelectedModelTypeLarge, config.SelectedModel{
+		Provider: lastMsg.Provider,
+		Model:    lastMsg.Model,
+	})
+	if _, ok := cfg.Models[config.SelectedModelTypeSmall]; !ok {
+		smallModel := app.GetDefaultSmallModel(lastMsg.Provider)
+		app.config.OverridePreferredModel(config.SelectedModelTypeSmall, smallModel)
+	}
+	if err := app.AgentCoordinator.UpdateModels(ctx); err != nil {
+		return fmt.Errorf("failed to update agent models: %w", err)
+	}
+	slog.Info("Restored model from session",
+		"provider", lastMsg.Provider,
+		"model", lastMsg.Model)
+	return nil
+}
+
 // overrideModelsForNonInteractive parses the model strings and temporarily
 // overrides the model configurations, then rebuilds the agent.
 // Format: "model-name" (searches all providers) or "provider/model-name".
@@ -562,8 +619,10 @@ func (app *App) setupEvents() {
 	app.eventsCtx = ctx
 	setupSubscriber(ctx, app.serviceEventsWG, "sessions", app.Sessions.Subscribe, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "messages", app.Messages.Subscribe, app.events)
-	setupSubscriber(ctx, app.serviceEventsWG, "permissions", app.Permissions.Subscribe, app.events)
-	setupSubscriber(ctx, app.serviceEventsWG, "permissions-notifications", app.Permissions.SubscribeNotifications, app.events)
+	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "permissions", app.Permissions.Subscribe, app.events)
+	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "permissions-notifications", app.Permissions.SubscribeNotifications, app.events)
+	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "question-batches", app.Questions.Subscribe, app.events)
+	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "question-notifications", app.Questions.SubscribeNotifications, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "history", app.History.Subscribe, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "agent-notifications", app.agentNotifications.Subscribe, app.events)
 	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "run-completions", app.runCompletions.Subscribe, app.events)
@@ -643,26 +702,37 @@ func setupSubscriberMustDeliver[T any](
 }
 
 func (app *App) InitCoderAgent(ctx context.Context) error {
+	return app.initCoderAgent(ctx, true)
+}
+
+// InitCoderAgentNonInteractive initializes the coder agent without
+// interactive-only tools (e.g. question).
+func (app *App) InitCoderAgentNonInteractive(ctx context.Context) error {
+	return app.initCoderAgent(ctx, false)
+}
+
+func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 	coderAgentCfg := app.config.Config().Agents[config.AgentCoder]
 	if coderAgentCfg.ID == "" {
 		return fmt.Errorf("coder agent configuration is missing")
 	}
 	var err error
-	app.AgentCoordinator, err = agent.NewCoordinator(
-		ctx,
-		app.config,
-		app.Sessions,
-		app.Messages,
-		app.Permissions,
-		app.History,
-		app.FileTracker,
-		app.LSPManager,
-		app.agentNotifications,
-		app.runCompletions,
-		app.Skills,
-		app.Memory,
-		app.Compressd,
-	)
+	app.AgentCoordinator, err = agent.NewCoordinator(ctx, agent.CoordinatorOptions{
+		Config:      app.config,
+		Sessions:    app.Sessions,
+		Messages:    app.Messages,
+		Permissions: app.Permissions,
+		Questions:   app.Questions,
+		History:     app.History,
+		FileTracker: app.FileTracker,
+		LSPManager:  app.LSPManager,
+		Notify:      app.agentNotifications,
+		RunComplete: app.runCompletions,
+		Skills:      app.Skills,
+		Memory:      app.Memory,
+		Compressd:   app.Compressd,
+		Interactive: interactive,
+	})
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)
 		return err

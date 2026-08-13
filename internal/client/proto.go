@@ -45,8 +45,8 @@ func (c *Client) CreateWorkspace(ctx context.Context, ws proto.Workspace) (*prot
 		return nil, fmt.Errorf("failed to create workspace: %w", err)
 	}
 	defer rsp.Body.Close()
-	if rsp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to create workspace: status code %d", rsp.StatusCode)
+	if err := checkStatus(rsp); err != nil {
+		return nil, fmt.Errorf("failed to create workspace: %w", err)
 	}
 	var created proto.Workspace
 	if err := json.NewDecoder(rsp.Body).Decode(&created); err != nil {
@@ -62,8 +62,8 @@ func (c *Client) GetWorkspace(ctx context.Context, id string) (*proto.Workspace,
 		return nil, fmt.Errorf("failed to get workspace: %w", err)
 	}
 	defer rsp.Body.Close()
-	if rsp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get workspace: status code %d", rsp.StatusCode)
+	if err := checkStatus(rsp); err != nil {
+		return nil, fmt.Errorf("failed to get workspace: %w", err)
 	}
 	var ws proto.Workspace
 	if err := json.NewDecoder(rsp.Body).Decode(&ws); err != nil {
@@ -104,8 +104,8 @@ func (c *Client) SetCurrentSession(ctx context.Context, workspaceID, sessionID s
 		return fmt.Errorf("failed to set current session: %w", err)
 	}
 	defer rsp.Body.Close()
-	if rsp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to set current session: status code %d", rsp.StatusCode)
+	if err := checkStatus(rsp); err != nil {
+		return fmt.Errorf("failed to set current session: %w", err)
 	}
 	return nil
 }
@@ -124,9 +124,9 @@ func (c *Client) SubscribeEvents(ctx context.Context, id string) (<-chan any, er
 		return nil, fmt.Errorf("failed to subscribe to events: %w", err)
 	}
 
-	if rsp.StatusCode != http.StatusOK {
+	if err := checkStatus(rsp); err != nil {
 		rsp.Body.Close()
-		return nil, fmt.Errorf("failed to subscribe to events: status code %d", rsp.StatusCode)
+		return nil, fmt.Errorf("failed to subscribe to events: %w", err)
 	}
 
 	go func() {
@@ -195,6 +195,18 @@ func (c *Client) SubscribeEvents(ctx context.Context, id string) (<-chan any, er
 				if !sendEvent(ctx, events, e) {
 					return
 				}
+			case pubsub.PayloadTypeQuestionRequest:
+				var e pubsub.Event[proto.QuestionRequest]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
+			case pubsub.PayloadTypeQuestionNotification:
+				var e pubsub.Event[proto.QuestionNotification]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
 			case pubsub.PayloadTypeMessage:
 				var e pubsub.Event[proto.Message]
 				_ = json.Unmarshal(p.Payload, &e)
@@ -239,6 +251,12 @@ func (c *Client) SubscribeEvents(ctx context.Context, id string) (<-chan any, er
 				}
 			case pubsub.PayloadTypeBashProgress:
 				var e pubsub.Event[proto.BashProgress]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
+			case pubsub.PayloadTypeUpdateAvailable:
+				var e pubsub.Event[proto.UpdateAvailable]
 				_ = json.Unmarshal(p.Payload, &e)
 				if !sendEvent(ctx, events, e) {
 					return
@@ -316,6 +334,66 @@ func (c *Client) MCPGetStates(ctx context.Context, id string) (map[string]proto.
 	return states, nil
 }
 
+// MCPPendingAuth retrieves the MCP servers awaiting OAuth authentication
+// for a workspace.
+func (c *Client) MCPPendingAuth(ctx context.Context, id string) ([]proto.MCPPendingAuthServer, error) {
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/mcp/pending-auth", id), nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get MCP pending auth: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get MCP pending auth: status code %d", rsp.StatusCode)
+	}
+	var pending []proto.MCPPendingAuthServer
+	if err := json.NewDecoder(rsp.Body).Decode(&pending); err != nil {
+		return nil, fmt.Errorf("failed to decode MCP pending auth: %w", err)
+	}
+	return pending, nil
+}
+
+// MCPAuthURL retrieves the current OAuth authorization URL for a named MCP
+// server, if a flow is in progress.
+func (c *Client) MCPAuthURL(ctx context.Context, id, name string) (string, error) {
+	q := url.Values{"name": []string{name}}
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/mcp/auth-url", id), q, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to get MCP auth URL: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to get MCP auth URL: status code %d", rsp.StatusCode)
+	}
+	var resp proto.MCPAuthResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return "", fmt.Errorf("failed to decode MCP auth URL: %w", err)
+	}
+	return resp.AuthURL, nil
+}
+
+// MCPAuthenticate runs the OAuth flow for a named MCP server. The server's
+// local browser is suppressed; the caller is responsible for surfacing the
+// authorization URL (via polling [Client.MCPPendingAuth] / state events)
+// and opening it on the user's machine. The call blocks until the flow
+// completes, fails, or ctx is cancelled.
+func (c *Client) MCPAuthenticate(ctx context.Context, id, name string) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/mcp/auth", id), nil,
+		jsonBody(proto.MCPNameRequest{Name: name}),
+		http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return fmt.Errorf("failed to authenticate MCP: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		var e proto.Error
+		if err := json.NewDecoder(rsp.Body).Decode(&e); err == nil && e.Message != "" {
+			return fmt.Errorf("failed to authenticate MCP: %s", e.Message)
+		}
+		return fmt.Errorf("failed to authenticate MCP: status code %d", rsp.StatusCode)
+	}
+	return nil
+}
+
 // MCPRefreshPrompts refreshes prompts for a named MCP client.
 func (c *Client) MCPRefreshPrompts(ctx context.Context, id, name string) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/mcp/refresh-prompts", id), nil,
@@ -388,8 +466,8 @@ func (c *Client) GetAgentInfo(ctx context.Context, id string) (*proto.AgentInfo,
 		return nil, fmt.Errorf("failed to get agent status: %w", err)
 	}
 	defer rsp.Body.Close()
-	if rsp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get agent status: status code %d", rsp.StatusCode)
+	if err := checkStatus(rsp); err != nil {
+		return nil, fmt.Errorf("failed to get agent status: %w", err)
 	}
 	var info proto.AgentInfo
 	if err := json.NewDecoder(rsp.Body).Decode(&info); err != nil {
@@ -534,8 +612,9 @@ func (c *Client) AgentReconcileStuckSession(ctx context.Context, id string, sess
 }
 
 // InitiateAgentProcessing triggers agent initialization on the server.
-func (c *Client) InitiateAgentProcessing(ctx context.Context, id string) error {
-	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/init", id), nil, nil, nil)
+func (c *Client) InitiateAgentProcessing(ctx context.Context, id string, interactive bool) error {
+	body := jsonBody(proto.AgentInitRequest{Interactive: interactive})
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/init", id), nil, body, http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
 		return fmt.Errorf("failed to initiate session agent processing: %w", err)
 	}
@@ -648,6 +727,44 @@ func (c *Client) GrantPermission(ctx context.Context, id string, req proto.Permi
 	var resp proto.PermissionGrantResponse
 	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
 		return false, fmt.Errorf("failed to decode grant permission response: %w", err)
+	}
+	return resp.Resolved, nil
+}
+
+// AnswerQuestionBatch submits answers for a batch question on a
+// workspace. Returns true if this call resolved the pending
+// request, false if already resolved by another caller.
+func (c *Client) AnswerQuestionBatch(ctx context.Context, id string, req proto.QuestionAnswer) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/questions/answer", id), nil, jsonBody(req), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return false, fmt.Errorf("failed to answer question batch: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to answer question batch: status code %d", rsp.StatusCode)
+	}
+	var resp proto.QuestionAnswerResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return false, fmt.Errorf("failed to decode answer question batch response: %w", err)
+	}
+	return resp.Resolved, nil
+}
+
+// CancelQuestionBatch cancels the pending question batch on a
+// workspace. Returns true if a question was cancelled, false if
+// none was pending.
+func (c *Client) CancelQuestionBatch(ctx context.Context, id string) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/questions/cancel", id), nil, nil, http.Header{})
+	if err != nil {
+		return false, fmt.Errorf("failed to cancel question batch: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to cancel question batch: status code %d", rsp.StatusCode)
+	}
+	var resp proto.QuestionAnswerResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return false, fmt.Errorf("failed to decode cancel question batch response: %w", err)
 	}
 	return resp.Resolved, nil
 }

@@ -90,6 +90,10 @@ type testWorkspace struct {
 	cfg *config.Config
 }
 
+// WorkingDir is reached via chat.ExtractMessageItems/NewToolMessageItem; the
+// embedded workspace.Workspace is nil, so it must be stubbed here.
+func (w *testWorkspace) WorkingDir() string { return "" }
+
 func (w *testWorkspace) Config() *config.Config {
 	return w.cfg
 }

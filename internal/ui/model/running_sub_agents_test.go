@@ -33,7 +33,7 @@ func newAgenticFetchToolChatItem(t *testing.T, ui *UI, toolCallID string, params
 		ID:    toolCallID,
 		Name:  agenttools.AgenticFetchToolName,
 		Input: string(input),
-	}, nil, false)
+	}, nil, false, "")
 }
 
 // TestRunningSubAgentsIncludesAgenticFetch verifies that an in-flight
@@ -87,7 +87,7 @@ func TestRunningSubAgentsExcludesFinishedAgenticFetch(t *testing.T) {
 		Name:     agenttools.AgenticFetchToolName,
 		Input:    string(input),
 		Finished: true,
-	}, &message.ToolResult{ToolCallID: "fetch-call", Content: "done"}, false)
+	}, &message.ToolResult{ToolCallID: "fetch-call", Content: "done"}, false, "")
 	c.AppendMessages(fetchItem)
 
 	entries := ui.runningSubAgents()
@@ -106,7 +106,7 @@ func TestRunningSubAgentsIgnoresUnrelatedToolCalls(t *testing.T) {
 		ID:    "bash-call",
 		Name:  "Bash",
 		Input: `{"command":"echo hi"}`,
-	}, nil, false)
+	}, nil, false, "")
 	c.AppendMessages(bashItem)
 
 	entries := ui.runningSubAgents()

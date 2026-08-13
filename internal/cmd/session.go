@@ -538,7 +538,7 @@ func loadNestedToolItems(ctx context.Context, svc *sessionServices, sty *styles.
 
 		var nestedTools []chat.ToolMessageItem
 		for _, subMsg := range subMsgPtrs {
-			subItems := chat.ExtractMessageItems(sty, subMsg, subToolResults)
+			subItems := chat.ExtractMessageItems(sty, subMsg, subToolResults, "")
 			for _, subItem := range subItems {
 				if nestedToolItem, ok := subItem.(chat.ToolMessageItem); ok {
 					if compactable, ok := nestedToolItem.(chat.Compactable); ok {
@@ -605,7 +605,7 @@ func outputSessionHuman(ctx context.Context, svc *sessionServices, sess session.
 
 	first := true
 	for _, msg := range msgs {
-		items := chat.ExtractMessageItems(&styles, msg, toolResults)
+		items := chat.ExtractMessageItems(&styles, msg, toolResults, "")
 		loadNestedToolItems(ctx, svc, &styles, items, maxSubAgentDepth)
 		for _, item := range items {
 			if !first {

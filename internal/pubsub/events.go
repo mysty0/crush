@@ -28,6 +28,9 @@ const (
 	PayloadTypeSkillsEvent            PayloadType = "skills_event"
 	PayloadTypeRunComplete            PayloadType = "run_complete"
 	PayloadTypeBashProgress           PayloadType = "bash_progress"
+	PayloadTypeUpdateAvailable        PayloadType = "update_available"
+	PayloadTypeQuestionRequest        PayloadType = "question_batch_request"
+	PayloadTypeQuestionNotification   PayloadType = "question_batch_notification"
 )
 
 // Payload wraps a discriminated JSON payload with a type tag.

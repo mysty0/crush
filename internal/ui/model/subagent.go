@@ -110,7 +110,7 @@ func (m *UI) buildSubAgentMessageItems(msgs []message.Message) []chat.MessageIte
 	toolResultMap := chat.BuildToolResultMap(msgPtrs)
 	items := make([]chat.MessageItem, 0, len(msgs)*2)
 	for _, msg := range msgPtrs {
-		items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
+		items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
 	}
 	return items
 }
@@ -150,7 +150,7 @@ func (m *UI) appendSubAgentMessage(msg message.Message) tea.Cmd {
 		if m.subAgentChat.MessageItem(msg.ID) != nil {
 			return nil
 		}
-		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil)
+		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir())
 		if cmd := m.startAnimClock(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -203,7 +203,7 @@ func (m *UI) updateSubAgentMessage(msg message.Message) tea.Cmd {
 			}
 		}
 		if existingToolItem == nil {
-			items = append(items, chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false))
+			items = append(items, chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false, m.com.Workspace.WorkingDir()))
 		}
 	}
 	if cmd := m.startAnimClock(); cmd != nil {

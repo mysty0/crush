@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -33,6 +34,7 @@ import (
 func NewForTest(ctx context.Context) *App {
 	app := &App{
 		Permissions:        permission.NewPermissionService("", false, nil),
+		Questions:          question.NewService(),
 		globalCtx:          ctx,
 		events:             pubsub.NewBroker[tea.Msg](),
 		serviceEventsWG:    &sync.WaitGroup{},
@@ -43,10 +45,14 @@ func NewForTest(ctx context.Context) *App {
 
 	eventsCtx, cancel := context.WithCancel(ctx)
 	app.eventsCtx = eventsCtx
-	setupSubscriber(eventsCtx, app.serviceEventsWG, "permissions",
+	setupSubscriberMustDeliver(eventsCtx, app.serviceEventsWG, "permissions",
 		app.Permissions.Subscribe, app.events)
-	setupSubscriber(eventsCtx, app.serviceEventsWG, "permissions-notifications",
+	setupSubscriberMustDeliver(eventsCtx, app.serviceEventsWG, "permissions-notifications",
 		app.Permissions.SubscribeNotifications, app.events)
+	setupSubscriberMustDeliver(eventsCtx, app.serviceEventsWG, "question-batches",
+		app.Questions.Subscribe, app.events)
+	setupSubscriberMustDeliver(eventsCtx, app.serviceEventsWG, "question-notifications",
+		app.Questions.SubscribeNotifications, app.events)
 	setupSubscriber(eventsCtx, app.serviceEventsWG, "agent-notifications",
 		app.agentNotifications.Subscribe, app.events)
 	setupSubscriber(eventsCtx, app.serviceEventsWG, "run-completions",
