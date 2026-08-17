@@ -233,6 +233,14 @@ type UI struct {
 	// backgroundNow (background.go).
 	backgroundArmed bool
 
+	// ctrlCArmed tracks whether a Ctrl+C press already asked the current
+	// session to cancel its turn. It arms the escape hatch: if the next
+	// consecutive Ctrl+C still finds the session busy, it opens the quit
+	// dialog instead of cancelling again, so Ctrl+C can never be
+	// swallowed forever by a turn that refuses to end. Any other key
+	// disarms it. See handleKeyPressMsg's quit branch.
+	ctrlCArmed bool
+
 	// cancelRestore holds the prompt to return to the editor after a
 	// no-output cancel finalizes. Set when Escape cancels a turn that has
 	// produced no visible output (thinking is discarded), consumed once the
@@ -2894,6 +2902,13 @@ func (m *UI) openAuthenticationDialog(provider catwalk.Provider, model config.Se
 func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	var cmds []tea.Cmd
 
+	// The Ctrl+C escape hatch only survives back-to-back Ctrl+C presses:
+	// any other key disarms it so it can never go stale and surprise the
+	// user with a quit dialog several turns later.
+	if m.ctrlCArmed && !key.Matches(msg, m.keyMap.Quit) {
+		m.ctrlCArmed = false
+	}
+
 	handleGlobalKeys := func(msg tea.KeyPressMsg) bool {
 		switch {
 		case key.Matches(msg, m.keyMap.Help):
@@ -2967,16 +2982,39 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	}
 
 	if key.Matches(msg, m.keyMap.Quit) && !m.dialog.ContainsDialog(dialog.QuitID) {
-		// While the agent is busy, Ctrl+C cancels the current turn
-		// immediately instead of opening the quit dialog, matching the
-		// "cancel first" Ctrl+C convention. A second Ctrl+C, once idle,
-		// opens the quit dialog as usual.
-		if m.hasSession() && m.isAgentBusy() {
+		// While the session the user is looking at is busy, Ctrl+C
+		// cancels its turn immediately instead of opening the quit
+		// dialog, matching the "cancel first" Ctrl+C convention.
+		//
+		// The gate is deliberately session-scoped. The memoized global
+		// busy state is true whenever any session is running, including
+		// sub-agent child sessions the UI holds no handle on and can
+		// never cancel, so gating on it left Ctrl+C permanently dead
+		// once such a session got stuck. AgentIsSessionBusy is a
+		// synchronous probe (an HTTP round-trip in client/server mode),
+		// which is fine for a single deliberate keypress but must stay
+		// out of per-frame paths.
+		if m.hasSession() && m.isCurrentSessionBusy() {
+			// Escape hatch: if the previous Ctrl+C already asked this
+			// session to cancel and it is still busy, quit instead. Two
+			// consecutive presses always reach the quit dialog, whatever
+			// state the agent machinery is in.
+			if m.ctrlCArmed {
+				m.ctrlCArmed = false
+				if cmd := m.openQuitDialog(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				return tea.Batch(cmds...)
+			}
+			m.ctrlCArmed = true
 			if cmd := m.ctrlCCancelAgent(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 			return tea.Batch(cmds...)
 		}
+
+		// The session is idle, so the press is not a cancel: disarm.
+		m.ctrlCArmed = false
 
 		// If the editor has unsent text, the first Ctrl+C clears it
 		// instead of opening the quit dialog — same "cancel first"
@@ -4606,6 +4644,25 @@ func (m *UI) isAgentBusy() bool {
 		return true
 	}
 	return m.agentBusyCache.val
+}
+
+// isCurrentSessionBusy reports whether the session the user is looking at
+// is running a turn. Unlike isAgentBusy, which serves the memoized global
+// state (true while any session runs, including sub-agent child sessions
+// the UI cannot cancel), this asks about this session specifically.
+//
+// It probes the workspace synchronously, which is an HTTP round-trip in
+// client/server mode, so it must only be used on deliberate, low-frequency
+// paths such as a single Ctrl+C keypress — never per frame or per
+// keystroke.
+func (m *UI) isCurrentSessionBusy() bool {
+	if m.bangCancel != nil {
+		return true
+	}
+	if !m.hasSession() {
+		return false
+	}
+	return m.com.Workspace.AgentIsSessionBusy(m.session.ID)
 }
 
 // hasSession returns true if there is an active session with a valid ID.
