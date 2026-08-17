@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -257,6 +258,15 @@ type coordinator struct {
 	// agent, agentic_fetch, and Workflow tools, so AgentList and
 	// AgentProgress can report on them while they run.
 	subAgents *subAgentRegistry
+
+	// bgCompletions holds the cancel func of every in-flight
+	// backgrounded sub-agent completion delivery, keyed by sub-agent
+	// session. Those turns are started by the coordinator itself
+	// rather than by a user action, so nothing else has a handle on
+	// them; CancelAll uses these to stop them on shutdown. The zero
+	// value is usable -- the map is created on first delivery.
+	bgCompletionsMu sync.Mutex
+	bgCompletions   map[string]context.CancelFunc
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -1725,7 +1735,8 @@ func (c *coordinator) CancelKeepQueue(sessionID string) {
 // coder agent, every task/sub-agent instance dispatched via the
 // "agent" tool (each mode/model combination runs on its own
 // [SessionAgent], separate from currentAgent), every background
-// workflow, and every scheduled task. Called on app shutdown so
+// workflow, every scheduled task, and every pending backgrounded
+// sub-agent completion delivery. Called on app shutdown so
 // nothing is left running headless after the process exits — without
 // this, an in-flight sub-agent, workflow, or scheduled task is simply
 // abandoned, leaving its session with an unfinished tool call that
@@ -1743,6 +1754,7 @@ func (c *coordinator) CancelAll() {
 	for _, sched := range c.schedules.listAll() {
 		c.schedules.stop(sched.ID, "canceled")
 	}
+	c.cancelBackgroundCompletions()
 }
 
 func (c *coordinator) ClearQueue(sessionID string) {
@@ -2423,16 +2435,184 @@ func (c *coordinator) completeSubAgentBackgrounded(params subAgentParams, subSes
 	}
 	c.lingerSubAgentRemoval(subSession.ID)
 
-	// Queue the completion back into the coder session. Coordinator.Run
-	// enqueues behind any active turn or pending user messages, so this
-	// never interrupts the user -- it fires when the session is idle,
-	// exactly like a typed follow-up (see finishWorkflow for the same
-	// pattern with background workflows).
-	go func() {
-		if _, runErr := c.Run(context.Background(), params.SessionID, prompt); runErr != nil {
-			slog.Warn("Failed to queue backgrounded sub-agent completion", "session", params.SessionID, "error", runErr)
+	// Deliver the completion. This deliberately does not queue a coder
+	// turn into params.SessionID unconditionally: that session is
+	// whichever session dispatched the sub-agent, which for a nested
+	// dispatch is itself a sub-agent session (see
+	// deliverBackgroundedCompletion).
+	go c.deliverBackgroundedCompletion(params.SessionID, subSession.ID, prompt)
+}
+
+// maxSessionAncestorHops bounds the parent-chain walk in
+// topLevelAncestor. Real nesting is only ever a couple of levels deep
+// (conversation -> sub-agent -> agentic_fetch), so a chain longer than
+// this means a corrupt or cyclic parent link and is treated as
+// unresolvable rather than walked forever.
+const maxSessionAncestorHops = 8
+
+// backgroundCompletionRoute says where a finished backgrounded
+// sub-agent's completion text should be delivered.
+type backgroundCompletionRoute struct {
+	// TopLevelSessionID is the user-facing conversation the completion
+	// is queued into as a follow-up turn.
+	TopLevelSessionID string
+	// SteerSessionID, when set, is the sub-agent session that
+	// dispatched this sub-agent and is still running its own turn. The
+	// completion is injected into that turn first, and only falls back
+	// to TopLevelSessionID if the turn ended in the meantime.
+	SteerSessionID string
+	// Nested is true when the dispatching session was a sub-agent
+	// session rather than a top-level conversation, so a completion
+	// queued into TopLevelSessionID can say where it came from.
+	Nested bool
+}
+
+// routeBackgroundCompletion decides where the completion of a
+// backgrounded sub-agent dispatched from dispatchSessionID goes.
+//
+// A top-level (user-facing) session takes the completion as a follow-up
+// turn, which is what a backgrounded sub-agent has always done. A
+// sub-agent session must not: coordinator.Run hands the turn to the
+// coder agent, which would then hold a sub-agent session among its
+// active requests, where no user-facing cancel can reach it -- the
+// whole app then reads as busy forever. Nested dispatches (a sub-agent
+// backgrounding work of its own, e.g. agentic_fetch) are steered into
+// the still-running sub-agent turn instead, or, once that turn has
+// ended, attributed and queued into the nearest top-level ancestor.
+func (c *coordinator) routeBackgroundCompletion(ctx context.Context, dispatchSessionID string) (backgroundCompletionRoute, error) {
+	sess, err := c.sessions.Get(ctx, dispatchSessionID)
+	if err != nil {
+		return backgroundCompletionRoute{}, fmt.Errorf("look up dispatching session %q: %w", dispatchSessionID, err)
+	}
+	if sess.ParentSessionID == "" {
+		return backgroundCompletionRoute{TopLevelSessionID: dispatchSessionID}, nil
+	}
+
+	topLevel, err := c.topLevelAncestor(ctx, sess)
+	if err != nil {
+		return backgroundCompletionRoute{}, err
+	}
+	route := backgroundCompletionRoute{TopLevelSessionID: topLevel, Nested: true}
+	if c.subAgentSessionIsRunning(dispatchSessionID) {
+		route.SteerSessionID = dispatchSessionID
+	}
+	return route, nil
+}
+
+// topLevelAncestor walks the parent chain from sess up to the session
+// that has no parent -- the user-facing conversation every sub-agent,
+// workflow, and nested dispatch below it ultimately belongs to.
+func (c *coordinator) topLevelAncestor(ctx context.Context, sess session.Session) (string, error) {
+	start := sess.ID
+	for range maxSessionAncestorHops {
+		if sess.ParentSessionID == "" {
+			return sess.ID, nil
 		}
-	}()
+		parent, err := c.sessions.Get(ctx, sess.ParentSessionID)
+		if err != nil {
+			return "", fmt.Errorf("look up parent %q of session %q: %w", sess.ParentSessionID, sess.ID, err)
+		}
+		sess = parent
+	}
+	return "", fmt.Errorf("session %q has no top-level ancestor within %d levels", start, maxSessionAncestorHops)
+}
+
+// subAgentSessionIsRunning reports whether some task-agent instance is
+// currently running a turn for sessionID.
+func (c *coordinator) subAgentSessionIsRunning(sessionID string) bool {
+	if c.taskAgents == nil {
+		return false
+	}
+	for taskAgent := range c.taskAgents.Seq() {
+		if taskAgent != nil && taskAgent.IsSessionBusy(sessionID) {
+			return true
+		}
+	}
+	return false
+}
+
+// deliverBackgroundedCompletion delivers a finished backgrounded
+// sub-agent's completion text to whichever session can actually run it
+// (see routeBackgroundCompletion). It is called on its own goroutine
+// because the delivered turn only starts once the target session goes
+// idle, which can take arbitrarily long.
+//
+// If nothing can be resolved the completion is not re-queued anywhere,
+// but it is never lost: the sub-agent's own session keeps its full
+// transcript, and the failure is logged.
+func (c *coordinator) deliverBackgroundedCompletion(dispatchSessionID, subSessionID, prompt string) {
+	ctx, release := c.beginBackgroundCompletion(subSessionID)
+	defer release()
+
+	route, err := c.routeBackgroundCompletion(ctx, dispatchSessionID)
+	if err != nil {
+		slog.Warn("Could not route backgrounded sub-agent completion; it stays readable in the sub-agent's own session",
+			"sub_session", subSessionID, "dispatching_session", dispatchSessionID, "error", err)
+		return
+	}
+
+	if route.SteerSessionID != "" {
+		err := c.SendToSubAgent(ctx, route.SteerSessionID, prompt)
+		switch {
+		case err == nil:
+			return
+		case errors.Is(err, errSubAgentNotRunning), errors.Is(err, errTaskAgentNotConfigured):
+			// The dispatching sub-agent's turn ended between routing
+			// and delivery -- fall through to its conversation.
+		default:
+			slog.Warn("Failed to deliver backgrounded sub-agent completion to the sub-agent that dispatched it",
+				"sub_session", subSessionID, "dispatching_session", route.SteerSessionID, "error", err)
+			return
+		}
+	}
+
+	if route.Nested {
+		prompt = fmt.Sprintf(
+			"A sub-agent (session %s) started background work that only finished after the sub-agent's own turn ended, so the result is reported here instead.\n\n%s",
+			dispatchSessionID, prompt,
+		)
+	}
+
+	// Coordinator.Run enqueues behind any active turn or pending user
+	// messages, so this never interrupts the user -- it fires when the
+	// session is idle, exactly like a typed follow-up (see
+	// finishWorkflow for the same pattern with background workflows).
+	if _, err := c.Run(ctx, route.TopLevelSessionID, prompt); err != nil {
+		slog.Warn("Failed to queue backgrounded sub-agent completion", "session", route.TopLevelSessionID, "error", err)
+	}
+}
+
+// beginBackgroundCompletion returns the context a backgrounded
+// completion delivery runs under, plus the func that releases it. The
+// context is cancelable and registered on the coordinator so CancelAll
+// can stop a delivery that has not started its turn yet (blocked on
+// model refresh or on interactive reauth, say) instead of leaving it
+// running headless past shutdown. Once the turn itself is under way,
+// the agent's own active-request cancel takes over.
+func (c *coordinator) beginBackgroundCompletion(subSessionID string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c.bgCompletionsMu.Lock()
+	if c.bgCompletions == nil {
+		c.bgCompletions = make(map[string]context.CancelFunc)
+	}
+	c.bgCompletions[subSessionID] = cancel
+	c.bgCompletionsMu.Unlock()
+	return ctx, func() {
+		c.bgCompletionsMu.Lock()
+		delete(c.bgCompletions, subSessionID)
+		c.bgCompletionsMu.Unlock()
+		cancel()
+	}
+}
+
+// cancelBackgroundCompletions cancels every in-flight backgrounded
+// sub-agent completion delivery.
+func (c *coordinator) cancelBackgroundCompletions() {
+	c.bgCompletionsMu.Lock()
+	defer c.bgCompletionsMu.Unlock()
+	for _, cancel := range c.bgCompletions {
+		cancel()
+	}
 }
 
 // subAgentLingerAfterFinish is how long a finished sub-agent remains
