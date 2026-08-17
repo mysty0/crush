@@ -180,12 +180,12 @@ func TestAgentListTool(t *testing.T) {
 	env := testEnv(t)
 	coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{ID: "test-provider"})
 
-	t.Run("no sub-agents", func(t *testing.T) {
+	t.Run("no background tasks", func(t *testing.T) {
 		t.Parallel()
 		ctx := context.WithValue(t.Context(), tools.SessionIDContextKey, "empty-parent")
 		resp, err := coord.agentListTool().Run(ctx, fantasy.ToolCall{ID: "call-1", Input: "{}"})
 		require.NoError(t, err)
-		assert.Contains(t, resp.Content, "No sub-agents")
+		assert.Contains(t, resp.Content, "No background tasks")
 	})
 
 	t.Run("lists a registered sub-agent", func(t *testing.T) {
@@ -220,13 +220,17 @@ func TestAgentProgressTool(t *testing.T) {
 	env := testEnv(t)
 	coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{ID: "test-provider"})
 
-	t.Run("unknown session returns an error response", func(t *testing.T) {
+	t.Run("unrecognized id explains itself without claiming failure", func(t *testing.T) {
 		t.Parallel()
 		input, err := json.Marshal(AgentProgressParams{SessionID: "nope"})
 		require.NoError(t, err)
 		resp, err := coord.agentProgressTool().Run(t.Context(), fantasy.ToolCall{ID: "call-1", Input: string(input)})
 		require.NoError(t, err)
-		assert.True(t, resp.IsError)
+		// Not an error response: an ID that matches nothing is a lookup
+		// miss, and reporting it as a failure invites the caller to
+		// redo work that may already be finished. See
+		// TestAgentProgressUnknownIDExplainsTheFormat.
+		assert.Contains(t, resp.Content, "No background task or stored session")
 	})
 
 	t.Run("missing session_id is an error response", func(t *testing.T) {
@@ -260,5 +264,75 @@ func TestAgentProgressTool(t *testing.T) {
 		assert.Contains(t, resp.Content, "investigate the bug")
 		assert.Contains(t, resp.Content, "test-provider/test-model")
 		assert.Contains(t, resp.Content, "running")
+	})
+}
+
+// TestAgentStatusToolsSeeWorkflows guards the reason these tools read
+// the unified task registry: the Workflow tool hands the model a
+// session ID from the workflow registry, and both status tools must
+// resolve it. They previously read only the sub-agent registry, so a
+// running workflow was invisible and its ID looked bogus.
+func TestAgentStatusToolsSeeWorkflows(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{ID: "test-provider"})
+
+	coord.workflows.register(WorkflowStatus{
+		SessionID:       "wf-1",
+		ParentSessionID: "parent-1",
+		ToolCallID:      "call-1",
+		Name:            "deep-research",
+		Args:            "why is the sky blue",
+		State:           WorkflowRunning,
+		StartedAt:       time.Now(),
+	}, func() {})
+	coord.workflows.setPhase("wf-1", "search")
+	coord.workflows.recordAgent("wf-1", WorkflowAgentStatus{
+		SessionID: "wf-1-agent-0",
+		Label:     "search:academic",
+		Phase:     "search",
+		Model:     "test-model",
+		StartedAt: time.Now(),
+	})
+
+	t.Run("AgentList includes the workflow", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.WithValue(t.Context(), tools.SessionIDContextKey, "parent-1")
+		resp, err := coord.agentListTool().Run(ctx, fantasy.ToolCall{ID: "call-1", Input: "{}"})
+		require.NoError(t, err)
+		assert.Contains(t, resp.Content, "wf-1")
+		assert.Contains(t, resp.Content, WorkflowToolName)
+		assert.Contains(t, resp.Content, "deep-research")
+	})
+
+	t.Run("AgentProgress resolves the workflow session and reports phases", func(t *testing.T) {
+		t.Parallel()
+		input, err := json.Marshal(AgentProgressParams{SessionID: "wf-1"})
+		require.NoError(t, err)
+		resp, err := coord.agentProgressTool().Run(t.Context(), fantasy.ToolCall{ID: "call-1", Input: string(input)})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		assert.Contains(t, resp.Content, "deep-research")
+		assert.Contains(t, resp.Content, "search")
+		assert.Contains(t, resp.Content, "search:academic")
+		assert.Contains(t, resp.Content, "1 dispatched")
+	})
+
+	t.Run("workflow-dispatched sub-agents are not listed as top-level tasks", func(t *testing.T) {
+		t.Parallel()
+		coord.subAgents.register(SubAgentStatus{
+			SessionID:       "wf-1-agent-0",
+			ParentSessionID: "wf-1",
+			ToolName:        WorkflowToolName,
+			Label:           "search:academic",
+			State:           SubAgentRunning,
+			StartedAt:       time.Now(),
+		})
+
+		ctx := context.WithValue(t.Context(), tools.SessionIDContextKey, "parent-1")
+		resp, err := coord.agentListTool().Run(ctx, fantasy.ToolCall{ID: "call-1", Input: "{}"})
+		require.NoError(t, err)
+		assert.NotContains(t, resp.Content, "wf-1-agent-0")
 	})
 }

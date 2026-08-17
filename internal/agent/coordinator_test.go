@@ -76,6 +76,8 @@ func newTestCoordinator(t *testing.T, env fakeEnv, providerID string, providerCf
 		sessions:  env.sessions,
 		messages:  env.messages,
 		subAgents: newSubAgentRegistry(),
+		workflows: newWorkflowRegistry(),
+		schedules: newScheduleRegistry(),
 		// currentAgent is a minimal non-nil stand-in so a backgrounded
 		// sub-agent's completion (which queues a follow-up via
 		// coordinator.Run -> UpdateModels -> currentAgent.SetModels)

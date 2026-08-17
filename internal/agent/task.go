@@ -166,3 +166,21 @@ func (c *coordinator) Tasks(parentSessionID string) []TaskStatus {
 	})
 	return out
 }
+
+// taskByID returns the unified status of one background task by its
+// ID -- a sub-agent or workflow session ID, or a scheduled task ID --
+// whichever registry owns it. Task IDs are opaque to the caller, so a
+// single lookup keyed only by ID is what lets a holder of an ID resolve
+// it without already knowing its kind.
+func (c *coordinator) taskByID(id string) (TaskStatus, bool) {
+	if sa, ok := c.subAgents.get(id); ok {
+		return sa.asTaskStatus(), true
+	}
+	if wf, ok := c.workflows.get(id); ok {
+		return wf.asTaskStatus(), true
+	}
+	if s, ok := c.schedules.get(id); ok {
+		return s.asTaskStatus(), true
+	}
+	return TaskStatus{}, false
+}
