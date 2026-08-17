@@ -266,8 +266,16 @@ func NewAssistantMessageItem(sty *styles.Styles, message *message.Message) Messa
 		GradColorB:  sty.WorkingGradToColor,
 		LabelColor:  sty.WorkingLabelColor,
 		CycleColors: true,
+		// The loader shows two durations side by side: the label's own
+		// stopwatch (see withElapsed), which times the current step, and
+		// this one, which times the whole turn. Name the total so the
+		// pair cannot be misread as one number contradicting the other.
 		Suffix: func() string {
-			return common.Elapsed()
+			elapsed := common.Elapsed()
+			if elapsed == "" {
+				return ""
+			}
+			return "total " + elapsed
 		},
 		SuffixColor: sty.WorkingTimerColor,
 	})
@@ -713,14 +721,11 @@ func (a *AssistantMessageItem) withElapsed(hint string) string {
 	return hint
 }
 
-// formatElapsed renders a whole-second elapsed duration compactly: "12s" under
-// a minute, "1m05s" at or above one minute.
+// formatElapsed renders a whole-second elapsed duration compactly. It
+// delegates to the shared formatter so a step stopwatch and the turn
+// total rendered beside it always use the same spelling.
 func formatElapsed(d time.Duration) string {
-	d = d.Round(time.Second)
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d/time.Second))
-	}
-	return fmt.Sprintf("%dm%02ds", int(d/time.Minute), int((d%time.Minute)/time.Second))
+	return common.FormatElapsed(d)
 }
 
 // retryLabel builds the spinner label shown while a provider request is being
