@@ -43,6 +43,19 @@ Common shell builtins and core utils available on Windows.
   * Git operations
   * File operations
   * Short-lived scripts
+- IMPORTANT: Do not block a turn on a command for more than ~4 minutes.
+  Waiting keeps the turn open, and the provider's prompt cache expires
+  after 5 minutes idle, so the entire conversation is re-sent and
+  re-cached on the next request -- at large context sizes that is
+  hundreds of thousands of tokens per wait, repeated for every wait.
+  * To wait for something, poll in steps of at most 240s rather than
+    one long sleep: `sleep 240` twice costs nothing, `sleep 400` once
+    discards the whole cache.
+  * Never raise `auto_background_after` above 240 to keep a long
+    command in the foreground. Let it move to the background and check
+    it with job_output instead.
+  * This applies to any long wait, not just `sleep`: a slow build or
+    test suite is better backgrounded and polled than waited on.
 </background_execution>
 
 <git_message_quality>
