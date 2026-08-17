@@ -1322,7 +1322,21 @@ func (c *coordinator) debugHTTPClient() *http.Client {
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
 	var opts []anthropic.Option
 
+	// A subscription account carries no API key: it authenticates with a
+	// per-request OAuth bearer injected by AuthTransport below. Resolved
+	// here because that changes which credential the SDK is handed.
+	oauthSubscription := claudecode.IsProviderID(providerID)
+
 	switch {
+	case oauthSubscription:
+		// NOTE: Prevent the SDK from picking up the API key from env.
+		os.Setenv("ANTHROPIC_API_KEY", "")
+		// The SDK refuses to send a request when it can find no
+		// credential of its own, and it decides that before any
+		// transport runs -- so the real bearer arrives too late to
+		// satisfy it. The placeholder keeps the request alive and is
+		// stripped again by AuthTransport, so it is never transmitted.
+		opts = append(opts, anthropic.WithAPIKey(claudecode.PlaceholderAPIKey))
 	case strings.HasPrefix(apiKey, "Bearer "):
 		// NOTE: Prevent the SDK from picking up the API key from env.
 		os.Setenv("ANTHROPIC_API_KEY", "")
@@ -1358,9 +1372,7 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 	// resolved per provider id: accounts added with `crush login
 	// claude-code` draw on their stored token, while the default provider
 	// keeps reading ~/.claude/.credentials.json.
-	oauthSubscription := claudecode.IsProviderID(providerID)
 	if oauthSubscription {
-		os.Setenv("ANTHROPIC_API_KEY", "")
 		base = &claudecode.AuthTransport{Base: base, Source: c.cfg.ClaudeCodeSource(providerID)}
 	}
 	// The subscription-OAuth endpoint requires the Claude Code identity as
