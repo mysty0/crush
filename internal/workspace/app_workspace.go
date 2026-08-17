@@ -329,6 +329,7 @@ func bashJobTaskStatus(j shell.BackgroundJobStatus) agent.TaskStatus {
 		Label:        label,
 		State:        state,
 		StartedAt:    j.StartedAt,
+		FinishedAt:   j.CompletedAt,
 		Detail:       j,
 	}
 }
