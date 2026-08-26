@@ -236,7 +236,7 @@ func initClient(ctx context.Context, cfg *config.ConfigStore, name string, m con
 	updateState(name, StateStarting, nil, nil, Counts{})
 
 	// createSession handles its own timeout internally.
-	session, err := createSession(ctx, name, m, resolver)
+	session, err := createSession(ctx, name, m, resolver, cfg)
 	if err != nil {
 		return err
 	}
@@ -311,7 +311,7 @@ func getOrRenewClient(ctx context.Context, cfg *config.ConfigStore, name string)
 	}
 	updateState(name, StateError, maybeTimeoutErr(err, timeout), nil, state.Counts)
 
-	sess, err = createSession(ctx, name, m, cfg.Resolver())
+	sess, err = createSession(ctx, name, m, cfg.Resolver(), cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -348,12 +348,12 @@ func updateState(name string, state State, err error, client *ClientSession, cou
 	})
 }
 
-func createSession(ctx context.Context, name string, m config.MCPConfig, resolver config.VariableResolver) (*ClientSession, error) {
+func createSession(ctx context.Context, name string, m config.MCPConfig, resolver config.VariableResolver, store *config.ConfigStore) (*ClientSession, error) {
 	timeout := mcpTimeout(m)
 	mcpCtx, cancel := context.WithCancel(ctx)
 	cancelTimer := time.AfterFunc(timeout, cancel)
 
-	transport, err := createTransport(mcpCtx, m, resolver)
+	transport, err := createTransport(mcpCtx, name, m, resolver, store)
 	if err != nil {
 		updateState(name, StateError, err, nil, Counts{})
 		slog.Error("Error creating MCP client", "error", err, "name", name)
@@ -437,7 +437,7 @@ func maybeTimeoutErr(err error, timeout time.Duration) error {
 	return err
 }
 
-func createTransport(ctx context.Context, m config.MCPConfig, resolver config.VariableResolver) (mcp.Transport, error) {
+func createTransport(ctx context.Context, name string, m config.MCPConfig, resolver config.VariableResolver, store *config.ConfigStore) (mcp.Transport, error) {
 	switch m.Type {
 	case config.MCPStdio:
 		command, err := resolver.ResolveValue(m.Command)
@@ -477,10 +477,14 @@ func createTransport(ctx context.Context, m config.MCPConfig, resolver config.Va
 				headers: headers,
 			},
 		}
-		return &mcp.StreamableClientTransport{
+		transport := &mcp.StreamableClientTransport{
 			Endpoint:   url,
 			HTTPClient: client,
-		}, nil
+		}
+		if m.OAuth != nil {
+			transport.OAuthHandler = newOAuthHandler(name, url, store)
+		}
+		return transport, nil
 	case config.MCPSSE:
 		url, err := m.ResolvedURL(resolver)
 		if err != nil {
@@ -488,6 +492,9 @@ func createTransport(ctx context.Context, m config.MCPConfig, resolver config.Va
 		}
 		if strings.TrimSpace(url) == "" {
 			return nil, fmt.Errorf("mcp sse config requires a non-empty 'url' field")
+		}
+		if m.OAuth != nil {
+			return nil, fmt.Errorf("mcp sse config does not support oauth; use the http transport instead")
 		}
 		headers, err := m.ResolvedHeaders(resolver)
 		if err != nil {

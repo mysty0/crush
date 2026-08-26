@@ -193,6 +193,15 @@ const (
 	MCPHttp  MCPType = "http"
 )
 
+const (
+	// defaultMCPCallbackPort is the loopback port used for the OAuth
+	// redirect URI when an MCP server's config does not pin one.
+	defaultMCPCallbackPort = 8085
+	// defaultMCPCallbackPath is the redirect URI path used when an MCP
+	// server's config does not pin one.
+	defaultMCPCallbackPath = "/callback"
+)
+
 type MCPConfig struct {
 	Command       string            `json:"command,omitempty" jsonschema:"description=Command to execute for stdio MCP servers,example=npx"`
 	Env           map[string]string `json:"env,omitempty" jsonschema:"description=Environment variables to set for the MCP server"`
@@ -211,6 +220,74 @@ type MCPConfig struct {
 	// omitted from the outgoing request rather than sent as
 	// "Header:".
 	Headers map[string]string `json:"headers,omitempty" jsonschema:"description=HTTP headers for HTTP/SSE MCP servers"`
+
+	// OAuth configures OAuth 2.0 authorization for HTTP/SSE MCP
+	// servers, as described by the MCP authorization spec. When set,
+	// Crush discovers the authorization server from the MCP server's
+	// protected-resource metadata (RFC 9728) and attaches a bearer
+	// token to every request, refreshing it as needed. Run
+	// "crush mcp login <name>" to complete the initial browser flow.
+	OAuth *MCPOAuthConfig `json:"oauth,omitempty" jsonschema:"description=OAuth 2.0 configuration for HTTP/SSE MCP servers"`
+}
+
+// MCPOAuthConfig holds the OAuth 2.0 client configuration, and the
+// resulting token, for a single MCP server. Crush only supports
+// preregistered clients: the authorization servers that matter here
+// (notably Google) do not offer dynamic client registration, so the
+// user creates the OAuth client themselves and supplies its
+// credentials.
+type MCPOAuthConfig struct {
+	// ClientID is the OAuth client identifier. Required.
+	ClientID string `json:"client_id,omitempty" jsonschema:"description=OAuth client ID for this MCP server"`
+
+	// ClientSecret is the OAuth client secret, for confidential
+	// clients. Values run through shell expansion, so $VAR and
+	// $(cmd) work and the secret need not be stored in the config
+	// file itself. Leave empty for public clients using PKCE only.
+	ClientSecret string `json:"client_secret,omitempty" jsonschema:"description=OAuth client secret; supports $VAR and $(cmd) expansion"`
+
+	// Scopes are the OAuth scopes to request. When empty, Crush
+	// requests the scopes advertised by the server's
+	// protected-resource metadata. Setting this explicitly is
+	// recommended: a server may advertise broader scopes than the
+	// ones needed, and requesting a scope the OAuth consent screen
+	// does not list will fail.
+	Scopes []string `json:"scopes,omitempty" jsonschema:"description=OAuth scopes to request; defaults to the scopes advertised by the server"`
+
+	// CallbackPort is the loopback port for the redirect URI. It must
+	// match a redirect URI registered with the authorization server,
+	// so it is used verbatim with no fallback to an ephemeral port.
+	// Defaults to 8085.
+	CallbackPort int `json:"callback_port,omitempty" jsonschema:"description=Loopback port for the OAuth redirect URI,default=8085"`
+
+	// CallbackPath is the path of the redirect URI. It must likewise
+	// match what is registered. Defaults to "/callback".
+	CallbackPath string `json:"callback_path,omitempty" jsonschema:"description=Path of the OAuth redirect URI,default=/callback"`
+
+	// AuthServerMetadataURL pins the authorization server metadata
+	// document, skipping discovery. Only needed for servers that do
+	// not publish protected-resource metadata (RFC 9728).
+	AuthServerMetadataURL string `json:"auth_server_metadata_url,omitempty" jsonschema:"description=Override for authorization server metadata discovery,format=uri"`
+
+	// TokenURL is the token endpoint recorded at login time so that
+	// refreshes do not have to repeat discovery. Managed by Crush.
+	TokenURL string `json:"token_url,omitempty" jsonschema:"description=Token endpoint recorded at login; managed by Crush"`
+
+	// Token is the OAuth token obtained by "crush mcp login".
+	// Managed by Crush.
+	Token *oauth.Token `json:"token,omitempty" jsonschema:"description=OAuth token for this MCP server; managed by Crush"`
+}
+
+// CallbackPortOrDefault returns the configured loopback callback port,
+// or the default when unset.
+func (o MCPOAuthConfig) CallbackPortOrDefault() int {
+	return cmp.Or(o.CallbackPort, defaultMCPCallbackPort)
+}
+
+// CallbackPathOrDefault returns the configured redirect URI path, or
+// the default when unset.
+func (o MCPOAuthConfig) CallbackPathOrDefault() string {
+	return cmp.Or(o.CallbackPath, defaultMCPCallbackPath)
 }
 
 type LSPConfig struct {
