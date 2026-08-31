@@ -550,6 +550,10 @@ func (w *AppWorkspace) RefreshOAuthToken(ctx context.Context, scope config.Scope
 	return w.store.RefreshOAuthToken(ctx, scope, providerID)
 }
 
+func (w *AppWorkspace) ReloadConfigIfStale(ctx context.Context) (bool, error) {
+	return w.store.ReloadIfStale(ctx)
+}
+
 // -- Project lifecycle --
 
 func (w *AppWorkspace) ProjectNeedsInitialization() (bool, error) {

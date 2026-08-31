@@ -683,6 +683,13 @@ func (w *ClientWorkspace) RefreshOAuthToken(ctx context.Context, scope config.Sc
 	return err
 }
 
+// ReloadConfigIfStale is a no-op in client/server mode: the server owns
+// config loading, so an out-of-process edit (e.g. `crush login` run on
+// the server host) is picked up there rather than by any one client.
+func (w *ClientWorkspace) ReloadConfigIfStale(_ context.Context) (bool, error) {
+	return false, nil
+}
+
 // -- Project lifecycle --
 
 func (w *ClientWorkspace) ProjectNeedsInitialization() (bool, error) {

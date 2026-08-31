@@ -1210,6 +1210,30 @@ func (s *ConfigStore) ReloadFromDisk(ctx context.Context) error {
 	return s.reloadFromDiskLocked(ctx)
 }
 
+// ReloadIfStale reloads config from disk only if a tracked config file has
+// changed since the last snapshot (see ConfigStaleness). This lets callers
+// cheaply pick up out-of-process edits -- e.g. a `crush login` run from
+// another terminal while this instance is already running -- without
+// paying the cost of a full reload (which re-queries provider model
+// lists) when nothing changed. Returns whether a reload happened.
+func (s *ConfigStore) ReloadIfStale(ctx context.Context) (bool, error) {
+	if !s.ConfigStaleness().Dirty {
+		return false, nil
+	}
+	if s.workingDir == "" {
+		return false, fmt.Errorf("cannot reload: working directory not set")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	// Re-check under the lock: another goroutine may have already
+	// reloaded (and refreshed the snapshot) between the check above and
+	// here.
+	if !s.ConfigStaleness().Dirty {
+		return false, nil
+	}
+	return true, s.reloadFromDiskLocked(ctx)
+}
+
 // reloadFromDiskLocked performs the actual reload. Caller must hold writeMu.
 func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 	// Migrate deprecated disable_notifications before reloading config.

@@ -385,6 +385,99 @@ func TestReloadFromDisk_UsesNewConfigValues(t *testing.T) {
 	require.Equal(t, "claude-3", store.config.Models[SelectedModelTypeLarge].Model)
 }
 
+// TestReloadIfStale_SkipsWhenUnchanged verifies that ReloadIfStale is a
+// no-op (and does not touch in-memory config) when no tracked config file
+// has changed since the last snapshot.
+func TestReloadIfStale_SkipsWhenUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "crush.json")
+
+	t.Setenv("CRUSH_GLOBAL_CONFIG", dir)
+	t.Setenv("CRUSH_GLOBAL_DATA", dir)
+	resetProviderState()
+	t.Cleanup(resetProviderState)
+
+	require.NoError(t, os.WriteFile(configPath, []byte(`{
+		"providers": {
+			"openai": {
+				"api_key": "test-key",
+				"models": [{"id": "gpt-4", "name": "GPT-4"}]
+			}
+		}
+	}`), 0o600))
+
+	store, err := Load(dir, dir, false)
+	require.NoError(t, err)
+	store.globalDataPath = configPath
+	store.CaptureStalenessSnapshot([]string{configPath})
+
+	before := store.config
+	reloaded, err := store.ReloadIfStale(context.Background())
+	require.NoError(t, err)
+	require.False(t, reloaded)
+	require.Same(t, before, store.config, "config must not be replaced when nothing changed")
+}
+
+// TestReloadIfStale_ReloadsWhenChanged verifies that ReloadIfStale picks up
+// an out-of-process edit to a tracked config file (e.g. a `crush login`
+// run from another terminal) without the caller needing to call
+// ReloadFromDisk directly.
+func TestReloadIfStale_ReloadsWhenChanged(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "crush.json")
+
+	t.Setenv("CRUSH_GLOBAL_CONFIG", dir)
+	t.Setenv("CRUSH_GLOBAL_DATA", dir)
+	resetProviderState()
+	t.Cleanup(resetProviderState)
+
+	require.NoError(t, os.WriteFile(configPath, []byte(`{
+		"models": {
+			"large": {"provider": "openai", "model": "gpt-4"}
+		},
+		"providers": {
+			"openai": {
+				"api_key": "test-key",
+				"models": [{"id": "gpt-4", "name": "GPT-4"}]
+			}
+		}
+	}`), 0o600))
+
+	store, err := Load(dir, dir, false)
+	require.NoError(t, err)
+	store.globalDataPath = configPath
+	store.CaptureStalenessSnapshot([]string{configPath})
+
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, os.WriteFile(configPath, []byte(`{
+		"models": {
+			"large": {"provider": "anthropic", "model": "claude-3"}
+		},
+		"providers": {
+			"openai": {
+				"api_key": "test-key",
+				"models": [{"id": "gpt-4", "name": "GPT-4"}]
+			},
+			"anthropic": {
+				"api_key": "test-key-2",
+				"models": [{"id": "claude-3", "name": "Claude 3"}]
+			}
+		}
+	}`), 0o600))
+
+	reloaded, err := store.ReloadIfStale(context.Background())
+	require.NoError(t, err)
+	require.True(t, reloaded)
+	require.Equal(t, "anthropic", store.config.Models[SelectedModelTypeLarge].Provider)
+	require.Equal(t, "claude-3", store.config.Models[SelectedModelTypeLarge].Model)
+
+	// The snapshot is refreshed as part of the reload, so a second call
+	// with nothing new on disk should be a no-op again.
+	reloaded, err = store.ReloadIfStale(context.Background())
+	require.NoError(t, err)
+	require.False(t, reloaded)
+}
+
 // TestSetConfigField_AutoReloads verifies that SetConfigField automatically
 // reloads config into memory after writing, so subsequent reads see the new value.
 func TestSetConfigField_AutoReloads(t *testing.T) {

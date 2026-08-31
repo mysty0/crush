@@ -294,6 +294,12 @@ type Workspace interface {
 	RemoveConfigField(scope config.Scope, key string) error
 	ImportCopilot() (*oauth.Token, bool)
 	RefreshOAuthToken(ctx context.Context, scope config.Scope, providerID string) error
+	// ReloadConfigIfStale picks up config changes made by another process
+	// (e.g. `crush login ... --account ...` run from a separate terminal)
+	// without requiring a restart. It is a cheap no-op when nothing on
+	// disk has changed since the last load. Returns whether a reload
+	// happened.
+	ReloadConfigIfStale(ctx context.Context) (bool, error)
 
 	// Project lifecycle
 	ProjectNeedsInitialization() (bool, error)

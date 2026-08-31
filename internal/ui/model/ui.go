@@ -5229,6 +5229,14 @@ func (m *UI) openModelsDialog() tea.Cmd {
 		return nil
 	}
 
+	// Pick up config changes made by another process (e.g. `crush login
+	// claude --account work` run from a separate terminal) before
+	// building the dialog, so a newly added provider or account shows up
+	// without a restart. Cheap no-op when nothing on disk has changed.
+	if _, err := m.com.Workspace.ReloadConfigIfStale(context.Background()); err != nil {
+		slog.Warn("Failed to reload stale config before opening model switcher", "error", err)
+	}
+
 	isOnboarding := m.state == uiOnboarding
 	modelsDialog, err := dialog.NewModels(m.com, isOnboarding)
 	if err != nil {
