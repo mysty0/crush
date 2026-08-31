@@ -1860,6 +1860,42 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 		require.Equal(t, "openai", small.Provider)
 		require.Equal(t, int64(500), small.MaxTokens)
 	})
+	t.Run("should carry auto_continue_on_empty through to both slots", func(t *testing.T) {
+		// Regression guard: resolveSelectedModels must copy every override
+		// field from the user's selection onto the resolved model, the same
+		// way it already does for Think, Temperature, etc. A field added to
+		// SelectedModel but forgotten here would silently do nothing even
+		// though it round-trips through config load without error.
+		knownProviders := []catwalk.Provider{
+			{
+				ID:                  "openai",
+				APIKey:              "abc",
+				DefaultLargeModelID: "large-model",
+				DefaultSmallModelID: "small-model",
+				Models: []catwalk.Model{
+					{ID: "large-model", DefaultMaxTokens: 1000},
+					{ID: "small-model", DefaultMaxTokens: 500},
+				},
+			},
+		}
+
+		cfg := &Config{
+			Models: map[SelectedModelType]SelectedModel{
+				SelectedModelTypeLarge: {AutoContinueOnEmpty: true},
+				SelectedModelTypeSmall: {AutoContinueOnEmpty: true},
+			},
+		}
+		cfg.setDefaults("/tmp", "")
+		env := env.NewFromMap(map[string]string{})
+		resolver := NewShellVariableResolver(env)
+		err := cfg.configureProviders(context.Background(), testStore(cfg), env, resolver, knownProviders)
+		require.NoError(t, err)
+
+		resolved, resolveErr := resolveSelectedModels(cfg, knownProviders)
+		require.NoError(t, resolveErr)
+		require.True(t, resolved.Large.AutoContinueOnEmpty, "the large slot's opt-in must survive resolution")
+		require.True(t, resolved.Small.AutoContinueOnEmpty, "the small slot's opt-in must survive resolution")
+	})
 	t.Run("should be possible to use multiple providers", func(t *testing.T) {
 		knownProviders := []catwalk.Provider{
 			{

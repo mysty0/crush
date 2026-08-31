@@ -62,8 +62,10 @@ func newRoutingTestCoordinator(t *testing.T, env fakeEnv) (*coordinator, <-chan 
 	return coord, coderRuns
 }
 
-// backgroundSubAgent dispatches a backgrounded sub-agent from
+// backgroundSubAgent asks for a backgrounded sub-agent from
 // dispatchSessionID that immediately finishes with the given output.
+// Whether the request is honored depends on the dispatching session:
+// only a top-level conversation can receive a deferred completion.
 func backgroundSubAgent(t *testing.T, coord *coordinator, dispatchSessionID, output string) {
 	t.Helper()
 
@@ -120,7 +122,11 @@ func TestBackgroundedSubAgentCompletionRouting(t *testing.T) {
 		assert.Contains(t, call.Prompt, "the answer")
 	})
 
-	t.Run("dispatched from a finished sub-agent session queues into its conversation", func(t *testing.T) {
+	// The two nested cases below drive deliverBackgroundedCompletion
+	// directly rather than through a nested dispatch: runSubAgent no
+	// longer backgrounds work requested by a sub-agent (see the last
+	// subtest), so delivery is the only way those routes are reached.
+	t.Run("a completion from a finished sub-agent session queues into its conversation", func(t *testing.T) {
 		env := testEnv(t)
 		coord, coderRuns := newRoutingTestCoordinator(t, env)
 
@@ -130,7 +136,7 @@ func TestBackgroundedSubAgentCompletionRouting(t *testing.T) {
 		_, err = env.sessions.CreateTaskSession(t.Context(), nested, top.ID, "Sub-agent")
 		require.NoError(t, err)
 
-		backgroundSubAgent(t, coord, nested, "the answer")
+		go coord.deliverBackgroundedCompletion(nested, "msg-x$$call-x", "the answer")
 
 		call := awaitCall(t, coderRuns)
 		assert.NotContains(t, call.SessionID, "$$",
@@ -142,7 +148,7 @@ func TestBackgroundedSubAgentCompletionRouting(t *testing.T) {
 		assert.Contains(t, call.Prompt, nested)
 	})
 
-	t.Run("dispatched from a running sub-agent session steers that sub-agent", func(t *testing.T) {
+	t.Run("a completion from a running sub-agent session steers that sub-agent", func(t *testing.T) {
 		env := testEnv(t)
 		coord, coderRuns := newRoutingTestCoordinator(t, env)
 
@@ -161,7 +167,7 @@ func TestBackgroundedSubAgentCompletionRouting(t *testing.T) {
 			},
 		})
 
-		backgroundSubAgent(t, coord, nested, "the answer")
+		go coord.deliverBackgroundedCompletion(nested, "msg-x$$call-x", "the answer")
 
 		call := awaitCall(t, steered)
 		assert.Equal(t, nested, call.SessionID)
@@ -171,6 +177,28 @@ func TestBackgroundedSubAgentCompletionRouting(t *testing.T) {
 		// completion; nothing may reach the coder agent afterwards.
 		time.Sleep(200 * time.Millisecond)
 		assert.Empty(t, coderRuns, "a steered completion must not also start a coder turn")
+	})
+
+	// A sub-agent asking to background work is asking for a follow-up
+	// it can never receive: its turn ending is what returns its answer.
+	// Left alone, it would end that turn on "started, waiting for
+	// results" and the real result would surface in the user's
+	// conversation later, detached from the question that prompted it.
+	t.Run("a sub-agent's own dispatch is never backgrounded", func(t *testing.T) {
+		env := testEnv(t)
+		coord, coderRuns := newRoutingTestCoordinator(t, env)
+
+		top, err := env.sessions.Create(t.Context(), "Top level")
+		require.NoError(t, err)
+		nested := env.sessions.CreateAgentToolSessionID("msg-parent", "call-parent")
+		_, err = env.sessions.CreateTaskSession(t.Context(), nested, top.ID, "Sub-agent")
+		require.NoError(t, err)
+
+		backgroundSubAgent(t, coord, nested, "the answer")
+
+		time.Sleep(200 * time.Millisecond)
+		assert.Empty(t, coderRuns,
+			"the sub-agent got its result inline, so there is nothing to report later")
 	})
 }
 

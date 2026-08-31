@@ -84,6 +84,27 @@ type SelectedModel struct {
 	FrequencyPenalty *float64 `json:"frequency_penalty,omitempty" jsonschema:"description=Frequency penalty to reduce repetition"`
 	PresencePenalty  *float64 `json:"presence_penalty,omitempty" jsonschema:"description=Presence penalty to increase topic diversity"`
 
+	// AutoContinueOnEmpty automatically re-prompts this model to continue
+	// when it ends a turn with a genuinely empty response (no text, tool
+	// calls, or reasoning) instead of the usual causes (an unrecognized
+	// finish reason, which is already treated as an error). This works
+	// around a known reliability gap in some less mature models, which can
+	// silently abandon a multi-step task instead of replying or erroring.
+	// Off by default: only enable it for a model observed doing this, since
+	// it masks the failure rather than surfacing it.
+	AutoContinueOnEmpty bool `json:"auto_continue_on_empty,omitempty" jsonschema:"description=Automatically retry with a continue prompt when this model ends a turn with a genuinely empty response,default=false"`
+
+	// AutoContinueOnRateLimit automatically resubmits the same request for
+	// this model after the built-in retry-with-backoff exhausts against a
+	// 429 rate limit, waiting an escalating cooldown between attempts. A
+	// 429 is purely a matter of quota/timing rather than a broken request,
+	// so this recovers turns that would otherwise die once backoff runs
+	// out. The retry reuses the exact same request silently -- no new
+	// visible user turn is added -- unlike AutoContinueOnEmpty. Off by
+	// default: only enable it for a model/provider pairing that hits rate
+	// limits often enough to be worth the wait.
+	AutoContinueOnRateLimit bool `json:"auto_continue_on_rate_limit,omitempty" jsonschema:"description=Automatically retry the same request after exhausting the built-in retries against a 429 rate limit,default=false"`
+
 	// Override provider specific options.
 	ProviderOptions map[string]any `json:"provider_options,omitempty" jsonschema:"description=Additional provider-specific options for the model"`
 }

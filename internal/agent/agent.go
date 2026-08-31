@@ -44,12 +44,14 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/stringext"
 	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/charmtone"
+	"github.com/google/uuid"
 )
 
 const (
@@ -66,7 +68,44 @@ const (
 	// Retry-After/Retry-After-Ms response headers when present, so a
 	// long rate-limit window is honored rather than hammered.
 	providerMaxRetries = 5
+
+	// maxEmptyResponseAutoContinues caps how many times, per user turn,
+	// SelectedModel.AutoContinueOnEmpty resubmits a "continue" prompt after
+	// the model ends a step with a genuinely empty response. Bounds a model
+	// that keeps failing this way to a handful of extra requests instead of
+	// looping forever.
+	maxEmptyResponseAutoContinues = 3
+
+	// maxRateLimitAutoContinues caps how many times, per user turn,
+	// SelectedModel.AutoContinueOnRateLimit resubmits the same request
+	// after fantasy's own retry-with-backoff (providerMaxRetries attempts)
+	// exhausts against a 429. Bounded separately from
+	// maxEmptyResponseAutoContinues because it recovers a structurally
+	// different failure (the provider never even produced a response, vs a
+	// model that produced an empty one).
+	maxRateLimitAutoContinues = 3
 )
+
+// rateLimitCooldownSchedule is how long to wait before each successive
+// SelectedModel.AutoContinueOnRateLimit attempt, indexed by
+// SessionAgentCall.rateLimitContinueAttempt. Escalating rather than fixed:
+// fantasy's own backoff already climbed as high as ~1m20s before giving up,
+// so an immediate retry would very likely hit the same limit again --
+// giving the quota real time to recover matters more here than trying fast.
+var rateLimitCooldownSchedule = []time.Duration{30 * time.Second, 90 * time.Second, 3 * time.Minute}
+
+// rateLimitCooldown returns the wait before the given (0-indexed)
+// auto-continue attempt, falling back to the schedule's last entry past its
+// length.
+func rateLimitCooldown(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	if attempt >= len(rateLimitCooldownSchedule) {
+		attempt = len(rateLimitCooldownSchedule) - 1
+	}
+	return rateLimitCooldownSchedule[attempt]
+}
 
 var userAgent = cmp.Or(
 	os.Getenv("CRUSH_USER_AGENT"),
@@ -142,6 +181,42 @@ type SessionAgentCall struct {
 	// fantasy retries the stream transparently. Returning an error
 	// surfaces the original auth error without retry.
 	OnAuthRefresh func(ctx context.Context, err *fantasy.ProviderError) error
+	// emptyContinueAttempt counts how many synthetic "continue" prompts
+	// SelectedModel.AutoContinueOnEmpty has already sent in response to
+	// this turn's chain of empty responses. Carried across the recursive
+	// Run calls the same way the summarize-continuation path carries its
+	// own state, and capped by maxEmptyResponseAutoContinues.
+	emptyContinueAttempt int
+	// emptyContinueProvider/emptyContinueModel record which model produced
+	// the empty response an emptyContinueAttempt > 0 call is recovering
+	// from. Run compares them against the current large-model selection
+	// before sending the synthetic continue prompt: if the user switched
+	// models while this was queued, the prompt is dropped instead of
+	// being fired at a model that never had the problem it references.
+	emptyContinueProvider string
+	emptyContinueModel    string
+	// rateLimitContinueAttempt counts how many silent retries
+	// SelectedModel.AutoContinueOnRateLimit has already issued after the
+	// built-in retry-with-backoff exhausted against a 429. Capped by
+	// maxRateLimitAutoContinues, mirroring emptyContinueAttempt.
+	rateLimitContinueAttempt int
+	// rateLimitProvider/rateLimitModel record which model's request a
+	// rateLimitContinueAttempt > 0 call is retrying, for the same
+	// model-switch guard emptyContinueProvider/emptyContinueModel gives
+	// the empty-response path: if the user switches models while this
+	// sits in cooldown, the retry is dropped instead of re-issuing a
+	// request built for a model that is no longer selected.
+	rateLimitProvider string
+	rateLimitModel    string
+	// silentRetry marks a call as an internal recovery re-invocation
+	// (currently only SelectedModel.AutoContinueOnRateLimit) that must
+	// resend the exact same request without adding a new visible turn:
+	// it skips ValidateCall's non-empty-prompt requirement and the
+	// createUserMessage call that would otherwise persist a new user
+	// message from an empty Prompt. History already ends with the
+	// original user (or tool) message, which fantasy accepts in place of
+	// a new prompt string (see fantasy's createPrompt).
+	silentRetry bool
 }
 
 type SessionAgent interface {
@@ -628,7 +703,7 @@ func (a *sessionAgent) publishRunComplete(ctx context.Context, call SessionAgent
 // (e.g. backend.SendMessage) can apply the same checks and keep the error
 // contract consistent.
 func ValidateCall(call SessionAgentCall) error {
-	if call.Prompt == "" && !message.ContainsTextAttachment(call.Attachments) {
+	if call.Prompt == "" && !message.ContainsTextAttachment(call.Attachments) && !call.silentRetry {
 		return ErrEmptyPrompt
 	}
 	if call.SessionID == "" {
@@ -715,6 +790,22 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// the lock so a Cancel that arrives between here and assistant creation
 	// is not lost.
 	runCtx := context.WithValue(ctx, tools.SessionIDContextKey, call.SessionID)
+	// Stamp one user prompt id on the run context. Providers that report
+	// it upstream (currently the Gemini CLI / Antigravity Cloud Code
+	// Assist transport) use it to group every request this turn makes --
+	// the initial generation plus one round trip per tool call -- under a
+	// single logical prompt for quota accounting. It must therefore be
+	// minted exactly here: once per turn, above the tool-calling loop, and
+	// never per request.
+	//
+	// It is deliberately scoped to one Run rather than one session or one
+	// user message: an outer retry that re-enters Run (coordinator's
+	// unauthorized/stream-error retries) starts a fresh generation whose
+	// earlier, failed attempt the backend has already accounted for, so
+	// reusing the previous id would misreport two attempts as one prompt.
+	// The grouping that matters for rate limiting -- a turn's tool-call
+	// fan-out -- happens entirely inside a single Run and is preserved.
+	runCtx = geminicli.WithUserPromptID(runCtx, uuid.NewString())
 	genCtx, cancel = context.WithCancel(runCtx)
 	ac := &activeCancel{cancel: cancel}
 	a.activeRequests.Set(call.SessionID, ac)
@@ -749,6 +840,36 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		return nil, errors.New("sub-agent has no tools available (initialization did not complete); retry")
 	}
 	largeModel := a.largeModel.Get()
+	// A synthetic auto-continue call (emptyContinueAttempt > 0) is only
+	// meaningful for the model that actually produced the empty response
+	// it references. If the large-model selection changed while it sat
+	// queued -- e.g. the user switched models by hand -- firing it here
+	// would hand an unrelated model a "your previous turn was empty"
+	// prompt it never earned. Drop it silently instead: the user already
+	// took control by switching, so there is nothing useful to recover.
+	// A rate-limit retry (rateLimitContinueAttempt > 0) gets the same
+	// guard for the same reason: it is a request built for a specific
+	// model's quota problem, not a generic "try again."
+	if call.emptyContinueAttempt > 0 &&
+		(call.emptyContinueProvider != largeModel.ModelCfg.Provider || call.emptyContinueModel != largeModel.ModelCfg.Model) {
+		slog.Info("Dropping stale empty-response auto-continue after a model switch",
+			"session_id", call.SessionID,
+			"queued_for_provider", call.emptyContinueProvider,
+			"queued_for_model", call.emptyContinueModel,
+			"current_provider", largeModel.ModelCfg.Provider,
+			"current_model", largeModel.ModelCfg.Model)
+		return nil, nil
+	}
+	if call.rateLimitContinueAttempt > 0 &&
+		(call.rateLimitProvider != largeModel.ModelCfg.Provider || call.rateLimitModel != largeModel.ModelCfg.Model) {
+		slog.Info("Dropping stale rate-limit auto-continue after a model switch",
+			"session_id", call.SessionID,
+			"queued_for_provider", call.rateLimitProvider,
+			"queued_for_model", call.rateLimitModel,
+			"current_provider", largeModel.ModelCfg.Provider,
+			"current_model", largeModel.ModelCfg.Model)
+		return nil, nil
+	}
 	systemPrompt := a.systemPrompt.Get()
 	promptPrefix := a.systemPromptPrefix.Get()
 	var instructions strings.Builder
@@ -807,12 +928,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		go a.GenerateTitle(titleCtx, call.SessionID, call.Prompt)
 	}
 
-	// Add the user message to the session.
-	_, err = a.createUserMessage(ctx, call)
-	if err != nil {
-		return nil, err
+	// Add the user message to the session. Skipped for a silent recovery
+	// retry: it must resend the exact same request, not add a new turn.
+	if !call.silentRetry {
+		_, err = a.createUserMessage(ctx, call)
+		if err != nil {
+			return nil, err
+		}
+		userMsgCreated = true
 	}
-	userMsgCreated = true
 
 	// Add the session to the context. The run context (genCtx) and its
 	// cancel func were already created and registered under the dispatch
@@ -885,6 +1009,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 
 	var stepMessages []fantasy.Message
 	var shouldSummarize bool
+	var needsEmptyResponseContinue bool
 	sanitizedToolCalls := make(map[string]bool)
 	// Don't send MaxOutputTokens if 0 — some providers (e.g. LM Studio) reject it
 	var maxOutputTokens *int64
@@ -967,12 +1092,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			// Inject instructions for skills activated in this session so
 			// they persist and survive summarization. The provider decides
 			// when to inject: on activation and after a summarize (default,
-			// cache-friendly), or every turn when configured. Appended as a
-			// trailing system message (after the cached prompt prefix) so it
-			// stays in effect without rewriting the base prompt.
+			// cache-friendly), or every turn when configured. It is a
+			// trailing user message, not a system one: the Anthropic
+			// provider silently drops any system message that follows the
+			// conversation (only the first system block before any
+			// user/assistant turn is honored), which would make this
+			// injection a silent no-op. A trailing message still sits after
+			// the cached prompt prefix so per-turn variation does not churn
+			// the prompt cache.
 			if a.activeSkillsFor != nil {
 				if block := a.activeSkillsFor(call.SessionID); block != "" {
-					prepared.Messages = append(prepared.Messages, fantasy.NewSystemMessage(block))
+					prepared.Messages = append(prepared.Messages, fantasy.NewUserMessage(block))
 				}
 			}
 
@@ -1187,18 +1317,46 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					}
 				}
 			}
-			// A step that produced no visible output and reported an
-			// unrecognized finish reason is an empty response (the provider
-			// dropped the stream without an error). Surface it as an error so
-			// the turn is visible in the UI instead of rendering as a blank
-			// message with an "unknown" reason that should never happen.
-			if finishReason == message.FinishReasonUnknown {
-				hasOutput := strings.TrimSpace(currentAssistant.Content().Text) != "" ||
-					len(currentAssistant.ToolCalls()) > 0 ||
-					strings.TrimSpace(currentAssistant.ReasoningContent().Thinking) != ""
-				if !hasOutput {
-					finishReason = message.FinishReasonError
-					finishMessage = "Empty response"
+			// A step that produced no visible output is an empty response.
+			// An unrecognized finish reason always means this (the provider
+			// dropped the stream without an error) and is surfaced as an
+			// error so the turn is visible in the UI instead of rendering as
+			// a blank message. A recognized "stop" with no output is usually
+			// a legitimate silent finish, but a few less reliable models
+			// abandon a multi-step task this way instead of replying or
+			// erroring; treating it as empty too is gated behind
+			// AutoContinueOnEmpty so models that never do this see no
+			// behavior change.
+			hasOutput := strings.TrimSpace(currentAssistant.Content().Text) != "" ||
+				len(currentAssistant.ToolCalls()) > 0 ||
+				strings.TrimSpace(currentAssistant.ReasoningContent().Thinking) != ""
+			isEmptyResponse := !hasOutput && (finishReason == message.FinishReasonUnknown ||
+				(finishReason == message.FinishReasonEndTurn && largeModel.ModelCfg.AutoContinueOnEmpty))
+			if isEmptyResponse {
+				finishReason = message.FinishReasonError
+				finishMessage = "Empty response"
+				switch {
+				case largeModel.ModelCfg.AutoContinueOnEmpty && call.emptyContinueAttempt < maxEmptyResponseAutoContinues:
+					needsEmptyResponseContinue = true
+					finishDetails = fmt.Sprintf(
+						"The model ended the turn with no content (finish reason %q); auto-continuing (attempt %d/%d).",
+						stepResult.FinishReason, call.emptyContinueAttempt+1, maxEmptyResponseAutoContinues,
+					)
+					slog.Warn(
+						"Model returned an empty response, auto-continuing",
+						"session_id", call.SessionID,
+						"finish_reason", stepResult.FinishReason,
+						"attempt", call.emptyContinueAttempt+1,
+					)
+				case largeModel.ModelCfg.AutoContinueOnEmpty:
+					finishDetails = fmt.Sprintf("The model returned no content after %d auto-continue attempt(s); giving up.", call.emptyContinueAttempt)
+					slog.Warn(
+						"Model returned an empty response; giving up after auto-continue attempts",
+						"session_id", call.SessionID,
+						"finish_reason", stepResult.FinishReason,
+						"attempts", call.emptyContinueAttempt,
+					)
+				default:
 					finishDetails = fmt.Sprintf("The model returned no content and reported finish reason %q. This usually means the provider dropped the response; try again.", stepResult.FinishReason)
 					slog.Warn(
 						"Model returned an empty response",
@@ -1247,6 +1405,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					return false
 				}
 				tokens := currentSession.CompletionTokens + currentSession.PromptTokens
+				// A prompt larger than the window cannot have been sent
+				// successfully, so a reading like that is a usage-accounting
+				// fault rather than a genuinely full context. Treat it the
+				// same as an unknown window and skip: compacting on bad
+				// numbers throws away a conversation that had plenty of
+				// room left.
+				if tokens > cw {
+					slog.Warn("Ignoring impossible token count for auto-compaction",
+						"tokens", tokens, "context_window", cw,
+						"provider", largeModel.ModelCfg.Provider,
+						"model", largeModel.ModelCfg.Model)
+					return false
+				}
 				remaining := cw - tokens
 				var threshold int64
 				if cw > largeContextWindowThreshold {
@@ -1415,6 +1586,60 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				Done:      true,
 			})
 		}
+		// Auto-continue on an exhausted rate limit: a 429 is purely a
+		// matter of quota/timing, not a broken request, so once opted in
+		// per model it is worth one more attempt after a real cooldown --
+		// long enough that immediately hammering the same limit again is
+		// unlikely -- rather than leaving the turn dead. The retry reuses
+		// the exact same request (see silentRetry) instead of adding a
+		// new visible turn, and is bounded by maxRateLimitAutoContinues so
+		// a persistently rate-limited provider does not retry forever.
+		var rateLimitErr *fantasy.ProviderError
+		if !isCancelErr && errors.As(err, &rateLimitErr) &&
+			rateLimitErr.StatusCode == http.StatusTooManyRequests &&
+			largeModel.ModelCfg.AutoContinueOnRateLimit &&
+			call.rateLimitContinueAttempt < maxRateLimitAutoContinues {
+			origFp := currentAssistant.FinishPart()
+			cooldown := rateLimitCooldown(call.rateLimitContinueAttempt)
+			retryingDetails := fmt.Sprintf("Rate limited; auto-continuing in %s (attempt %d/%d).",
+				cooldown.Round(time.Second), call.rateLimitContinueAttempt+1, maxRateLimitAutoContinues)
+			if origFp != nil {
+				currentAssistant.AddFinish(origFp.Reason, origFp.Message, retryingDetails)
+			}
+			if updateErr := a.messages.Update(cleanupCtx, *currentAssistant); updateErr != nil {
+				return nil, updateErr
+			}
+			select {
+			case <-genCtx.Done():
+				// Canceled during the cooldown: restore the original,
+				// non-misleading final error instead of leaving the
+				// "auto-continuing" message as the last word, then fall
+				// through to the normal return below.
+				if origFp != nil {
+					currentAssistant.AddFinish(origFp.Reason, origFp.Message, origFp.Details)
+					if updateErr := a.messages.Update(cleanupCtx, *currentAssistant); updateErr != nil {
+						return nil, updateErr
+					}
+				}
+			case <-time.After(cooldown):
+				nextCall := call
+				nextCall.rateLimitContinueAttempt = call.rateLimitContinueAttempt + 1
+				nextCall.rateLimitProvider = largeModel.ModelCfg.Provider
+				nextCall.rateLimitModel = largeModel.ModelCfg.Model
+				nextCall.Prompt = ""
+				nextCall.silentRetry = true
+				nextCall.RunID = ""
+				nextCall.OnComplete = nil
+				nextCall.Attachments = nil
+				// Release this turn's active-request entry before recursing,
+				// same as the success-path queue drain below: IsSessionBusy
+				// would otherwise see this (not-yet-returned) call as still
+				// active and silently queue nextCall instead of running it.
+				a.activeRequests.Del(call.SessionID)
+				cancel()
+				return a.Run(ctx, nextCall)
+			}
+		}
 		// Note: we use the cleanup context here because the genCtx has been
 		// cancelled.
 		updateErr := a.messages.Update(cleanupCtx, *currentAssistant)
@@ -1439,6 +1664,25 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			existing = append(existing, call)
 			a.messageQueue.Set(call.SessionID, existing)
 		}
+	} else if needsEmptyResponseContinue {
+		existing, ok := a.messageQueue.Get(call.SessionID)
+		if !ok {
+			existing = []SessionAgentCall{}
+		}
+		nextCall := call
+		nextCall.emptyContinueAttempt = call.emptyContinueAttempt + 1
+		nextCall.emptyContinueProvider = largeModel.ModelCfg.Provider
+		nextCall.emptyContinueModel = largeModel.ModelCfg.Model
+		nextCall.Prompt = "Your previous turn ended with an empty response. Continue where you left off."
+		// This turn exists because the model itself returned nothing, not
+		// because the caller asked for more -- unlike the summarize
+		// continuation above, it must not carry the original turn's
+		// identity or attachments forward.
+		nextCall.RunID = ""
+		nextCall.OnComplete = nil
+		nextCall.Attachments = nil
+		existing = append(existing, nextCall)
+		a.messageQueue.Set(call.SessionID, existing)
 	}
 
 	// Release active request before publishing the notification.
@@ -1596,6 +1840,21 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		}
 	}()
 
+	// Summaries must be given the model's real output budget. Without an
+	// explicit limit some providers fall back to a small default (the
+	// Anthropic provider uses 4096), which silently truncates the summary
+	// mid-sentence and carries that damage into the next context.
+	// As on the normal run path, a 0 budget is left unset rather than sent
+	// as a literal 0, which some providers reject.
+	summaryMaxTokens := largeModel.CatwalkCfg.DefaultMaxTokens
+	if largeModel.ModelCfg.MaxTokens > 0 {
+		summaryMaxTokens = largeModel.ModelCfg.MaxTokens
+	}
+	var summaryMaxOutputTokens *int64
+	if summaryMaxTokens > 0 {
+		summaryMaxOutputTokens = &summaryMaxTokens
+	}
+
 	agent := fantasy.NewAgent(
 		largeModel.Model,
 		fantasy.WithSystemPrompt(string(summaryPrompt)),
@@ -1616,6 +1875,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 
 	resp, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
 		Prompt:          summaryPromptText,
+		MaxOutputTokens: summaryMaxOutputTokens,
 		Messages:        aiMsgs,
 		Headers:         sessionHeaders(sessionID),
 		ProviderOptions: opts,
@@ -1665,7 +1925,19 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return err
 	}
 
-	summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
+	// Record the provider's actual finish reason. Reporting a summary that
+	// ran out of output budget as a clean end-turn hides the truncation:
+	// the cut-off text still becomes the next context's starting point.
+	if resp.Response.FinishReason == fantasy.FinishReasonLength {
+		slog.Warn(
+			"Summary hit the output token limit and was truncated",
+			"session_id", sessionID,
+			"max_output_tokens", summaryMaxTokens,
+		)
+		summaryMessage.AddFinish(message.FinishReasonMaxTokens, "Summary truncated", "")
+	} else {
+		summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
+	}
 	err = a.messages.Update(genCtx, summaryMessage)
 	if err != nil {
 		return err
@@ -2133,12 +2405,14 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		cost = 0
 	}
 
-	promptTokens := promptTokens(resp.TotalUsage)
-	completionTokens := resp.TotalUsage.OutputTokens
+	cacheInsideInput := modelCacheReadIsSubsetOfInput(model)
+	usage := normalizeUsage(resp.TotalUsage, cacheInsideInput)
+	promptTokens := promptTokens(usage, cacheInsideInput)
+	completionTokens := usage.OutputTokens
 
 	// Atomically update only title and usage fields to avoid overriding other
 	// concurrent session updates.
-	saveErr := a.sessions.UpdateTitleAndUsage(ctx, sessionID, title, promptTokens, completionTokens, resp.TotalUsage.CacheCreationTokens, resp.TotalUsage.CacheReadTokens, cost)
+	saveErr := a.sessions.UpdateTitleAndUsage(ctx, sessionID, title, promptTokens, completionTokens, usage.CacheCreationTokens, usage.CacheReadTokens, cost)
 	if saveErr != nil {
 		slog.Error("Failed to save session title and usage", "error", saveErr)
 		return
@@ -2185,6 +2459,11 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 		session.EstimatedUsage = estimated
 	}
 
+	// Repair impossible cache figures before they reach the cost math,
+	// the telemetry event, or the session's context gauge.
+	cacheInsideInput := modelCacheReadIsSubsetOfInput(model)
+	usage = normalizeUsage(usage, cacheInsideInput)
+
 	modelConfig := model.CatwalkCfg
 	cost := modelConfig.CostPer1MInCached/1e6*float64(usage.CacheCreationTokens) +
 		modelConfig.CostPer1MOutCached/1e6*float64(usage.CacheReadTokens) +
@@ -2210,24 +2489,82 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 	}
 
 	session.Cost += cost
-	updateSessionTokenCounters(session, usage)
+	updateSessionTokenCounters(session, usage, cacheInsideInput)
 	return cost
 }
 
-// promptTokens returns the full size of the prompt that was sent. All three
+// cacheReadIsSubsetOfInput reports whether a provider counts cached
+// prompt tokens inside its input-token figure instead of alongside it.
+//
+// The two conventions differ, and the difference is not cosmetic:
+//
+//   - Anthropic and the OpenAI-compatible providers report cache reads
+//     and cache writes as buckets disjoint from input tokens, so the real
+//     prompt is the sum of all three.
+//   - Gemini reports cachedContentTokenCount as a *subset* of
+//     promptTokenCount, so adding the two counts the cached prefix twice.
+//
+// Summing regardless inflates the context gauge, and with it the
+// auto-compaction trigger: a long session whose prompt is mostly cache
+// reads appears close to twice its real size and compacts far too early.
+func cacheReadIsSubsetOfInput(providerName string) bool {
+	return providerName == google.Name
+}
+
+// modelCacheReadIsSubsetOfInput reports cacheReadIsSubsetOfInput for the
+// provider actually serving a model. It reads the provider off the
+// fantasy model rather than the Crush provider id, because the token
+// convention belongs to the wire format: every provider Crush routes
+// through fantasy's google provider -- plain Gemini, Gemini CLI, and
+// Antigravity alike -- reports Gemini-shaped usage.
+func modelCacheReadIsSubsetOfInput(model Model) bool {
+	if model.Model == nil {
+		return false
+	}
+	return cacheReadIsSubsetOfInput(model.Model.Provider())
+}
+
+// normalizeUsage repairs provider usage figures that cannot be true.
+//
+// fantasy's google provider accumulates CacheReadTokens across streamed
+// chunks (providers/google/google.go), but Gemini repeats a *cumulative*
+// usage block in every chunk, so the total ends up multiplied by the
+// number of chunks -- observed in practice as a 113k-token prompt
+// reporting 1.24M cache reads, which pushed a 1M-context session over its
+// window and triggered compaction at ~22% real utilization.
+//
+// The cached prefix is part of the prompt, so it can never exceed it.
+// Clamping to that invariant leaves healthy readings untouched and pulls
+// the pathological ones back to a sane upper bound.
+func normalizeUsage(usage fantasy.Usage, cacheInsideInput bool) fantasy.Usage {
+	if cacheInsideInput && usage.CacheReadTokens > usage.InputTokens {
+		usage.CacheReadTokens = usage.InputTokens
+	}
+	return usage
+}
+
+// promptTokens returns the full size of the prompt that was sent.
+//
+// When the provider reports cache reads alongside input tokens, all three
 // buckets are prompt: uncached input, tokens served from the cache, and
-// tokens written to it. Leaving any of them out understates both the context
-// gauge and the cost -- a turn that misses the cache reports its entire
-// prefix under CacheCreationTokens and only a handful of InputTokens.
-func promptTokens(usage fantasy.Usage) int64 {
+// tokens written to it. Leaving any of them out understates both the
+// context gauge and the cost -- a turn that misses the cache reports its
+// entire prefix under CacheCreationTokens and only a handful of
+// InputTokens. When the provider instead nests cache reads inside its
+// input count (see cacheReadIsSubsetOfInput), input alone is already the
+// whole prompt.
+func promptTokens(usage fantasy.Usage, cacheInsideInput bool) int64 {
+	if cacheInsideInput {
+		return usage.InputTokens
+	}
 	return usage.InputTokens + usage.CacheReadTokens + usage.CacheCreationTokens
 }
 
-func updateSessionTokenCounters(session *session.Session, usage fantasy.Usage) {
+func updateSessionTokenCounters(session *session.Session, usage fantasy.Usage, cacheInsideInput bool) {
 	if usage.OutputTokens != 0 {
 		session.CompletionTokens = usage.OutputTokens
 	}
-	if promptTokens := promptTokens(usage); promptTokens != 0 {
+	if promptTokens := promptTokens(usage, cacheInsideInput); promptTokens != 0 {
 		session.PromptTokens = promptTokens
 	}
 	if usage.CacheCreationTokens != 0 {
@@ -2310,10 +2647,47 @@ func (a *sessionAgent) cancel(sessionID string, clearQueue bool) {
 		a.cancelMark.Set(sessionID, max(existing, mark))
 	}
 
-	if clearQueue && a.QueuedPrompts(sessionID) > 0 {
-		slog.Debug("Clearing queued prompts", "session_id", sessionID)
-		a.clearQueueAndNotify(sessionID)
+	if clearQueue {
+		if a.QueuedPrompts(sessionID) > 0 {
+			slog.Debug("Clearing queued prompts", "session_id", sessionID)
+			a.clearQueueAndNotify(sessionID)
+		}
+		return
 	}
+	// Keep-queue cancel: stop the active turn but let the queue run.
+	//
+	// The cancel mark recorded above covers every accept sequence issued
+	// so far, which includes prompts that were queued *before* this
+	// cancel -- exactly the ones the caller asked to preserve. Left
+	// alone the mark would drop them at the next drain (see
+	// drainQueueForStep and the post-turn handoff in Run), so
+	// CancelKeepQueue would clear the queue after all, just later and
+	// silently. Re-stamping them above the mark makes them survive it.
+	a.exemptQueuedFromCancel(sessionID)
+}
+
+// exemptQueuedFromCancel re-stamps every queued prompt for sessionID with
+// a fresh accept sequence, placing it above any cancel mark recorded so
+// far so the cancel-coverage checks treat it as queued after the cancel.
+//
+// Accept sequences are only ever compared against a cancel mark (see
+// canceledBySeq) and never used for ordering, so renumbering is safe.
+// Callers must hold the session's dispatch mutex, which serializes this
+// against the drain sites that read these sequences.
+func (a *sessionAgent) exemptQueuedFromCancel(sessionID string) {
+	queued, ok := a.messageQueue.Get(sessionID)
+	if !ok || len(queued) == 0 {
+		return
+	}
+	a.acceptedMu.Lock()
+	for i := range queued {
+		a.acceptSeqGen++
+		queued[i].acceptSeq = a.acceptSeqGen
+	}
+	a.acceptedMu.Unlock()
+	a.messageQueue.Set(sessionID, queued)
+	slog.Debug("Exempted queued prompts from cancel",
+		"session_id", sessionID, "count", len(queued))
 }
 
 func (a *sessionAgent) ClearQueue(sessionID string) {

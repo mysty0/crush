@@ -849,6 +849,8 @@ func resolveSelectedModels(cfg *Config, knownProviders []catwalk.Provider) (reso
 				large.ReasoningEffort = model.DefaultReasoningEffort
 			}
 			large.Think = largeModelSelected.Think
+			large.AutoContinueOnEmpty = largeModelSelected.AutoContinueOnEmpty
+			large.AutoContinueOnRateLimit = largeModelSelected.AutoContinueOnRateLimit
 			if largeModelSelected.Temperature != nil {
 				large.Temperature = largeModelSelected.Temperature
 			}
@@ -912,6 +914,8 @@ func resolveSelectedModels(cfg *Config, knownProviders []catwalk.Provider) (reso
 				small.ProviderOptions = maps.Clone(smallModelSelected.ProviderOptions)
 			}
 			small.Think = smallModelSelected.Think
+			small.AutoContinueOnEmpty = smallModelSelected.AutoContinueOnEmpty
+			small.AutoContinueOnRateLimit = smallModelSelected.AutoContinueOnRateLimit
 		}
 	}
 

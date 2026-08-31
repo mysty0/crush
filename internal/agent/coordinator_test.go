@@ -463,6 +463,48 @@ func TestRunSubAgent_Background(t *testing.T) {
 	assert.Equal(t, SubAgentRunning, statuses[0].State)
 }
 
+// TestRunSubAgent_BackgroundIgnoredWhenNested covers a sub-agent asking
+// for work of its own to be backgrounded. A sub-agent has no
+// conversation to receive a follow-up: its turn ending is what returns
+// its answer to whoever dispatched it. Honoring the flag there let a
+// sub-agent dispatch several background fetches, immediately end its
+// turn on "started, waiting for results", and report that non-answer as
+// its findings -- the real results arriving in the top-level
+// conversation much later, unattached to the question. So the flag is
+// ignored below the top level and the work runs to completion.
+func TestRunSubAgent_BackgroundIgnoredWhenNested(t *testing.T) {
+	const providerID = "test-provider"
+	providerCfg := config.ProviderConfig{ID: providerID}
+
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+	topLevel, err := env.sessions.Create(t.Context(), "Parent")
+	require.NoError(t, err)
+	// The dispatcher is itself a sub-agent session.
+	dispatcher, err := env.sessions.CreateTaskSession(t.Context(), "dispatching-sub-agent", topLevel.ID, "Research")
+	require.NoError(t, err)
+
+	agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+		return agentResultWithText("the real answer"), nil
+	})
+
+	resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		Agent:          agent,
+		SessionID:      dispatcher.ID,
+		AgentMessageID: "msg-1",
+		ToolCallID:     "call-1",
+		Prompt:         "test",
+		SessionTitle:   "Test",
+		ToolName:       AgentToolName,
+		Background:     true,
+	})
+	require.NoError(t, err)
+	assert.False(t, resp.IsError)
+	assert.Contains(t, resp.Content, "the real answer",
+		"a nested dispatch must return the result itself, not a 'started in the background' stub")
+}
+
 func TestRunSubAgent_Resume(t *testing.T) {
 	const providerID = "test-provider"
 	providerCfg := config.ProviderConfig{ID: providerID}
