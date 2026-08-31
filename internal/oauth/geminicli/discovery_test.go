@@ -31,7 +31,6 @@ func TestDiscoverProjectCurrentTier(t *testing.T) {
 		require.Equal(t, "/v1internal:loadCodeAssist", r.URL.Path)
 		require.Equal(t, "Bearer tok", r.Header.Get("Authorization"))
 		require.Contains(t, r.Header.Get("User-Agent"), "GeminiCLI/")
-		require.Contains(t, r.Header.Get("Client-Metadata"), "pluginType=GEMINI")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"cloudaicompanionProject":"proj-direct","currentTier":{"id":"standard-tier"}}`))
 	}))
@@ -123,4 +122,54 @@ func TestDiscoverProjectOnboardPolls(t *testing.T) {
 	proj, err := DiscoverProject(context.Background(), "tok", GeminiCLIIdentity)
 	require.NoError(t, err)
 	require.Equal(t, "polled-proj", proj)
+}
+
+// TestEndpointForPrefersIdentityEndpoint covers the host-selection rule
+// that keeps Antigravity off Gemini CLI's backend.
+//
+// The two hosts front the same service but resolve one OAuth token to
+// different backend projects, and therefore different quota pools:
+// sending Antigravity's token to Gemini CLI's host resolved it to a
+// project whose every inference call returned 429 immediately. An
+// identity that names its own Endpoint must always win over the package
+// default, and an identity that does not must keep using that default.
+func TestEndpointForPrefersIdentityEndpoint(t *testing.T) {
+	withCodeAssistEndpoint(t, "https://default.example")
+
+	require.Equal(t, "https://default.example", endpointFor(GeminiCLIIdentity),
+		"an identity without an Endpoint uses the package default")
+
+	withEndpoint := Identity{Product: "X", Version: "1", Endpoint: "https://override.example"}
+	require.Equal(t, "https://override.example", endpointFor(withEndpoint),
+		"an identity with an Endpoint overrides the package default")
+}
+
+// TestDiscoverProjectUsesIdentityEndpoint proves the override actually
+// reaches the wire: an identity carrying an Endpoint must have its
+// loadCodeAssist call sent there, not to the package default. Without
+// this the Antigravity provider silently onboards against the wrong
+// backend and is handed an unusable, instantly rate-limited project.
+func TestDiscoverProjectUsesIdentityEndpoint(t *testing.T) {
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	t.Setenv("GOOGLE_CLOUD_PROJECT_ID", "")
+
+	// Point the package default at a server that fails the test if it is
+	// ever contacted, so a regression cannot pass by accident.
+	wrong := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("request went to the package-default endpoint, not the identity's Endpoint")
+	}))
+	defer wrong.Close()
+	withCodeAssistEndpoint(t, wrong.URL)
+
+	right := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1internal:loadCodeAssist", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"cloudaicompanionProject":"right-proj","currentTier":{"id":"free-tier"}}`))
+	}))
+	defer right.Close()
+
+	id := Identity{Product: "Antigravity", Version: "1.1.1", Endpoint: right.URL}
+	proj, err := DiscoverProject(context.Background(), "tok", id)
+	require.NoError(t, err)
+	require.Equal(t, "right-proj", proj)
 }

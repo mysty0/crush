@@ -214,7 +214,7 @@ func onboardUser(ctx context.Context, accessToken, tierID, envProject string, id
 // name.
 func pollOperation(ctx context.Context, accessToken, name string, id Identity) (longRunningOperation, error) {
 	var op longRunningOperation
-	url := fmt.Sprintf("%s/v1internal/%s", codeAssistEndpoint, name)
+	url := fmt.Sprintf("%s/v1internal/%s", endpointFor(id), name)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return op, err
@@ -251,7 +251,7 @@ func codeAssistPost(ctx context.Context, accessToken, method string, body any, i
 	if err != nil {
 		return nil, 0, err
 	}
-	url := fmt.Sprintf("%s/v1internal:%s", codeAssistEndpoint, method)
+	url := fmt.Sprintf("%s/v1internal:%s", endpointFor(id), method)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
 	if err != nil {
 		return nil, 0, err

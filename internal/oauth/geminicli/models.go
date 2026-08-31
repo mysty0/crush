@@ -92,7 +92,7 @@ type fetchAvailableModelsResponse struct {
 // falling back to DefaultModels on any error or empty result. projectID
 // is the Cloud project discovered via DiscoverProject; the endpoint
 // requires it even for free-tier accounts. id identifies the calling
-// client product for the required Client-Metadata headers.
+// client product for the User-Agent header.
 func Models(ctx context.Context, accessToken, projectID string, id Identity) ([]catwalk.Model, error) {
 	body := map[string]any{"project": projectID}
 	respBody, status, err := codeAssistPost(ctx, accessToken, "fetchAvailableModels", body, id)

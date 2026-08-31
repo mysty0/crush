@@ -2,18 +2,19 @@
 // Antigravity CLI subscriptions.
 //
 // EXPERIMENTAL: Google has not published Antigravity CLI's OAuth protocol.
-// Every constant below was recovered by extracting strings from the
-// official antigravity.google/cli/install.sh binary (agy v1.1.1); none of
-// it has been exercised against a live Google endpoint. See
-// docs/antigravity-cli-oauth-findings.md for the full methodology and
-// confidence notes before relying on this package.
+// The OAuth client id/secret below were recovered by disassembling the
+// official antigravity.google/cli/install.sh binary (agy v1.1.1); see
+// docs/antigravity-cli-oauth-findings.md for that methodology and
+// confidence notes. BaseURL, by contrast, is confirmed by live traffic
+// capture (mitmproxy, agy v1.1.22, a real account) rather than static
+// analysis -- see its own doc comment.
 //
-// Antigravity shares its inference backend (cloudcode-pa.googleapis.com)
-// and onboarding/quota RPCs with Gemini CLI (Cloud Code Assist), so this
-// package only implements the OAuth login/refresh that is unique to
-// Antigravity's client registration. Project discovery, the inference
-// wire transport, and usage reporting are provided by the sibling
-// geminicli package and reused as-is by callers.
+// Antigravity shares its onboarding/quota RPCs and inference wire format
+// with Gemini CLI (Cloud Code Assist), so this package only implements
+// the OAuth login/refresh that is unique to Antigravity's client
+// registration; project discovery and the inference wire transport are
+// provided by the sibling geminicli package and reused as-is by callers.
+// It does NOT share Gemini CLI's backend host, though -- see BaseURL.
 package antigravity
 
 import "github.com/charmbracelet/crush/internal/oauth/geminicli"
@@ -22,9 +23,23 @@ import "github.com/charmbracelet/crush/internal/oauth/geminicli"
 // Google Antigravity subscription handling.
 const ProviderID = "google-antigravity"
 
-// BaseURL is the Cloud Code Assist API base URL Antigravity shares with
-// Gemini CLI; see geminicli.BaseURL.
-const BaseURL = geminicli.BaseURL
+// BaseURL is the Cloud Code Assist API base URL the real Antigravity CLI
+// sends every request to. It is a *different* host than Gemini CLI's
+// (geminicli.BaseURL) despite both fronting the same underlying service:
+// confirmed by direct comparison of live traffic (mitmproxy capture
+// against the real agy v1.1.22 binary, logged into the same account
+// Crush was configured with) that the two hosts resolve one OAuth token
+// to two *different* backend projects. geminicli.BaseURL
+// (cloudcode-pa.googleapis.com) resolved this account to a stale project
+// with no usable quota -- every inference call 429'd instantly, which is
+// the rate-limiting Crush's Antigravity provider exhibited before this
+// was found. This host (daily-cloudcode-pa.googleapis.com) resolved the
+// same token to the correct, working free-tier project, matching what
+// the real CLI showed onscreen. A raw curl replay of a
+// streamGenerateContent call against this host with that project
+// succeeded and returned real model output, confirming the fix end to
+// end rather than just at the tier-lookup step.
+const BaseURL = "https://daily-cloudcode-pa.googleapis.com"
 
 const (
 	// clientID is Antigravity CLI's public OAuth client id for the
@@ -97,10 +112,12 @@ const cliVersion = "1.1.1"
 // actual cause of the tier problem that motivated recovering them,
 // though — that was traced to using the wrong OAuth client/secret pair
 // (see the clientID/clientSecret comments above), not the client
-// identity metadata.
+// identity metadata. Nor is either the cause of the later, separate
+// instant-rate-limiting symptom -- that one was the Endpoint field below.
 var Identity = geminicli.Identity{
 	Product:    "Antigravity",
 	Version:    cliVersion,
 	PluginType: "CLOUD_CODE",
 	IDEType:    "ANTIGRAVITY",
+	Endpoint:   BaseURL,
 }
