@@ -80,13 +80,16 @@ func (c *Config) seedOAuthProviders(ctx context.Context, store *ConfigStore) {
 	}
 
 	// EXPERIMENTAL: see docs/antigravity-cli-oauth-findings.md. Reuses
-	// geminicli's BaseURL and model discovery since Antigravity shares
-	// that exact Cloud Code Assist backend and wire format.
+	// geminicli's model discovery/wire format since Antigravity shares
+	// that Cloud Code Assist wire format, but NOT its BaseURL: confirmed
+	// by live traffic comparison that Antigravity's host resolves the
+	// same OAuth token to a different (working) backend project -- see
+	// antigravity.BaseURL's doc comment.
 	if pc, ok := c.Providers.Get(antigravity.ProviderID); ok && !pc.Disable && pc.OAuthToken != nil {
 		pc.ID = antigravity.ProviderID
 		pc.Name = cmp.Or(pc.Name, "Google Antigravity")
 		pc.Type = catwalk.TypeGoogle
-		pc.BaseURL = geminicli.BaseURL
+		pc.BaseURL = antigravity.BaseURL
 		pc = c.refreshOAuthProviderBeforeModelDiscovery(ctx, store, antigravity.ProviderID, pc)
 		if len(pc.Models) == 0 {
 			projectID := ""
