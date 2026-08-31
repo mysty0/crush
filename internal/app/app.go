@@ -631,6 +631,7 @@ func (app *App) setupEvents() {
 	setupSubscriber(ctx, app.serviceEventsWG, "workflow-progress", agenttools.SubscribeWorkflowProgress, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "retry-progress", agent.SubscribeRetryProgress, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "workflow-status", agenttools.SubscribeWorkflowStatus, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "task-status", agent.SubscribeTaskStatus, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "lsp", SubscribeLSPEvents, app.events)
 	if app.Skills != nil {
 		setupSubscriber(ctx, app.serviceEventsWG, "skills", app.Skills.SubscribeEvents, app.events)

@@ -1502,6 +1502,14 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.exitWorkflowView()
 			}
 		}
+	case pubsub.Event[agent.TaskStatusEvent]:
+		// A background task was registered or reached a terminal
+		// state: recompute layout so the picker list appears or
+		// disappears on the next frame.
+		m.updateLayoutAndSize()
+		if cmd := m.maybeExitFinishedSubAgentView(msg.Payload.Ref); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case shellStreamMsg:
 		if item := m.chat.MessageItem(msg.PendingID); item != nil {
 			if shellItem, ok := item.(*chat.ShellItem); ok {
@@ -3114,6 +3122,12 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				// backs out to the two-pane view instead of canceling
 				// — inspecting a workflow agent is read-only, not a
 				// steerable session.
+				m.exitSubAgentView()
+				return tea.Batch(cmds...)
+			}
+			if !m.com.Workspace.AgentIsSessionBusy(m.subAgentSessionID) {
+				// Nothing left to cancel: the sub-agent already
+				// finished, so Esc is the way back out.
 				m.exitSubAgentView()
 				return tea.Batch(cmds...)
 			}
