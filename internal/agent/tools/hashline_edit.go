@@ -147,7 +147,8 @@ func NewHashlineEditTool(
 					if tsblock.IntroducesSyntaxError(plan.oldLF, plan.newLF, plan.path) {
 						return fantasy.NewTextErrorResponse(fmt.Sprintf(
 							"edit rejected: applying it to %s would introduce a syntax error (unbalanced brackets or a malformed statement). Re-read the file and adjust the edit; nothing was written.",
-							plan.displayed)), nil
+							plan.displayed,
+						)), nil
 					}
 				}
 			}
@@ -309,7 +310,8 @@ func preflightHashlineSection(
 				}
 				if recovered, ok := hashline.Recover(snap.Text, oldLF, resolvedForBase); ok {
 					plan, warns := buildRecoveredPlan(recovered, fmt.Sprintf(
-						"file %s changed since it was read; your edit was merged onto the current version. Verify the result.", sec.Path))
+						"file %s changed since it was read; your edit was merged onto the current version. Verify the result.", sec.Path,
+					))
 					return plan, warns, fantasy.ToolResponse{}, true
 				}
 				// Last-chance fuzzy fallback: relocate the anchored edits onto
@@ -318,7 +320,8 @@ func preflightHashlineSection(
 				// anchors fall through to the mismatch rejection below.
 				if recovered, ok := hashline.RecoverFuzzy(snap.Text, oldLF, resolvedForBase, hashline.DefaultFuzzyThreshold); ok {
 					plan, warns := buildRecoveredPlan(recovered, fmt.Sprintf(
-						"file %s changed since it was read; your edit was fuzzily relocated onto the current version by matching anchor content. Carefully verify the result.", sec.Path))
+						"file %s changed since it was read; your edit was fuzzily relocated onto the current version by matching anchor content. Carefully verify the result.", sec.Path,
+					))
 					return plan, warns, fantasy.ToolResponse{}, true
 				}
 			}
@@ -341,7 +344,8 @@ func preflightHashlineSection(
 		if len(unseen) > 0 {
 			return hlPlan{}, nil, fantasy.NewTextErrorResponse(fmt.Sprintf(
 				"edit anchors on line(s) %v of %s that your latest Read did not display. Re-read that range first, then anchor on the lines it shows.",
-				unseen, sec.Path)), false
+				unseen, sec.Path,
+			)), false
 		}
 	}
 
@@ -373,7 +377,8 @@ func preflightHashlineSection(
 			if errors.Is(aerr, hashline.ErrNoChange) {
 				return hlPlan{}, nil, fantasy.NewTextErrorResponse(fmt.Sprintf(
 					"edits to %s parsed and applied cleanly but produced no change: the body rows are byte-identical to the file at the targeted lines. Re-read the file before editing again.",
-					sec.Path)), false
+					sec.Path,
+				)), false
 			}
 			return hlPlan{}, nil, fantasy.NewTextErrorResponse(aerr.Error()), false
 		}

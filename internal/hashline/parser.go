@@ -139,7 +139,10 @@ func (p *parser) parse(input string) ([]Section, []string, error) {
 		}
 
 		// Body row.
-		if err := p.appendBody(trimmed, lineNo); err != nil {
+		// Pass the right-trimmed line, not the fully-trimmed one: a body
+		// row's leading whitespace is content. appendBody re-trims only
+		// what it needs to find the sigil.
+		if err := p.appendBody(line, lineNo); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -158,16 +161,25 @@ func (p *parser) appendBody(line string, lineNo int) error {
 			lineNo, RangeSep, RangeSep, line,
 		)
 	}
+	// line arrives right-trimmed only, because a body row's leading
+	// whitespace is content and must survive verbatim. Locate the sigil on
+	// a left-trimmed view so a row written as "  +text" is still
+	// recognized, but slice the payload out of the original line so
+	// indentation after the sigil is preserved.
+	lead := len(line) - len(strings.TrimLeft(line, " \t"))
+	sigilView := line[lead:]
 	switch {
-	case strings.HasPrefix(line, PayloadSigil):
-		p.body = append(p.body, line[len(PayloadSigil):])
-	case strings.HasPrefix(line, "-"):
+	case strings.HasPrefix(sigilView, PayloadSigil):
+		p.body = append(p.body, sigilView[len(PayloadSigil):])
+	case strings.HasPrefix(sigilView, "-"):
 		return fmt.Errorf(
 			"line %d: `-` rows are not valid; the range already names the lines being changed. For literal `-` lines (e.g. Markdown bullets), prefix the row with `+`: `+- item`.",
 			lineNo,
 		)
 	default:
-		// Bare body row: auto-prefix and warn.
+		// Bare body row: treat the whole line as literal content. Its
+		// indentation is part of that content, so keep the untrimmed line
+		// rather than the left-trimmed view.
 		p.body = append(p.body, line)
 		p.addWarningOnce(bareBodyAutoPrefixedWarning)
 	}
