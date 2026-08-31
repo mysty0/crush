@@ -131,6 +131,86 @@ func TestRewindConversationForksWithoutTouchingOrigin(t *testing.T) {
 	require.Equal(t, "Origin (rewind)", fork.Title)
 }
 
+// TestRewindPreservesSummaryCutoff guards against the fork resending a
+// previously-compacted session's entire raw history. Origin sessions
+// keep the prompt bounded via session.SummaryMessageID (set by /compact
+// or auto-compaction): the agent only sends messages from that summary
+// forward, not the full history. A naive fork drops that pointer
+// (CreateFork never sets it, and Copy mints fresh message IDs anyway),
+// so a rewound session silently resent its entire, potentially huge raw
+// history on its very first turn -- observed in practice exceeding
+// Anthropic's 1M-token request limit outright. The fork's cutoff must
+// point at the copy's new ID, not the origin's stale one.
+func TestRewindPreservesSummaryCutoff(t *testing.T) {
+	e := newTestEnv(t)
+
+	sess, err := e.sessions.Create(e.ctx, "Origin")
+	require.NoError(t, err)
+
+	e.addUser(t, sess.ID, "long history before compaction")
+	e.addAssistant(t, sess.ID, "long reply before compaction")
+	summary := e.addAssistant(t, sess.ID, "summary of everything above")
+	e.addUser(t, sess.ID, "post-summary turn")
+	e.addAssistant(t, sess.ID, "post-summary reply")
+	target := e.addUser(t, sess.ID, "keep me")
+	e.addAssistant(t, sess.ID, "dropped reply")
+
+	sess.SummaryMessageID = summary.ID
+	sess, err = e.sessions.Save(e.ctx, sess)
+	require.NoError(t, err)
+	require.Equal(t, summary.ID, sess.SummaryMessageID)
+
+	res, err := e.rewind.Rewind(e.ctx, sess.ID, target.ID, ModeConversation)
+	require.NoError(t, err)
+
+	fork, err := e.sessions.Get(e.ctx, res.ForkedSessionID)
+	require.NoError(t, err)
+	require.NotEmpty(t, fork.SummaryMessageID,
+		"fork must carry forward a summary cutoff that falls before the rewind target")
+	require.NotEqual(t, summary.ID, fork.SummaryMessageID,
+		"fork's cutoff must point at the COPY's new message ID, not the origin's stale one")
+
+	forkMsgs, err := e.messages.List(e.ctx, res.ForkedSessionID)
+	require.NoError(t, err)
+	var found bool
+	for _, m := range forkMsgs {
+		if m.ID == fork.SummaryMessageID {
+			found = true
+			require.Equal(t, "summary of everything above", m.Content().Text)
+		}
+	}
+	require.True(t, found, "fork's summary cutoff must reference a message that actually exists in the fork")
+}
+
+// TestRewindToBeforeSummaryLeavesCutoffEmpty covers the case where the
+// rewind target is earlier than the origin's summary message, so the
+// summary itself is not copied into the fork. There is nothing to remap
+// -- the fork legitimately starts from full raw history, same as the
+// origin would if rewound to that point.
+func TestRewindToBeforeSummaryLeavesCutoffEmpty(t *testing.T) {
+	e := newTestEnv(t)
+
+	sess, err := e.sessions.Create(e.ctx, "Origin")
+	require.NoError(t, err)
+
+	target := e.addUser(t, sess.ID, "keep me")
+	e.addAssistant(t, sess.ID, "reply")
+	summary := e.addAssistant(t, sess.ID, "summary comes after the target")
+	e.addUser(t, sess.ID, "later turn")
+
+	sess.SummaryMessageID = summary.ID
+	sess, err = e.sessions.Save(e.ctx, sess)
+	require.NoError(t, err)
+
+	res, err := e.rewind.Rewind(e.ctx, sess.ID, target.ID, ModeConversation)
+	require.NoError(t, err)
+
+	fork, err := e.sessions.Get(e.ctx, res.ForkedSessionID)
+	require.NoError(t, err)
+	require.Empty(t, fork.SummaryMessageID,
+		"summary message wasn't copied into the fork, so there is nothing to remap")
+}
+
 // TestRewindForkPreservesOrderAndTimestamps guards against a regression
 // where the fork copied messages with fresh created_at timestamps. Since
 // messages are ordered by created_at (second resolution), copying many

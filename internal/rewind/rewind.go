@@ -166,6 +166,18 @@ func (s *service) Rewind(ctx context.Context, sessionID, messageID string, mode 
 // order. The target user message and everything after it are dropped; the
 // cut is by position in the ordered message list (not by timestamp), so
 // messages sharing a one-second created_at are handled correctly.
+//
+// If the origin session has a summary cutoff (SummaryMessageID, set by
+// /compact or auto-compaction) and that summary message falls before the
+// target, the fork's cutoff is remapped to the copy's new ID so the fork
+// keeps sending only post-summary history, same as the origin did.
+// Getting this wrong silently resends the fork's *entire* raw history on
+// every turn instead of the compacted view -- for a long, previously
+// compacted session that is enough to blow past the provider's context
+// limit outright (seen in practice: a fork exceeded Anthropic's 1M-token
+// cap on its very first turn). If the summary message falls at or after
+// the target instead, it wasn't copied, so the fork legitimately starts
+// from full raw history -- there is nothing to remap.
 // Returns the new session's ID.
 func (s *service) forkConversation(ctx context.Context, sessionID string, target message.Message) (string, error) {
 	origin, err := s.sessions.Get(ctx, sessionID)
@@ -183,6 +195,7 @@ func (s *service) forkConversation(ctx context.Context, sessionID string, target
 		return "", fmt.Errorf("rewind: create fork session: %w", err)
 	}
 
+	var forkedSummaryMessageID string
 	for _, m := range all {
 		// Stop before the target message: the target (the user message
 		// being rewound to) and everything after it are dropped. Its text
@@ -190,13 +203,25 @@ func (s *service) forkConversation(ctx context.Context, sessionID string, target
 		if m.ID == target.ID {
 			break
 		}
-		if _, err := s.messages.Copy(ctx, fork.ID, m); err != nil {
+		copied, err := s.messages.Copy(ctx, fork.ID, m)
+		if err != nil {
 			return "", fmt.Errorf("rewind: copy message into fork: %w", err)
+		}
+		if origin.SummaryMessageID != "" && m.ID == origin.SummaryMessageID {
+			forkedSummaryMessageID = copied.ID
+		}
+	}
+
+	if forkedSummaryMessageID != "" {
+		fork.SummaryMessageID = forkedSummaryMessageID
+		if _, err := s.sessions.Save(ctx, fork); err != nil {
+			return "", fmt.Errorf("rewind: preserve summary cutoff on fork: %w", err)
 		}
 	}
 
 	return fork.ID, nil
 }
+
 
 // restoreCode writes the tracked files back to disk as they were at the
 // target message and returns the number of files written. Selection is by
