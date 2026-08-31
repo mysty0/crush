@@ -2,6 +2,7 @@ package shell
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -13,8 +14,16 @@ import (
 )
 
 const (
-	// MaxBackgroundJobs is the maximum number of concurrent background jobs allowed
+	// MaxBackgroundJobs is the maximum number of concurrently running
+	// background jobs allowed. Only jobs that have not finished count
+	// against it -- finished jobs are retained for their output but are
+	// bounded separately by MaxCompletedJobs.
 	MaxBackgroundJobs = 50
+	// MaxCompletedJobs caps how many finished jobs are retained for
+	// later output retrieval. Past this, the oldest-completed jobs are
+	// evicted first, so a long session cannot grow the map without
+	// bound while still keeping recent output available.
+	MaxCompletedJobs = 200
 	// CompletedJobRetentionMinutes is how long to keep completed jobs before auto-cleanup (8 hours)
 	CompletedJobRetentionMinutes = 8 * 60
 	// killWaitTimeout bounds how long Kill waits for a background shell to
@@ -98,10 +107,14 @@ func GetBackgroundShellManager() *BackgroundShellManager {
 
 // Start creates and starts a new background shell with the given command.
 func (m *BackgroundShellManager) Start(ctx context.Context, sessionID, workingDir string, blockFuncs []BlockFunc, onBlocked BlockedFunc, command string, description string) (*BackgroundShell, error) {
-	// Check job limit
-	if m.shells.Len() >= MaxBackgroundJobs {
-		return nil, fmt.Errorf("maximum number of background jobs (%d) reached. Please terminate or wait for some jobs to complete", MaxBackgroundJobs)
+	// Only running jobs count against the limit. Finished jobs linger in
+	// the map so their output stays retrievable; letting them occupy
+	// slots would make a long session hit the cap with nothing actually
+	// running, and the message below would be unactionable.
+	if m.runningCount() >= MaxBackgroundJobs {
+		return nil, fmt.Errorf("maximum number of concurrent background jobs (%d) reached. Please terminate or wait for some jobs to complete", MaxBackgroundJobs)
 	}
+	m.evictCompletedOverflow()
 
 	id := fmt.Sprintf("%03X", idCounter.Add(1))
 
@@ -258,6 +271,45 @@ func (m *BackgroundShellManager) Cleanup() int {
 	}
 
 	return len(toRemove)
+}
+
+// runningCount returns how many tracked jobs have not finished yet.
+func (m *BackgroundShellManager) runningCount() int {
+	var n int
+	for shell := range m.shells.Seq() {
+		if shell.completedAt.Load() == 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// evictCompletedOverflow drops the oldest-completed jobs once more than
+// MaxCompletedJobs finished jobs are retained, so the map stays bounded
+// in a long session without waiting out the full retention window.
+// Running jobs are never touched.
+func (m *BackgroundShellManager) evictCompletedOverflow() int {
+	type finished struct {
+		id          string
+		completedAt int64
+	}
+	var done []finished
+	for shell := range m.shells.Seq() {
+		if ts := shell.completedAt.Load(); ts > 0 {
+			done = append(done, finished{id: shell.ID, completedAt: ts})
+		}
+	}
+	if len(done) <= MaxCompletedJobs {
+		return 0
+	}
+	slices.SortFunc(done, func(a, b finished) int {
+		return cmp.Compare(a.completedAt, b.completedAt)
+	})
+	overflow := done[:len(done)-MaxCompletedJobs]
+	for _, f := range overflow {
+		m.Remove(f.id)
+	}
+	return len(overflow)
 }
 
 // KillAll terminates all background shells. The provided context bounds how
