@@ -295,7 +295,10 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				// Use background context so it continues after tool returns
 				bgShell, err := bgManager.Start(context.Background(), sessionID, execWorkingDir, blockFuncs(), onBlocked, params.Command, params.Description)
 				if err != nil {
-					return fantasy.ToolResponse{}, fmt.Errorf("error starting background shell: %w", err)
+					// Hitting the concurrency cap is transient and
+					// recoverable, so report it to the model as a tool
+					// result rather than aborting the whole turn.
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("error starting background shell: %s", err)), nil
 				}
 
 				// Wait a short time to detect fast failures (blocked commands, syntax errors, etc.)
@@ -350,7 +353,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			bgManager.Cleanup()
 			bgShell, err := bgManager.Start(context.Background(), sessionID, execWorkingDir, blockFuncs(), onBlocked, params.Command, params.Description)
 			if err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("error starting shell: %w", err)
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("error starting shell: %s", err)), nil
 			}
 
 			// Wait for either completion, auto-background threshold,

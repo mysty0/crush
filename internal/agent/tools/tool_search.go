@@ -82,7 +82,7 @@ func (d *deferredTool) Info() fantasy.ToolInfo {
 // tool_search when it is confident and still be corrected cheaply when wrong.
 func (d *deferredTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	if missing := d.missingRequired(call.Input); len(missing) > 0 {
-		return fantasy.NewTextErrorResponse(d.schemaHint(missing)), nil
+		return fantasy.NewTextErrorResponse(d.schemaHint(missing, call.Input)), nil
 	}
 	return d.inner.Run(ctx, call)
 }
@@ -112,11 +112,22 @@ func (d *deferredTool) missingRequired(input string) []string {
 }
 
 // schemaHint is the corrective response: what was missing, plus the full schema.
-func (d *deferredTool) schemaHint(missing []string) string {
+// rawInput is the call's original (unparsed) argument string, so an entirely
+// empty call -- "" or "{}" -- can be called out explicitly. That distinction
+// matters: a model that sent no arguments at all is not omitting one field by
+// mistake, it skipped argument generation entirely, and needs to be told that
+// plainly rather than left to infer it from a list of missing names.
+func (d *deferredTool) schemaHint(missing []string, rawInput string) string {
 	info := d.inner.Info()
 	var b strings.Builder
-	fmt.Fprintf(&b, "This call is missing required parameter(s): %s.\n\n",
-		strings.Join(missing, ", "))
+	trimmed := strings.TrimSpace(rawInput)
+	if trimmed == "" || trimmed == "{}" {
+		b.WriteString("You called this tool with no arguments at all (empty input). ")
+		fmt.Fprintf(&b, "It requires: %s.\n\n", strings.Join(missing, ", "))
+	} else {
+		fmt.Fprintf(&b, "This call is missing required parameter(s): %s.\n\n",
+			strings.Join(missing, ", "))
+	}
 	b.WriteString("Here is the tool's full schema; retry the call with it. ")
 	b.WriteString("You do not need to call tool_search for this tool.\n\n")
 	payload, err := json.MarshalIndent(toolSearchHit{
@@ -274,7 +285,8 @@ func (t *toolSearchTool) Run(_ context.Context, call fantasy.ToolCall) (fantasy.
 	}
 	if strings.TrimSpace(params.Query) == "" && len(params.Names) == 0 {
 		return fantasy.NewTextErrorResponse(
-			"provide a query describing what you want to do, or exact tool names to load"), nil
+			"provide a query describing what you want to do, or exact tool names to load",
+		), nil
 	}
 
 	var hits []fantasy.AgentTool
@@ -299,7 +311,8 @@ func (t *toolSearchTool) Run(_ context.Context, call fantasy.ToolCall) (fantasy.
 	if len(hits) == 0 {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf(
 			"no tool matched %q. Available servers: %s",
-			params.Query, strings.Join(t.servers(), ", "))), nil
+			params.Query, strings.Join(t.servers(), ", "),
+		)), nil
 	}
 
 	out := struct {

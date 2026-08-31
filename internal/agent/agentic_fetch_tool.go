@@ -175,7 +175,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 			}
 
 			webFetchTool := tools.NewWebFetchTool(tmpDir, client, c.webFetchOptions())
-			webSearchTool := tools.NewWebSearchTool(client, c.webSearchOptions())
+			webSearchTool := tools.NewWebSearchTool(client, c.webSearchOptions(fetchModel))
 			fetchTools := []fantasy.AgentTool{
 				webFetchTool,
 				webSearchTool,

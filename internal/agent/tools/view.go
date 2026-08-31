@@ -2,11 +2,16 @@ package tools
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	_ "embed"
 	"errors"
 	"fmt"
 	"html/template"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"io/fs"
 	"net/http"
@@ -26,6 +31,8 @@ import (
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/disintegration/imaging"
+	_ "golang.org/x/image/webp"
 )
 
 //go:embed view.md.tpl
@@ -91,6 +98,20 @@ const (
 	// above this size are still readable, but hashline editing is
 	// unavailable for them.
 	MaxSnapshotSize = 5 * 1024 * 1024 // 5MB
+
+	// MaxImageDimension is the pixel size (on the longer edge) past which
+	// an image is downscaled before being sent to the model. Anthropic
+	// rejects any image over 2000px on either side once a request carries
+	// multiple images -- a limit this tool has no way to predict from a
+	// single file read, since it depends on how many other images are
+	// already in the conversation. Downscaling proactively avoids a
+	// request that fails outright partway through an unrelated turn.
+	MaxImageDimension = 2000
+	// TargetImageDimension is what an oversized image is downscaled to.
+	// Set below MaxImageDimension (rather than right at it) for headroom,
+	// and it happens to match Anthropic's own documented sweet spot for
+	// image quality vs. token cost, so a resize never makes things worse.
+	TargetImageDimension = 1568
 )
 
 type contentTooLargeError struct {
@@ -248,6 +269,16 @@ func NewViewTool(
 				// on mismatch, so prefer the sniffed type whenever
 				// it identifies a supported image format.
 				mimeType = sniffImageMimeType(imageData, mimeType)
+
+				if resized, resizedMime, err := downscaleImageIfOversized(imageData); err != nil {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf(
+						"Image dimensions exceed %dpx and could not be automatically downscaled (%s). "+
+							"Resize it manually before viewing, e.g.: magick %q -resize %dx%d\\> /tmp/resized.jpg",
+						MaxImageDimension, err, filePath, TargetImageDimension, TargetImageDimension,
+					)), nil
+				} else if resized != nil {
+					imageData, mimeType = resized, resizedMime
+				}
 
 				return fantasy.NewImageResponse(imageData, mimeType), nil
 			}
@@ -578,6 +609,36 @@ func sniffImageMimeType(data []byte, fallback string) string {
 		return sniffed
 	}
 	return fallback
+}
+
+// downscaleImageIfOversized checks an image's pixel dimensions and, if
+// either exceeds MaxImageDimension, decodes, resizes (preserving aspect
+// ratio, longest edge becomes TargetImageDimension), and re-encodes it as
+// JPEG. Returns (nil, "", nil) when no resize was needed. jpeg, png, gif,
+// and webp are all decodable here -- webp via the blank-imported
+// golang.org/x/image/webp registering itself with the stdlib image
+// package, the same registry image.DecodeConfig and imaging.Decode both
+// consult.
+func downscaleImageIfOversized(data []byte) (resized []byte, resizedMime string, err error) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		// Dimensions unreadable (unrecognized/corrupt format); leave the
+		// decision to the API rather than guessing.
+		return nil, "", nil
+	}
+	if cfg.Width <= MaxImageDimension && cfg.Height <= MaxImageDimension {
+		return nil, "", nil
+	}
+	img, err := imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
+	if err != nil {
+		return nil, "", fmt.Errorf("%dx%d image, and decoding it for resize failed: %w", cfg.Width, cfg.Height, err)
+	}
+	fitted := imaging.Fit(img, TargetImageDimension, TargetImageDimension, imaging.Lanczos)
+	var buf bytes.Buffer
+	if err := imaging.Encode(&buf, fitted, imaging.JPEG, imaging.JPEGQuality(88)); err != nil {
+		return nil, "", fmt.Errorf("%dx%d image, and re-encoding the resized copy failed: %w", cfg.Width, cfg.Height, err)
+	}
+	return buf.Bytes(), "image/jpeg", nil
 }
 
 // isInSkillsPath checks if filePath is within any of the configured skills

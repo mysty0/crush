@@ -277,8 +277,18 @@ func (c *coordinator) resolveDefaultSonnetModel() (config.SelectedModel, bool) {
 // resolveFetchModelSelection resolves the agentic_fetch tool's "model"
 // parameter into a SelectedModel. An explicit ID is validated against the
 // enabled providers (same resolution as the "agent" tool); an empty ID
-// defaults to a Claude Sonnet model if one is available on an enabled
-// provider, falling back to the configured small model otherwise.
+// uses the configured small model, falling back to a Claude Sonnet model
+// on an enabled provider only when no small model is configured.
+//
+// The small model comes first because it is the slot that already means
+// "the cheap, fast model for auxiliary work", and fetching plus
+// extracting from a page is exactly that. Preferring Sonnet
+// unconditionally silently ignored an explicitly configured small model
+// and billed the work to a different provider than the user chose --
+// surprising in general, and doubly so where the configured provider
+// happens to also serve a Sonnet (the Cloud Code Assist providers list
+// Claude models alongside Gemini, so a Gemini-configured session would
+// still route fetches to Claude).
 func (c *coordinator) resolveFetchModelSelection(modelID string) (config.SelectedModel, error) {
 	if modelID != "" {
 		selected, ok := c.resolveTaskModel(modelID)
@@ -288,15 +298,15 @@ func (c *coordinator) resolveFetchModelSelection(modelID string) (config.Selecte
 		return selected, nil
 	}
 
+	if small, ok := c.cfg.Config().Models[config.SelectedModelTypeSmall]; ok && small.Model != "" {
+		return small, nil
+	}
+
 	if selected, ok := c.resolveDefaultSonnetModel(); ok {
 		return selected, nil
 	}
 
-	small, ok := c.cfg.Config().Models[config.SelectedModelTypeSmall]
-	if !ok {
-		return config.SelectedModel{}, errSmallModelNotSelected
-	}
-	return small, nil
+	return config.SelectedModel{}, errSmallModelNotSelected
 }
 
 // unknownModelError builds the error returned when the model passes a

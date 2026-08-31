@@ -1,9 +1,12 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,6 +221,80 @@ func TestViewToolBlocksOversizedImages(t *testing.T) {
 
 	require.True(t, resp.IsError)
 	require.Contains(t, resp.Content, "Image file is too large")
+}
+
+// makeSolidPNG writes a minimal, highly-compressible solid-color PNG of the
+// given pixel dimensions -- enough to exercise real dimension-based
+// decode/resize logic without needing a real screenshot fixture, and small
+// enough on disk to stay under MaxViewSize even at dimensions well past
+// MaxImageDimension.
+func makeSolidPNG(t *testing.T, path string, width, height int) {
+	t.Helper()
+	img := image.NewGray(image.Rect(0, 0, width, height))
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	defer f.Close()
+	require.NoError(t, png.Encode(f, img))
+}
+
+// TestViewToolDownscalesOversizedImageDimensions is the regression guard for
+// the "Bad Request: image dimensions exceed max allowed size" failure: a
+// file within MaxViewSize's byte limit but whose pixel dimensions exceed
+// MaxImageDimension must be transparently downscaled and returned as a
+// normal, non-error image response instead of being forwarded as-is and
+// failing later at the provider.
+func TestViewToolDownscalesOversizedImageDimensions(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	filePath := filepath.Join(workingDir, "oversized.png")
+	// Portrait, matching the real-world case: taller than MaxImageDimension
+	// but narrower, so only one dimension trips the check.
+	makeSolidPNG(t, filePath, 1200, 2400)
+
+	tool := newViewToolForTest(workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	ctx = context.WithValue(ctx, SupportsImagesContextKey, true)
+	resp := runViewTool(t, tool, ctx, ViewParams{
+		FilePath: filePath,
+	})
+
+	require.False(t, resp.IsError, "an image the tool CAN resize must not surface as an error: %s", resp.Content)
+	require.Equal(t, "image", resp.Type)
+	require.Equal(t, "image/jpeg", resp.MediaType, "the resized copy is re-encoded as JPEG regardless of source format")
+
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(resp.Data))
+	require.NoError(t, err)
+	require.LessOrEqual(t, cfg.Width, MaxImageDimension)
+	require.LessOrEqual(t, cfg.Height, MaxImageDimension)
+	require.Equal(t, TargetImageDimension, max(cfg.Width, cfg.Height),
+		"the longer edge should land exactly at the resize target")
+	// Aspect ratio preserved (1200:2400 == 1:2).
+	require.InDelta(t, 2.0, float64(cfg.Height)/float64(cfg.Width), 0.01)
+}
+
+// TestViewToolLeavesSmallImagesUntouched proves the downscale path only
+// engages when actually needed: an image already within MaxImageDimension
+// is returned byte-for-byte identical, not silently re-encoded.
+func TestViewToolLeavesSmallImagesUntouched(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	filePath := filepath.Join(workingDir, "small.png")
+	makeSolidPNG(t, filePath, 400, 300)
+	original, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+
+	tool := newViewToolForTest(workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	ctx = context.WithValue(ctx, SupportsImagesContextKey, true)
+	resp := runViewTool(t, tool, ctx, ViewParams{
+		FilePath: filePath,
+	})
+
+	require.False(t, resp.IsError)
+	require.Equal(t, "image/png", resp.MediaType, "an in-bounds image keeps its original format")
+	require.Equal(t, original, resp.Data, "an in-bounds image must be forwarded unmodified")
 }
 
 func TestReadTextFileEnforcesMaxContentSize(t *testing.T) {
