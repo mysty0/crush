@@ -110,3 +110,33 @@ func TestAgentToolBareTrailingSpinnerGetsHint(t *testing.T) {
 	require.Regexp(t, `Running · \d+s`, rendered,
 		"the bare trailing spinner must show a word, not just elapsed digits")
 }
+
+// TestJobOutputStopwatchAppearsAfterThreshold guards the case where a tool
+// renders a real header and leaves the running state to the shared
+// early-state body. That body used to be the frozen line "Waiting for tool
+// response...", so a job_output call waiting out its (up to ten minute)
+// timeout gave no sign of how long it had been waiting -- or that anything
+// was happening at all.
+func TestJobOutputStopwatchAppearsAfterThreshold(t *testing.T) {
+	t.Parallel()
+
+	sty := styles.CharmtonePantera()
+	toolCall := message.ToolCall{
+		ID:       "tc-job-output-stopwatch",
+		Name:     "job_output",
+		Input:    `{"shell_id":"091","wait":true}`,
+		Finished: true,
+	}
+	item := NewJobOutputToolMessageItem(&sty, toolCall, nil, false).(*baseToolMessageItem)
+	for range 25 {
+		item.Advance()
+	}
+
+	rendered := ansi.Strip(item.Render(80))
+	require.Contains(t, rendered, "Running", "a waiting job must animate, not sit on frozen text")
+
+	item.startedAt = time.Now().Add(-15 * time.Second)
+	item.clearCache()
+	rendered = ansi.Strip(item.Render(80))
+	require.Regexp(t, `Running · \d+s`, rendered, "a long wait must show how long it has waited")
+}
