@@ -459,6 +459,20 @@ func TestDiscoverBuiltin(t *testing.T) {
 		}
 	}
 	require.True(t, foundCodeReview, "code-review builtin skill not found")
+
+	var foundCaveman bool
+	for _, s := range discovered {
+		if s.Name == "caveman" {
+			foundCaveman = true
+			require.Equal(t, "crush://skills/caveman/SKILL.md", s.SkillFilePath)
+			require.Equal(t, "crush://skills/caveman", s.Path)
+			require.NotEmpty(t, s.Description)
+			require.NotEmpty(t, s.Instructions)
+			require.True(t, s.Builtin)
+			require.True(t, s.AutoActivate, "caveman must be active by default")
+		}
+	}
+	require.True(t, foundCaveman, "caveman builtin skill not found")
 }
 
 func TestDeduplicate(t *testing.T) {
