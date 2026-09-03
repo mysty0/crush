@@ -222,11 +222,18 @@ func (s *service) forkConversation(ctx context.Context, sessionID string, target
 	return fork.ID, nil
 }
 
-
 // restoreCode writes the tracked files back to disk as they were at the
 // target message and returns the number of files written. Selection is by
 // message order: for each path, the latest version whose owning message is
 // at or before the target in the conversation is used.
+//
+// Before writing, each file's current disk content is checked against this
+// session's own most recently recorded version for that path (regardless
+// of target position). A mismatch means something outside this rewind --
+// another session, git, an editor -- changed the file after this session
+// last saw it, and the recorded history no longer reflects the file's real
+// history. Restoring the old snapshot in that case would silently discard
+// that outside work, so the file is skipped instead of overwritten.
 func (s *service) restoreCode(ctx context.Context, sessionID, targetMessageID string) (int, error) {
 	all, err := s.messages.List(ctx, sessionID)
 	if err != nil {
@@ -254,7 +261,14 @@ func (s *service) restoreCode(ctx context.Context, sessionID, targetMessageID st
 	// at or before the target. Versions are returned in ascending order, so
 	// a later qualifying version overwrites an earlier one.
 	selected := make(map[string]history.File)
+	// latestKnown tracks this session's own most recent version of each
+	// path, independent of the target -- the file content this session
+	// last actually recorded on disk, used below to detect outside drift.
+	latestKnown := make(map[string]history.File)
 	for _, f := range files {
+		if cur, exists := latestKnown[f.Path]; !exists || f.Version >= cur.Version {
+			latestKnown[f.Path] = f
+		}
 		r, ok := rank[f.MessageID]
 		if !ok || r > targetRank {
 			continue
@@ -265,7 +279,16 @@ func (s *service) restoreCode(ctx context.Context, sessionID, targetMessageID st
 	}
 
 	restored := 0
-	for _, f := range selected {
+	for path, f := range selected {
+		if known, ok := latestKnown[path]; ok {
+			if onDisk, err := os.ReadFile(path); err == nil && string(onDisk) != known.Content {
+				// The file no longer matches what this session last
+				// recorded for it: something outside this rewind changed
+				// it since. Restoring the older snapshot would clobber
+				// that outside work, so leave the file alone.
+				continue
+			}
+		}
 		if err := os.WriteFile(f.Path, []byte(f.Content), 0o644); err != nil {
 			return restored, fmt.Errorf("rewind: restore %s: %w", f.Path, err)
 		}

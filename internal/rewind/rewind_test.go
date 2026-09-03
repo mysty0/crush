@@ -296,6 +296,50 @@ func TestRewindCodeRestoresFilesOnDisk(t *testing.T) {
 	require.Equal(t, "v1", string(got))
 }
 
+// TestRewindCodeSkipsFilesChangedOutsideSession reproduces a real
+// incident: rewinding a long-lived session restored a stale snapshot
+// for a file the session had not touched recently, clobbering newer
+// work done by another session (or git, or an editor) in the meantime.
+// A file whose on-disk content no longer matches this session's own
+// last known version must be left untouched by rewind.
+func TestRewindCodeSkipsFilesChangedOutsideSession(t *testing.T) {
+	e := newTestEnv(t)
+
+	sess, err := e.sessions.Create(e.ctx, "s")
+	require.NoError(t, err)
+
+	path := filepath.Join(t.TempDir(), "f.txt")
+	require.NoError(t, os.WriteFile(path, []byte("v1"), 0o644))
+
+	// Message 1 captures the file at "v1"; this is the target we rewind
+	// back to.
+	m1 := e.addUser(t, sess.ID, "edit one")
+	_, err = e.history.Create(e.ctx, sess.ID, m1.ID, path, "v1")
+	require.NoError(t, err)
+
+	// The session itself later records "v2" against a later message,
+	// same as any normal edit.
+	m2 := e.addUser(t, sess.ID, "edit two")
+	_, err = e.history.CreateVersion(e.ctx, sess.ID, m2.ID, path, "v2")
+	require.NoError(t, err)
+
+	// But the file on disk ends up at "v3" -- written by something this
+	// session never recorded (another session, git, an editor). The
+	// session's history has no idea "v3" exists.
+	require.NoError(t, os.WriteFile(path, []byte("v3"), 0o644))
+
+	// Rewinding to m1 must not clobber "v3": it doesn't match what this
+	// session last knew about the file ("v2"), so restoring old content
+	// would silently discard outside work.
+	res, err := e.rewind.Rewind(e.ctx, sess.ID, m1.ID, ModeCode)
+	require.NoError(t, err)
+	require.Equal(t, 0, res.FilesRestored, "the drifted file must be skipped, not overwritten")
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "v3", string(got), "outside work must survive the rewind")
+}
+
 func TestRewindBothForksAndRestores(t *testing.T) {
 	e := newTestEnv(t)
 
