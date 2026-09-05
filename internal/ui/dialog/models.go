@@ -2,12 +2,14 @@ package dialog
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"log/slog"
 	"slices"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/pkg/catwalk"
@@ -80,6 +82,13 @@ type Models struct {
 	modelType ModelType
 	providers []catwalk.Provider
 
+	// loading and spinner track a background config reload kicked off
+	// when the dialog opens (see StartLoading): the dialog is usable
+	// immediately with the cached provider list, and refreshes in place
+	// if the reload turns up changes (e.g. a newly logged-in account).
+	loading bool
+	spinner spinner.Model
+
 	keyMap struct {
 		Tab      key.Binding
 		UpDown   key.Binding
@@ -94,7 +103,10 @@ type Models struct {
 	help  help.Model
 }
 
-var _ Dialog = (*Models)(nil)
+var (
+	_ Dialog        = (*Models)(nil)
+	_ LoadingDialog = (*Models)(nil)
+)
 
 // NewModels creates a new Models dialog.
 func NewModels(com *common.Common, isOnboarding bool) (*Models, error) {
@@ -110,6 +122,11 @@ func NewModels(com *common.Common, isOnboarding bool) (*Models, error) {
 	m.list = NewModelsList(t)
 	m.list.Focus()
 	m.list.SetSelected(0)
+
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = com.Styles.Dialog.Spinner
+	m.spinner = s
 
 	m.input = textinput.New()
 	m.input.SetVirtualCursor(false)
@@ -159,6 +176,43 @@ func NewModels(com *common.Common, isOnboarding bool) (*Models, error) {
 	}
 
 	return m, nil
+}
+
+// modelsConfigReloadedMsg carries the result of the background config
+// reload kicked off by StartLoading.
+type modelsConfigReloadedMsg struct {
+	reloaded bool
+	err      error
+}
+
+// reloadConfigCmd checks whether any tracked config file changed on disk
+// since this process last loaded it, and reloads if so. This runs off the
+// UI thread because a reload may re-query provider model lists over the
+// network; the dialog stays interactive with its cached list in the
+// meantime and refreshes in place if the result changes anything (see
+// HandleMsg's modelsConfigReloadedMsg case).
+func (m *Models) reloadConfigCmd() tea.Cmd {
+	return func() tea.Msg {
+		reloaded, err := m.com.Workspace.ReloadConfigIfStale(context.Background())
+		return modelsConfigReloadedMsg{reloaded: reloaded, err: err}
+	}
+}
+
+// StartLoading implements [LoadingDialog]. It kicks off the spinner and a
+// background check for out-of-process config changes (e.g. a `crush
+// login` run from another terminal) without blocking the dialog, which is
+// already usable with the provider list captured at construction.
+func (m *Models) StartLoading() tea.Cmd {
+	if m.loading {
+		return nil
+	}
+	m.loading = true
+	return tea.Batch(m.spinner.Tick, m.reloadConfigCmd())
+}
+
+// StopLoading implements [LoadingDialog].
+func (m *Models) StopLoading() {
+	m.loading = false
 }
 
 // ID implements Dialog.
@@ -230,6 +284,31 @@ func (m *Models) HandleMsg(msg tea.Msg) Action {
 			m.list.ScrollToTop()
 			return ActionCmd{cmd}
 		}
+	case modelsConfigReloadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			slog.Warn("Failed to reload stale config before refreshing model switcher", "error", msg.err)
+			break
+		}
+		if !msg.reloaded {
+			break
+		}
+		// Config changed on disk (e.g. a `crush login` from another
+		// terminal): re-fetch the provider catalog and rebuild the list
+		// in place so the new provider or account shows up without the
+		// user having to close and reopen the dialog.
+		if providers, err := config.Providers(m.com.Config()); err == nil || len(providers) > 0 {
+			m.providers = providers
+		}
+		if err := m.setProviderItems(); err != nil {
+			return util.ReportError(err)
+		}
+	case spinner.TickMsg:
+		if m.loading {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return ActionCmd{cmd}
+		}
 	}
 	return nil
 }
@@ -275,6 +354,9 @@ func (m *Models) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	rc := NewRenderContext(t, width)
 	rc.Title = "Switch Model"
 	rc.TitleInfo = m.modelTypeRadioView()
+	if m.loading {
+		rc.TitleInfo += "  " + t.Dialog.SecondaryText.Render(m.spinner.View()+" syncing")
+	}
 
 	if m.isOnboarding {
 		titleText := t.Dialog.PrimaryText.Render("To start, let's choose a provider and model.")
