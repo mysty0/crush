@@ -5049,43 +5049,29 @@ func (m *UI) cancelAgent() tea.Cmd {
 	return cancelTimerCmd()
 }
 
-// doCancelAgent cancels any running bang command and the agent, and stops
-// the spinning todo indicator.
+// doCancelAgent cancels any running bang command and the agent (discarding
+// any queued follow-up prompts on the backend), and stops the spinning
+// todo indicator.
 func (m *UI) doCancelAgent() {
-	m.doCancelAgentKeepQueue(false)
-}
-
-// doCancelAgentKeepQueue cancels any running bang command and the agent,
-// and stops the spinning todo indicator. When keepQueue is true, queued
-// follow-up prompts are left in place so the first one starts as the next
-// turn once the canceled turn unwinds, instead of being discarded.
-func (m *UI) doCancelAgentKeepQueue(keepQueue bool) {
 	// Cancel a running bang command if one is in progress.
 	if m.bangCancel != nil {
 		m.bangCancel()
 		m.bangCancel = nil
 	}
 
-	if keepQueue {
-		m.com.Workspace.AgentCancelKeepQueue(m.session.ID)
-	} else {
-		m.com.Workspace.AgentCancel(m.session.ID)
-	}
+	m.com.Workspace.AgentCancel(m.session.ID)
 	// Stop the spinning todo indicator.
 	m.todoIsSpinning = false
 	m.renderPills()
 }
 
-// ctrlCCancelAgent implements Ctrl+C's \"cancel first\" behavior: unlike
+// ctrlCCancelAgent implements Ctrl+C's "cancel first" behavior: unlike
 // Esc's two-step confirm, a single Ctrl+C press cancels the active turn
-// immediately.
+// immediately and discards any queued follow-up prompts, same as Esc.
 //
-//   - If prompts are queued, they are kept (not discarded, unlike Esc) so
-//     the first one starts running as the next turn once the canceled
-//     turn unwinds.
-//   - Otherwise, if the turn hasn't produced any output yet, it mirrors
-//     Esc's no-output path: the prompt is returned to the editor and the
-//     turn is dropped from history instead of just being canceled.
+//   - If nothing has been generated yet, it mirrors Esc's no-output path:
+//     the prompt is returned to the editor and the turn is dropped from
+//     history instead of just being canceled.
 func (m *UI) ctrlCCancelAgent() tea.Cmd {
 	if !m.hasSession() || !m.com.Workspace.AgentIsReady() {
 		return nil
@@ -5094,22 +5080,26 @@ func (m *UI) ctrlCCancelAgent() tea.Cmd {
 	// later fire a redundant second cancel.
 	m.isCanceling = false
 
-	if m.com.Workspace.AgentQueuedPrompts(m.session.ID) > 0 {
-		m.doCancelAgentKeepQueue(true)
-		return nil
-	}
-
-	// Nothing has been generated yet, so remember the prompt so it can
-	// be returned to the editor once the canceled turn settles, mirroring
-	// Esc's immediate no-output cancel.
-	if m.bangCancel == nil && m.chat.LastMessageHasNoOutput() {
+	// Nothing has been generated yet and nothing is queued behind it, so
+	// remember the prompt so it can be returned to the editor once the
+	// canceled turn settles, mirroring Esc's immediate no-output cancel.
+	if m.promptQueue == 0 && m.bangCancel == nil && m.chat.LastMessageHasNoOutput() {
 		if id, text, ok := m.chat.LastUserMessage(); ok && strings.TrimSpace(text) != "" {
 			m.cancelRestore = &cancelRestoreState{userMsgID: id, text: text}
 		}
 	}
 
+	// doCancelAgent discards any queued follow-up prompts on the backend.
+	// Clear the cached queue state here too so the "N Queued" pill drops
+	// immediately instead of waiting for the next off-thread refresh.
 	m.doCancelAgent()
-	return nil
+	m.promptQueue = 0
+	m.promptQueueItems = nil
+	m.promptQueueCheckedAt = time.Now()
+	m.invalidatePromptQueue()
+	m.invalidateBusyCaches()
+	m.updateLayoutAndSize()
+	return m.dispatchBusyRefresh()
 }
 
 // maybeRestoreCanceledPrompt returns the prompt of a just-canceled
@@ -5229,14 +5219,14 @@ func (m *UI) openModelsDialog() tea.Cmd {
 		return nil
 	}
 
-	// Pick up config changes made by another process (e.g. `crush login
-	// claude --account work` run from a separate terminal) before
-	// building the dialog, so a newly added provider or account shows up
-	// without a restart. Cheap no-op when nothing on disk has changed.
-	if _, err := m.com.Workspace.ReloadConfigIfStale(context.Background()); err != nil {
-		slog.Warn("Failed to reload stale config before opening model switcher", "error", err)
-	}
-
+	// Open immediately with the provider list already cached in memory,
+	// so the dialog never blocks on a stale-config check (which may
+	// re-query provider model lists over the network and take seconds).
+	// The dialog's own StartLoading refreshes the catalog in the
+	// background and updates the list in place if anything changed
+	// (e.g. a `crush login claude --account work` run from another
+	// terminal), without taking away the user's ability to pick a model
+	// from the cached list in the meantime.
 	isOnboarding := m.state == uiOnboarding
 	modelsDialog, err := dialog.NewModels(m.com, isOnboarding)
 	if err != nil {
@@ -5245,7 +5235,7 @@ func (m *UI) openModelsDialog() tea.Cmd {
 
 	m.dialog.OpenDialog(modelsDialog)
 
-	return nil
+	return m.dialog.StartLoading()
 }
 
 // openCommandsDialog opens the commands dialog.
