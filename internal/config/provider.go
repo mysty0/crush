@@ -21,6 +21,7 @@ import (
 	"charm.land/catwalk/pkg/embedded"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/discover"
 	"github.com/charmbracelet/crush/internal/home"
 	"github.com/charmbracelet/x/etag"
 )
@@ -236,6 +237,84 @@ func refreshCustomModelsInBackground(store *ConfigStore, providerID, baseURL, ap
 		})
 		store.SetupAgents()
 	}()
+}
+
+// discoverCustomProviderInBackground runs first-time model discovery for
+// a custom provider that has no cached success to fall back on --
+// including one that has never succeeded, e.g. because of a bad API key
+// or an unreachable/broken endpoint. Load never waits on this: the
+// provider is simply absent from the running config until discovery
+// succeeds (or forever, if it never does), at which point it is
+// spliced into the live store. This is what keeps a single slow or
+// permanently broken custom provider from adding its full discovery
+// latency to every launch, forever, since a failing call is never
+// cached.
+func discoverCustomProviderInBackground(store *ConfigStore, id string, pc ProviderConfig, fetch func(ctx context.Context) ([]catwalk.Model, error)) {
+	// Skipped under test: configureProviders discovers synchronously
+	// under testing.Testing() and never calls this; guarded again here
+	// so a direct call from a future test does not leak a goroutine.
+	if testing.Testing() {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models, err := fetch(ctx)
+		if err != nil || len(models) == 0 {
+			return
+		}
+		_ = newCache[[]catwalk.Model](customModelsCachePath(id, pc.BaseURL, pc.APIKey)).Store(models)
+
+		resolver := store.Resolver()
+		if resolver == nil {
+			return
+		}
+		prepared, ok := prepareDiscoveredProvider(id, pc, models, resolver)
+		if !ok {
+			return
+		}
+		store.mutateInMemory(func(nc *Config) {
+			nc.Providers.Set(id, prepared)
+		})
+		store.SetupAgents()
+	}()
+}
+
+// prepareDiscoveredProvider fills in the same defaults and runs the same
+// checks as the synchronous custom-provider validation loop in
+// configureProviders, for the single provider that just finished a
+// background discovery. It is intentionally a separate, minimal
+// implementation rather than a shared call with that loop: the loop's
+// control flow and log messages are covered by tests that assume
+// synchronous discovery, and this rare, best-effort late-arrival path
+// should not have to stay in lockstep with it.
+func prepareDiscoveredProvider(id string, pc ProviderConfig, models []catwalk.Model, resolver VariableResolver) (ProviderConfig, bool) {
+	pc.ID = id
+	pc.Name = cmp.Or(pc.Name, id)
+	pc.Type = cmp.Or(pc.Type, catwalk.TypeOpenAICompat)
+	if pc.Disable || pc.BaseURL == "" || len(models) == 0 {
+		return pc, false
+	}
+	if !slices.Contains(catwalk.KnownProviderTypes(), pc.Type) &&
+		pc.Type != hyper.Name &&
+		!discover.IsKnownCustomProvider(string(pc.Type)) {
+		return pc, false
+	}
+	baseURL, err := resolver.ResolveValue(pc.BaseURL)
+	if baseURL == "" || err != nil {
+		return pc, false
+	}
+	pc.Models = models
+	headers := make(map[string]string, len(pc.ExtraHeaders))
+	for k, v := range pc.ExtraHeaders {
+		resolved, err := resolver.ResolveValue(v)
+		if err != nil || resolved == "" {
+			continue
+		}
+		headers[k] = resolved
+	}
+	pc.ExtraHeaders = headers
+	return pc, true
 }
 
 // Providers returns the list of providers, taking into account cached results

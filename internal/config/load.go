@@ -405,19 +405,36 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 	// configured and skip custom-provider discovery below.
 	c.seedOAuthProviders(ctx, store)
 
-	// Discover models concurrently for custom providers that need it.
 	// A provider needs discovery when discover_models is explicitly true,
 	// or when the models list is empty (auto-trigger, unless opted out).
+	//
+	// A provider that has discovered models successfully before uses
+	// that on-disk cache instantly and refreshes it in the background
+	// (refreshCustomModelsInBackground), so Load never blocks on a
+	// provider it has already seen. A provider with no cached success
+	// -- including one that has never once succeeded, e.g. because of
+	// a bad API key or an unreachable endpoint -- is not waited on
+	// either: it is simply skipped for this run (dropped below by the
+	// "no models" check, exactly like any other misconfigured
+	// provider) and discovered in the background instead
+	// (discoverCustomProviderInBackground), splicing itself into the
+	// live config once it lands. Without this, a single slow or
+	// permanently broken custom provider would add its full discovery
+	// latency to every launch, forever, since a failing call is never
+	// cached.
+	//
+	// Tests exercise discovery synchronously (bounded by discoverCtx's
+	// 3s timeout) so a single configureProviders call has a
+	// deterministic, assertable result.
 	type discoveryResult struct {
 		models []catwalk.Model
 		err    error
 	}
 
 	discoveryResults := make(map[string]discoveryResult)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
 
 	discoverCtx, discoverCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer discoverCancel()
 	for id, pc := range c.Providers.Seq2() {
 		if knownProviderNames[id] {
 			continue
@@ -449,40 +466,23 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 			return models, err
 		}
 
-		// A provider that has discovered models successfully before
-		// uses that on-disk cache instantly and refreshes it in the
-		// background, so Load never blocks on a provider it has
-		// already seen. The very first discovery for a provider still
-		// runs synchronously (bounded by discoverCtx's 3s timeout):
-		// there is nothing usable to show yet, and deferring it would
-		// make a freshly configured provider flicker out of the model
-		// picker until the background call lands.
-		//
-		// Skipped under test: this would otherwise read and write the
-		// real on-disk cache shared with the developer's own Crush
-		// data directory instead of a hermetic per-test one.
-		if !testing.Testing() {
-			if cached, _, err := newCache[[]catwalk.Model](customModelsCachePath(id, pc.BaseURL, pc.APIKey)).Get(); err == nil && len(cached) > 0 {
-				mu.Lock()
-				discoveryResults[id] = discoveryResult{models: cached}
-				mu.Unlock()
-				refreshCustomModelsInBackground(store, id, pc.BaseURL, pc.APIKey, runDiscovery)
-				continue
-			}
+		if testing.Testing() {
+			models, err := runDiscovery(discoverCtx)
+			discoveryResults[id] = discoveryResult{models: models, err: err}
+			continue
 		}
 
-		wg.Go(func() {
-			models, err := runDiscovery(discoverCtx)
-			if err == nil && len(models) > 0 && !testing.Testing() {
-				_ = newCache[[]catwalk.Model](customModelsCachePath(id, pc.BaseURL, pc.APIKey)).Store(models)
-			}
-			mu.Lock()
-			discoveryResults[id] = discoveryResult{models: models, err: err}
-			mu.Unlock()
-		})
+		// Skipped-under-test cache read: this would otherwise read
+		// the real on-disk cache shared with the developer's own
+		// Crush data directory instead of a hermetic per-test one.
+		if cached, _, err := newCache[[]catwalk.Model](customModelsCachePath(id, pc.BaseURL, pc.APIKey)).Get(); err == nil && len(cached) > 0 {
+			discoveryResults[id] = discoveryResult{models: cached}
+			refreshCustomModelsInBackground(store, id, pc.BaseURL, pc.APIKey, runDiscovery)
+			continue
+		}
+
+		discoverCustomProviderInBackground(store, id, pc, runDiscovery)
 	}
-	wg.Wait()
-	discoverCancel()
 
 	// Validate the custom providers.
 	for id, providerConfig := range c.Providers.Seq2() {
