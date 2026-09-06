@@ -101,21 +101,17 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 		assignIfNil(&cfg.Options.TUI.Transparent, true)
 	}
 
-	// Load known providers, this loads the config from catwalk. A failed
-	// refresh still yields the cached or embedded catalog, so only an empty
-	// list is fatal: starting up without providers is worse than starting
-	// up with slightly stale ones. Pass a Hyper token refresher so the
-	// catalog fetch can retry on 401.
-	providers, err := Providers(cfg, func(ctx context.Context) error {
+	// Load known providers from the on-disk cache (or the embedded
+	// catalog bundled with this release) instantly, with no network
+	// call. The live catwalk.charm.land / Hyper catalogs are fetched in
+	// the background and merged in once they land (see
+	// refreshProvidersInBackground) so a slow or unreachable network
+	// never holds up startup; the cached/embedded catalog is a sound
+	// enough answer to get the TUI on screen immediately.
+	store.knownProviders = providersFast(cfg)
+	refreshProvidersInBackground(store, func(ctx context.Context) error {
 		return store.RefreshOAuthToken(ctx, ScopeGlobal, "hyper")
 	})
-	if err != nil {
-		if len(providers) == 0 {
-			return nil, err
-		}
-		slog.Warn("Continuing with the previously known providers", "error", err)
-	}
-	store.knownProviders = providers
 
 	env := env.New()
 	// Configure providers
@@ -397,9 +393,10 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 	// Code CLI's credentials file. Once it holds a token of its own it is
 	// seeded like every other logged-in account, against that token.
 	if pc, ok := c.Providers.Get(claudecode.ProviderID); ok && !pc.Disable && pc.OAuthToken == nil && len(pc.Models) == 0 {
-		mctx, mcancel := context.WithTimeout(ctx, 5*time.Second)
-		pc.Models = claudecode.CachedModels(mctx)
-		mcancel()
+		pc.Models = seedModelsInBackground(store, claudecode.ProviderID, claudecode.DefaultModels(),
+			func(ctx context.Context) ([]catwalk.Model, error) {
+				return claudecode.CachedModels(ctx), nil
+			})
 		c.Providers.Set(claudecode.ProviderID, pc)
 	}
 
@@ -434,7 +431,7 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 			continue
 		}
 		providerID := cmp.Or(pc.ID, id)
-		cfg := discover.Config{
+		discoverCfg := discover.Config{
 			ID:             providerID,
 			BaseURL:        pc.BaseURL,
 			APIKey:         pc.APIKey,
@@ -442,12 +439,42 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 			ExistingModels: pc.Models,
 		}
 		providerType := cmp.Or(pc.Type, catwalk.TypeOpenAICompat)
-		wg.Go(func() {
-			models, err := discover.DiscoverModels(discoverCtx, cfg, resolver)
+		runDiscovery := func(ctx context.Context) ([]catwalk.Model, error) {
+			models, err := discover.DiscoverModels(ctx, discoverCfg, resolver)
 			if err == nil && len(models) > 0 {
 				if enricher := discover.GetEnricher(string(providerType)); enricher != nil {
-					models, _ = enricher.EnrichModels(discoverCtx, cfg, resolver, models)
+					models, _ = enricher.EnrichModels(ctx, discoverCfg, resolver, models)
 				}
+			}
+			return models, err
+		}
+
+		// A provider that has discovered models successfully before
+		// uses that on-disk cache instantly and refreshes it in the
+		// background, so Load never blocks on a provider it has
+		// already seen. The very first discovery for a provider still
+		// runs synchronously (bounded by discoverCtx's 3s timeout):
+		// there is nothing usable to show yet, and deferring it would
+		// make a freshly configured provider flicker out of the model
+		// picker until the background call lands.
+		//
+		// Skipped under test: this would otherwise read and write the
+		// real on-disk cache shared with the developer's own Crush
+		// data directory instead of a hermetic per-test one.
+		if !testing.Testing() {
+			if cached, _, err := newCache[[]catwalk.Model](customModelsCachePath(id, pc.BaseURL, pc.APIKey)).Get(); err == nil && len(cached) > 0 {
+				mu.Lock()
+				discoveryResults[id] = discoveryResult{models: cached}
+				mu.Unlock()
+				refreshCustomModelsInBackground(store, id, pc.BaseURL, pc.APIKey, runDiscovery)
+				continue
+			}
+		}
+
+		wg.Go(func() {
+			models, err := runDiscovery(discoverCtx)
+			if err == nil && len(models) > 0 && !testing.Testing() {
+				_ = newCache[[]catwalk.Model](customModelsCachePath(id, pc.BaseURL, pc.APIKey)).Store(models)
 			}
 			mu.Lock()
 			discoveryResults[id] = discoveryResult{models: models, err: err}

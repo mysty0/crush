@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"testing"
 	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -35,17 +36,15 @@ func (c *Config) seedOAuthProviders(ctx context.Context, store *ConfigStore) {
 		pc.BaseURL = codex.BaseURL
 		pc = c.refreshOAuthProviderBeforeModelDiscovery(ctx, store, codex.ProviderID, pc)
 		if len(pc.Models) == 0 {
-			// Query the native /codex/models endpoint for the account's
-			// actual model line-up, falling back to a static list.
-			mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			models, err := codex.CachedModels(mctx, pc.OAuthToken.AccessToken)
-			cancel()
-			pc.Models = models
-			if err != nil {
-				c.OAuthModelWarnings = append(c.OAuthModelWarnings, fmt.Sprintf(
-					"%s: using a limited default model list (live model discovery failed: %s)", pc.Name, err,
-				))
-			}
+			// Show the static default list instantly and query the
+			// native /codex/models endpoint for the account's actual
+			// model line-up in the background, so Load never blocks on
+			// this network call (see seedModelsInBackground).
+			token := pc.OAuthToken.AccessToken
+			pc.Models = seedModelsInBackground(store, codex.ProviderID, codex.DefaultModels(),
+				func(ctx context.Context) ([]catwalk.Model, error) {
+					return codex.CachedModels(ctx, token)
+				})
 		}
 		pc.AutoDiscoverModels = &disableDiscovery
 		c.Providers.Set(codex.ProviderID, pc)
@@ -58,22 +57,18 @@ func (c *Config) seedOAuthProviders(ctx context.Context, store *ConfigStore) {
 		pc.BaseURL = geminicli.BaseURL
 		pc = c.refreshOAuthProviderBeforeModelDiscovery(ctx, store, geminicli.ProviderID, pc)
 		if len(pc.Models) == 0 {
-			// Query the native fetchAvailableModels endpoint for the
-			// account's actual model line-up, falling back to a static
-			// list.
+			// Show the static default list instantly and query the
+			// native fetchAvailableModels endpoint for the account's
+			// actual model line-up in the background.
 			projectID := ""
 			if pc.OAuthExtra != nil {
 				projectID = pc.OAuthExtra["project_id"]
 			}
-			mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			models, err := geminicli.CachedModels(mctx, pc.OAuthToken.AccessToken, projectID, geminicli.GeminiCLIIdentity)
-			cancel()
-			pc.Models = models
-			if err != nil {
-				c.OAuthModelWarnings = append(c.OAuthModelWarnings, fmt.Sprintf(
-					"%s: using a limited default model list (live model discovery failed: %s)", pc.Name, err,
-				))
-			}
+			token := pc.OAuthToken.AccessToken
+			pc.Models = seedModelsInBackground(store, geminicli.ProviderID, geminicli.DefaultModels(),
+				func(ctx context.Context) ([]catwalk.Model, error) {
+					return geminicli.CachedModels(ctx, token, projectID, geminicli.GeminiCLIIdentity)
+				})
 		}
 		pc.AutoDiscoverModels = &disableDiscovery
 		c.Providers.Set(geminicli.ProviderID, pc)
@@ -96,19 +91,48 @@ func (c *Config) seedOAuthProviders(ctx context.Context, store *ConfigStore) {
 			if pc.OAuthExtra != nil {
 				projectID = pc.OAuthExtra["project_id"]
 			}
-			mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			models, err := geminicli.CachedModels(mctx, pc.OAuthToken.AccessToken, projectID, antigravity.Identity)
-			cancel()
-			pc.Models = models
-			if err != nil {
-				c.OAuthModelWarnings = append(c.OAuthModelWarnings, fmt.Sprintf(
-					"%s: using a limited default model list (live model discovery failed: %s)", pc.Name, err,
-				))
-			}
+			token := pc.OAuthToken.AccessToken
+			pc.Models = seedModelsInBackground(store, antigravity.ProviderID, geminicli.DefaultModels(),
+				func(ctx context.Context) ([]catwalk.Model, error) {
+					return geminicli.CachedModels(ctx, token, projectID, antigravity.Identity)
+				})
 		}
 		pc.AutoDiscoverModels = &disableDiscovery
 		c.Providers.Set(antigravity.ProviderID, pc)
 	}
+}
+
+// seedModelsInBackground returns fallback immediately so Load never
+// blocks on a live model-discovery call, and fetches the account's real
+// model line-up in the background via fetch. Once the fetch succeeds,
+// the result is merged into the live config store so a session started
+// moments after Crush launches still ends up with the account's actual
+// models, without holding up startup for it. A failed fetch is silently
+// left as fallback: it is not a warning-worthy condition here since the
+// synchronous behavior it replaces already used the same fallback on
+// error.
+func seedModelsInBackground(store *ConfigStore, providerID string, fallback []catwalk.Model, fetch func(ctx context.Context) ([]catwalk.Model, error)) []catwalk.Model {
+	// Skipped under test: this would otherwise fire a real network call
+	// with a goroutine that outlives its originating test.
+	if testing.Testing() {
+		return fallback
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models, err := fetch(ctx)
+		if err != nil || len(models) == 0 {
+			return
+		}
+		store.mutateInMemory(func(nc *Config) {
+			if pc, ok := nc.Providers.Get(providerID); ok {
+				pc.Models = models
+				nc.Providers.Set(providerID, pc)
+			}
+		})
+		store.SetupAgents()
+	}()
+	return fallback
 }
 
 // seedClaudeCodeAccounts populates the wire configuration for every
@@ -142,14 +166,17 @@ func (c *Config) seedClaudeCodeAccounts(ctx context.Context, store *ConfigStore,
 			// its own provider id. The token was just refreshed above, so
 			// it is handed over directly — resolving it through the store
 			// here would try to take the config write lock the loader
-			// already holds.
+			// already holds. Show the default list instantly and fetch
+			// the account's real models in the background so Load never
+			// blocks on this network call.
 			token := pc.OAuthToken.AccessToken
 			src := claudecode.NewTokenSource(claudecode.TokenFunc(
 				func(context.Context) (string, error) { return token, nil },
 			))
-			mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			pc.Models = claudecode.CachedModelsFor(mctx, id, src)
-			cancel()
+			pc.Models = seedModelsInBackground(store, id, claudecode.DefaultModels(),
+				func(ctx context.Context) ([]catwalk.Model, error) {
+					return claudecode.CachedModelsFor(ctx, id, src), nil
+				})
 		}
 		pc.AutoDiscoverModels = disableDiscovery
 		c.Providers.Set(id, pc)
