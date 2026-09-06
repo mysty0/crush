@@ -189,6 +189,12 @@ type UI struct {
 	session      *session.Session
 	sessionFiles []SessionFile
 
+	// msgWindow tracks the chat's windowed message-loading state: the
+	// initial session load only fetches recent history (see
+	// initialMessageWindow), and older pages are fetched lazily as the
+	// user scrolls to the top of chat. See message_window.go.
+	msgWindow messageWindowState
+
 	// restartRequested is set when the user asks to restart into a
 	// freshly built binary (see ActionRestart). Checked by the caller
 	// after the Bubble Tea program returns from Run.
@@ -826,6 +832,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.applyBusyState(msg)...)
 	case promptQueueMsg:
 		cmds = append(cmds, m.applyPromptQueue(msg)...)
+	case olderMessagesLoadedMsg:
+		if cmd := m.applyOlderMessages(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case lspStatesMsg:
 		if cmd := m.applyLSPStates(msg); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -876,10 +886,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.syncTmuxSession(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-		msgs, err := m.com.Workspace.ListMessages(context.Background(), m.session.ID)
+		msgs, hasMore, err := m.com.Workspace.ListMessagesWindow(context.Background(), m.session.ID, initialMessageWindow)
 		if err != nil {
 			cmds = append(cmds, util.ReportError(err))
 			break
+		}
+		m.msgWindow = messageWindowState{sessionID: m.session.ID, hasMore: hasMore}
+		if len(msgs) > 0 {
+			m.msgWindow.oldestLoaded = msgs[0].CreatedAt
+			m.msgWindow.initialOldest = msgs[0].CreatedAt
 		}
 		if cmd := m.restoreSessionModel(msgs); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -1387,6 +1402,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, cmd)
 				}
 			}
+			if cmd := m.maybeLoadOlderMessages(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			m.maybeEvictHistory()
 		}
 	case animFrameMsg:
 		if cmd := m.advanceAnimFrame(msg); cmd != nil {
@@ -1716,9 +1735,15 @@ func (m *UI) advanceAnimFrame(msg animFrameMsg) tea.Cmd {
 	return animFrameCmd(msg.seq)
 }
 
-// setSessionMessages sets the messages for the current session in the chat
-func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
-	var cmds []tea.Cmd
+// buildMessageItems converts a chronological slice of session messages
+// into rendered chat items, linking each tool call within the slice to
+// its result. lastUserMessageTime seeds the "most recent user message
+// so far" used to compute each assistant turn's elapsed-time display;
+// callers building the live/current window pass 0 and store the
+// returned value into m.lastUserMessageTime, while callers building an
+// older, already-past page (see applyOlderMessages) pass 0 and discard
+// it, since an older page must never regress that field.
+func (m *UI) buildMessageItems(msgs []message.Message, lastUserMessageTime int64) (items []chat.MessageItem, finalLastUserMessageTime int64) {
 	// Build tool result map to link tool calls with their results
 	msgPtrs := make([]*message.Message, len(msgs))
 	for i := range msgs {
@@ -1726,26 +1751,34 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 	}
 	toolResultMap := chat.BuildToolResultMap(msgPtrs)
 	if len(msgPtrs) > 0 {
-		m.lastUserMessageTime = msgPtrs[0].CreatedAt
+		lastUserMessageTime = msgPtrs[0].CreatedAt
 	}
 
 	// Add messages to chat with linked tool results
-	items := make([]chat.MessageItem, 0, len(msgs)*2)
+	items = make([]chat.MessageItem, 0, len(msgs)*2)
 	for _, msg := range msgPtrs {
 		switch msg.Role {
 		case message.User:
-			m.lastUserMessageTime = msg.CreatedAt
+			lastUserMessageTime = msg.CreatedAt
 			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
 		case message.Assistant:
 			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
 			if msg.FinishPart() != nil && msg.FinishPart().Reason == message.FinishReasonEndTurn {
-				infoItem := chat.NewAssistantInfoItem(m.com.Styles, msg, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
+				infoItem := chat.NewAssistantInfoItem(m.com.Styles, msg, m.com.Config(), time.Unix(lastUserMessageTime, 0))
 				items = append(items, infoItem)
 			}
 		default:
 			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
 		}
 	}
+	return items, lastUserMessageTime
+}
+
+// setSessionMessages sets the messages for the current session in the chat
+func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
+	var cmds []tea.Cmd
+	items, lastUserMessageTime := m.buildMessageItems(msgs, 0)
+	m.lastUserMessageTime = lastUserMessageTime
 
 	// Load nested tool calls for agent/agentic_fetch tools.
 	m.loadNestedToolCalls(items)
@@ -3558,6 +3591,18 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	default:
 		handleGlobalKeys(msg)
 	}
+
+	// A cheap no-op unless the key just scrolled the main chat to its
+	// top and there's more history to page in, or away from a
+	// lazily-loaded page that can now be freed (see
+	// maybeLoadOlderMessages / maybeEvictHistory), so it's safe to
+	// check unconditionally here instead of threading it through every
+	// scroll-capable case above (PageUp, HalfPageUp, Home, Up, mouse
+	// wheel via a separate call site, etc.).
+	if cmd := m.maybeLoadOlderMessages(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	m.maybeEvictHistory()
 
 	return tea.Sequence(cmds...)
 }

@@ -65,6 +65,21 @@ type Service interface {
 	Update(ctx context.Context, message Message) error
 	Get(ctx context.Context, id string) (Message, error)
 	List(ctx context.Context, sessionID string) ([]Message, error)
+	// ListRecent returns the most recent limit messages for a session in
+	// chronological order (oldest first). Used for the initial windowed
+	// load of a session so a long-running, heavily-compacted session
+	// doesn't pull its entire history into memory at once.
+	ListRecent(ctx context.Context, sessionID string, limit int) ([]Message, error)
+	// ListSince returns every message at or after sinceCreatedAt, in
+	// chronological order. Combined with ListRecent, this guarantees the
+	// initial windowed load always includes the full post-compaction
+	// tail even when it's longer than the default recent-message window.
+	ListSince(ctx context.Context, sessionID string, sinceCreatedAt int64) ([]Message, error)
+	// ListBefore returns up to limit messages older than
+	// beforeCreatedAt, in chronological order. Used to lazily page in
+	// earlier history as the user scrolls up past the loaded window. An
+	// empty result means there is nothing older left to load.
+	ListBefore(ctx context.Context, sessionID string, beforeCreatedAt int64, limit int) ([]Message, error)
 	ListUserMessages(ctx context.Context, sessionID string) ([]Message, error)
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
 	GetLastAssistantMessage(ctx context.Context, sessionID string) (Message, error)
@@ -569,6 +584,63 @@ func (s *service) List(ctx context.Context, sessionID string) ([]Message, error)
 	messages := make([]Message, len(dbMessages))
 	for i, dbMessage := range dbMessages {
 		messages[i], err = s.fromDBItem(dbMessage)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return messages, nil
+}
+
+func (s *service) ListRecent(ctx context.Context, sessionID string, limit int) ([]Message, error) {
+	dbMessages, err := s.q.ListMessagesBySessionRecent(ctx, db.ListMessagesBySessionRecentParams{
+		SessionID: sessionID,
+		Limit:     int64(limit),
+	})
+	if err != nil {
+		return nil, err
+	}
+	// The query returns newest first; callers want chronological order.
+	messages := make([]Message, len(dbMessages))
+	for i, dbMessage := range dbMessages {
+		messages[len(dbMessages)-1-i], err = s.fromDBItem(dbMessage)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return messages, nil
+}
+
+func (s *service) ListSince(ctx context.Context, sessionID string, sinceCreatedAt int64) ([]Message, error) {
+	dbMessages, err := s.q.ListMessagesBySessionSince(ctx, db.ListMessagesBySessionSinceParams{
+		SessionID: sessionID,
+		CreatedAt: sinceCreatedAt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]Message, len(dbMessages))
+	for i, dbMessage := range dbMessages {
+		messages[i], err = s.fromDBItem(dbMessage)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return messages, nil
+}
+
+func (s *service) ListBefore(ctx context.Context, sessionID string, beforeCreatedAt int64, limit int) ([]Message, error) {
+	dbMessages, err := s.q.ListMessagesBySessionBefore(ctx, db.ListMessagesBySessionBeforeParams{
+		SessionID: sessionID,
+		CreatedAt: beforeCreatedAt,
+		Limit:     int64(limit),
+	})
+	if err != nil {
+		return nil, err
+	}
+	// The query returns newest first; callers want chronological order.
+	messages := make([]Message, len(dbMessages))
+	for i, dbMessage := range dbMessages {
+		messages[len(dbMessages)-1-i], err = s.fromDBItem(dbMessage)
 		if err != nil {
 			return nil, err
 		}

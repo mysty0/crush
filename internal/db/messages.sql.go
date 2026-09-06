@@ -275,6 +275,162 @@ func (q *Queries) ListMessagesBySession(ctx context.Context, sessionID string) (
 	return items, nil
 }
 
+const listMessagesBySessionBefore = `-- name: ListMessagesBySessionBefore :many
+SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message
+FROM messages
+WHERE session_id = ? AND created_at < ?
+ORDER BY created_at DESC
+LIMIT ?
+`
+
+type ListMessagesBySessionBeforeParams struct {
+	SessionID string `json:"session_id"`
+	CreatedAt int64  `json:"created_at"`
+	Limit     int64  `json:"limit"`
+}
+
+// Returns up to `limit` messages older than beforeCreatedAt, newest
+// first (reverse to get chronological order). Used to lazily page in
+// earlier history as the user scrolls up past the initially loaded
+// window. An empty result means there is nothing older left to load.
+func (q *Queries) ListMessagesBySessionBefore(ctx context.Context, arg ListMessagesBySessionBeforeParams) ([]Message, error) {
+	rows, err := q.query(ctx, q.listMessagesBySessionBeforeStmt, listMessagesBySessionBefore, arg.SessionID, arg.CreatedAt, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Message{}
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.Role,
+			&i.Parts,
+			&i.Model,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.FinishedAt,
+			&i.Provider,
+			&i.IsSummaryMessage,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMessagesBySessionRecent = `-- name: ListMessagesBySessionRecent :many
+SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message
+FROM messages
+WHERE session_id = ?
+ORDER BY created_at DESC
+LIMIT ?
+`
+
+type ListMessagesBySessionRecentParams struct {
+	SessionID string `json:"session_id"`
+	Limit     int64  `json:"limit"`
+}
+
+// Returns the most recent `limit` messages for a session, newest first.
+// Callers that want chronological order (as ListMessagesBySession
+// returns) must reverse the result. Used for the initial windowed load
+// of a session so opening a long-running, heavily-compacted session
+// doesn't pull its entire history into memory (see
+// ListMessagesBySessionBefore for paging further back).
+func (q *Queries) ListMessagesBySessionRecent(ctx context.Context, arg ListMessagesBySessionRecentParams) ([]Message, error) {
+	rows, err := q.query(ctx, q.listMessagesBySessionRecentStmt, listMessagesBySessionRecent, arg.SessionID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Message{}
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.Role,
+			&i.Parts,
+			&i.Model,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.FinishedAt,
+			&i.Provider,
+			&i.IsSummaryMessage,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMessagesBySessionSince = `-- name: ListMessagesBySessionSince :many
+SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message
+FROM messages
+WHERE session_id = ? AND created_at >= ?
+ORDER BY created_at ASC
+`
+
+type ListMessagesBySessionSinceParams struct {
+	SessionID string `json:"session_id"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+// Returns every message for a session at or after sinceCreatedAt, in
+// chronological order. Used to make sure the initial windowed load
+// always includes the full post-compaction tail (from the session's
+// SummaryMessageID onward) even when that tail is longer than the
+// default recent-message window.
+func (q *Queries) ListMessagesBySessionSince(ctx context.Context, arg ListMessagesBySessionSinceParams) ([]Message, error) {
+	rows, err := q.query(ctx, q.listMessagesBySessionSinceStmt, listMessagesBySessionSince, arg.SessionID, arg.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Message{}
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.Role,
+			&i.Parts,
+			&i.Model,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.FinishedAt,
+			&i.Provider,
+			&i.IsSummaryMessage,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUserMessagesBySession = `-- name: ListUserMessagesBySession :many
 SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message
 FROM messages

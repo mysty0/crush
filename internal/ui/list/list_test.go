@@ -249,6 +249,84 @@ func TestList_RemoveItem_DropsEntry(t *testing.T) {
 	require.Equal(t, 2, b.renderHits, "re-added item must re-render")
 }
 
+// TestList_AtTop covers the AtTop helper used to trigger lazy-loading
+// older chat history once the user scrolls all the way up: empty, at
+// the very beginning, bottom-anchored, and scrolled down from the top.
+func TestList_AtTop(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty list", func(t *testing.T) {
+		t.Parallel()
+		l := NewList()
+		l.SetSize(40, 10)
+		require.True(t, l.AtTop())
+	})
+
+	items := func() []Item {
+		its := make([]Item, 20)
+		for i := range its {
+			its[i] = newTrackedItem(strconv.Itoa(i), "line", false)
+		}
+		return its
+	}
+
+	t.Run("true right after ScrollToTop", func(t *testing.T) {
+		t.Parallel()
+		l := NewList(items()...)
+		l.SetSize(40, 5) // viewport shorter than the content
+		l.ScrollToBottom()
+		l.ScrollToTop()
+		require.True(t, l.AtTop())
+	})
+
+	t.Run("false while bottom-anchored", func(t *testing.T) {
+		t.Parallel()
+		l := NewList(items()...)
+		l.SetSize(40, 5)
+		l.ScrollToBottom()
+		require.False(t, l.AtTop())
+	})
+
+	t.Run("false after scrolling down from the top", func(t *testing.T) {
+		t.Parallel()
+		l := NewList(items()...)
+		l.SetSize(40, 5)
+		l.ScrollToTop()
+		require.True(t, l.AtTop())
+		l.ScrollBy(1)
+		require.False(t, l.AtTop())
+	})
+}
+
+// TestList_RemoveItem_RepeatedFrontRemovalKeepsOffsetValid covers the
+// access pattern used to evict lazily-loaded chat history from the
+// front of the list once it scrolls out of view: removing item 0
+// repeatedly must keep offsetIdx pointing at the same visual content
+// (shifted down by one each time) rather than drifting or going
+// negative.
+func TestList_RemoveItem_RepeatedFrontRemovalKeepsOffsetValid(t *testing.T) {
+	t.Parallel()
+
+	its := make([]Item, 10)
+	for i := range its {
+		its[i] = newTrackedItem(strconv.Itoa(i), "line", false)
+	}
+	l := NewList(its...)
+	l.SetSize(40, 3) // small viewport so scrolling has somewhere to go
+	l.ScrollToBottom()
+	startIdx, _ := l.VisibleItemIndices()
+	require.Positive(t, startIdx, "the fixture must start scrolled past the front for this test to mean anything")
+
+	for range 5 {
+		l.RemoveItem(0)
+	}
+
+	require.Equal(t, 5, l.Len())
+	newStart, _ := l.VisibleItemIndices()
+	require.GreaterOrEqual(t, newStart, 0)
+	require.Less(t, newStart, l.Len())
+}
+
 // TestList_AtBottom_TallItemStraddlingViewport covers a regression
 // where AtBottom() returned false right after ScrollToBottom() when
 // the item at the scroll offset is taller than the viewport and is

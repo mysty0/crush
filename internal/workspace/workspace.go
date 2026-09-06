@@ -136,6 +136,21 @@ type Workspace interface {
 
 	// Messages
 	ListMessages(ctx context.Context, sessionID string) ([]message.Message, error)
+	// ListMessagesWindow returns a windowed view of a session's messages
+	// for display: the most recent `limit` messages, extended if
+	// necessary to always include the full tail since the session's
+	// SummaryMessageID (the active post-compaction context an agent
+	// would still send to the model). hasMore reports whether older
+	// messages exist beyond what was returned; page them in with
+	// ListOlderMessages. Used instead of ListMessages to open a session
+	// without loading its entire history into memory up front -- for a
+	// session compacted many times over, that history can be orders of
+	// magnitude larger than what's ever shown without scrolling back.
+	ListMessagesWindow(ctx context.Context, sessionID string, limit int) (msgs []message.Message, hasMore bool, err error)
+	// ListOlderMessages pages in up to `limit` messages older than
+	// beforeCreatedAt (the oldest currently loaded message's CreatedAt).
+	// An empty result means there is nothing older left to load.
+	ListOlderMessages(ctx context.Context, sessionID string, beforeCreatedAt int64, limit int) ([]message.Message, error)
 	ListUserMessages(ctx context.Context, sessionID string) ([]message.Message, error)
 	ListAllUserMessages(ctx context.Context) ([]message.Message, error)
 	// DiscardMessages permanently deletes the given messages from a

@@ -179,6 +179,30 @@ func (l *List) AtBottom() bool {
 	return totalHeight <= l.height
 }
 
+// AtTop reports whether the list is scrolled to its very beginning --
+// the first item's first line is at the top of the viewport. Used to
+// trigger lazy-loading older content once the user scrolls up past
+// what's currently loaded (see Chat.AtTop).
+//
+// While bottom-anchored, offsetIdx/offsetLine are not authoritative
+// (see the bottomAnchored field doc), so this only reports true once
+// the list has actually detached from the bottom -- which any
+// deliberate scroll up does (see ScrollBy/ScrollToTop). A list that
+// still fits entirely on screen and has never been scrolled reports
+// false here even though everything is technically visible; callers
+// only need this for the "user is actively looking at old history"
+// case, so that's an acceptable trade rather than reproducing
+// AtBottom's exact-height walk in reverse.
+func (l *List) AtTop() bool {
+	if len(l.items) == 0 {
+		return true
+	}
+	if l.bottomAnchored {
+		return false
+	}
+	return l.offsetIdx == 0 && l.offsetLine == 0
+}
+
 // SetReverse shows the list in reverse order.
 //
 // Reverse mode inverts ScrollBy's direction and flips the rendered

@@ -293,6 +293,14 @@ type TUIOptions struct {
 	Completions Completions `json:"completions,omitzero" jsonschema:"description=Completions UI options"`
 	Transparent *bool       `json:"transparent,omitempty" jsonschema:"description=Enable transparent background for the TUI interface,default=false"`
 	Scrollbar   string      `json:"scrollbar,omitempty" jsonschema:"description=Chat scrollbar visibility,enum=default,enum=always,enum=never,default=default"`
+	// ChatHistoryRAMWindow caps how many pre-compaction chat messages
+	// stay loaded in memory at once. Older messages loaded by scrolling
+	// up are evicted once they scroll back out of view (never while
+	// visible, and never anything from the active post-compaction
+	// context), and are re-fetched from disk if scrolled back to --
+	// this only bounds memory, it never deletes anything. 0 or unset
+	// uses the default; a negative value disables eviction entirely.
+	ChatHistoryRAMWindow *int `json:"chat_history_ram_window,omitempty" jsonschema:"description=Maximum pre-compaction chat messages kept resident in memory at once before older off-screen ones are evicted (re-fetched from disk on demand). 0 or unset uses the default (1000)\\, negative disables eviction.,default=1000"`
 }
 
 // Completions defines options for the completions UI.
