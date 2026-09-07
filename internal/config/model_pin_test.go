@@ -94,3 +94,42 @@ func TestModelSelectionYieldsToDiskWhenUnchosen(t *testing.T) {
 	require.Equal(t, "anthropic", large.Provider)
 	require.Equal(t, "claude-3", large.Model)
 }
+
+// TestLoadFallbackDoesNotPersistToDisk is a regression test for a
+// configured model that fails validation (e.g. because the provider was
+// briefly unreachable, or the model ID was renamed/removed upstream)
+// permanently overriding the user's real preference. Load must use the
+// fallback for this run only and leave the on-disk global config
+// untouched, surfacing the substitution as a warning instead of silently
+// baking it in -- see the comment above the fallback handling in Load.
+func TestLoadFallbackDoesNotPersistToDisk(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "crush.json")
+
+	t.Setenv("CRUSH_GLOBAL_CONFIG", dir)
+	t.Setenv("CRUSH_GLOBAL_DATA", dir)
+	resetProviderState()
+	t.Cleanup(resetProviderState)
+
+	original := twoProviderConfig("openai", "ghost-model")
+	require.NoError(t, os.WriteFile(configPath, []byte(original), 0o600))
+
+	store, err := Load(dir, dir, false)
+	require.NoError(t, err)
+
+	// In-memory: the run falls back to a valid model instead of failing
+	// outright.
+	large := store.Config().Models[SelectedModelTypeLarge]
+	require.NotEqual(t, "ghost-model", large.Model)
+
+	// The substitution is surfaced, not silent.
+	require.NotEmpty(t, store.Config().OAuthModelWarnings)
+	require.Contains(t, store.Config().OAuthModelWarnings[0], "openai/ghost-model")
+
+	// On disk: the user's original (now-invalid) selection is untouched,
+	// so it is retried on the next launch rather than being permanently
+	// replaced by this run's fallback.
+	data, readErr := os.ReadFile(configPath)
+	require.NoError(t, readErr)
+	require.Equal(t, original, string(data))
+}
