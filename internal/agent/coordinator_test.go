@@ -15,6 +15,7 @@ import (
 	"charm.land/fantasy/providers/openaicompat"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/oauth/antigravity"
 	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 	"github.com/stretchr/testify/assert"
@@ -1006,4 +1007,61 @@ func TestSkillsToDeactivate(t *testing.T) {
 			require.Equal(t, tt.want, skillsToDeactivate(tt.prompt, active))
 		})
 	}
+}
+
+// TestProviderTransportConfiguresHTTP2PingDetection is a regression test
+// for a class of hang where a model provider connection goes silently
+// dead mid-stream (e.g. a network blip, a Wi-Fi roam, a laptop
+// sleep/wake): canceling the one request riding an HTTP/2 connection
+// only tears down that logical stream, not the underlying TCP
+// connection, so a now-dead connection sits in the pool and gets handed
+// to the very next request, which hangs identically. Retrying then
+// looks like it does nothing, because it does nothing -- the OS's own
+// TCP retransmission timeout (which can take many minutes) is the only
+// thing that would eventually clear it. This asserts the shared
+// transport actually configures HTTP/2 ping-based idle detection so a
+// dead connection is proactively evicted instead.
+func TestProviderTransportConfiguresHTTP2PingDetection(t *testing.T) {
+	_, h2 := providerTransportOnce()
+	require.NotNil(t, h2, "providerTransportOnce must successfully configure HTTP/2")
+	assert.NotZero(t, h2.ReadIdleTimeout, "HTTP/2 idle connections must be pinged, or a dead one is never detected")
+	assert.NotZero(t, h2.PingTimeout, "a ping that never gets a timeout defeats the point of pinging")
+}
+
+// TestBaseHTTPClientAlwaysUsesProviderTransport is a regression test for
+// every build*Provider method silently falling back to
+// http.DefaultTransport (no ping detection) whenever debug mode is off,
+// which is the common case. baseHTTPClient must always return a client
+// backed by the shared, ping-configured transport, wrapping it with
+// debug logging only when debug mode is enabled -- never substituting
+// it with an unconfigured default.
+func TestBaseHTTPClientAlwaysUsesProviderTransport(t *testing.T) {
+	base := providerTransport()
+
+	t.Run("debug off", func(t *testing.T) {
+		coord := &coordinator{cfg: testConfigStore(t, false)}
+		hc := coord.baseHTTPClient()
+		require.NotNil(t, hc)
+		assert.Same(t, base, hc.Transport, "must reuse the shared pinged transport directly, not a fresh unconfigured one")
+	})
+
+	t.Run("debug on", func(t *testing.T) {
+		coord := &coordinator{cfg: testConfigStore(t, true)}
+		hc := coord.baseHTTPClient()
+		require.NotNil(t, hc)
+		logger, ok := hc.Transport.(*log.HTTPRoundTripLogger)
+		require.True(t, ok, "debug mode must wrap the transport for request/response logging")
+		assert.Same(t, base, logger.Transport, "the debug logger must still wrap the shared pinged transport, not bypass it")
+	})
+}
+
+// testConfigStore returns a minimal *config.ConfigStore with only the
+// debug flag set, for tests that exercise coordinator methods reading
+// c.cfg.Config().Options.Debug without needing a full provider setup.
+func testConfigStore(t *testing.T, debug bool) *config.ConfigStore {
+	t.Helper()
+	env := testEnv(t)
+	store, err := config.Init(env.workingDir, "", debug)
+	require.NoError(t, err)
+	return store
 }

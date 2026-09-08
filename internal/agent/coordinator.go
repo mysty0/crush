@@ -50,6 +50,7 @@ import (
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
+	"golang.org/x/net/http2"
 	"golang.org/x/sync/errgroup"
 
 	"charm.land/fantasy/providers/anthropic"
@@ -1340,15 +1341,60 @@ func (c *coordinator) buildModelFromSelected(ctx context.Context, modelCfg confi
 	}, nil
 }
 
-// debugHTTPClient returns an HTTP client that logs request/response
-// traffic when debug mode is enabled in config, or nil otherwise. It
-// centralizes the "opt into a debug HTTP client" check that every
-// build*Provider method otherwise repeated individually.
-func (c *coordinator) debugHTTPClient() *http.Client {
-	if c.cfg.Config().Options.Debug {
-		return log.NewHTTPClient()
+// providerTransportOnce builds the shared, HTTP/2-aware RoundTripper
+// used as the base for every model provider's HTTP client, and the
+// underlying *http2.Transport for direct configuration (ConfigureTransports
+// cannot be called a second time on the same *http.Transport, so this
+// keeps the one *http2.Transport it returns around for both use and
+// inspection -- see providerTransport and the tests in
+// coordinator_test.go). Built once and reused so pooled connections are
+// shared across providers.
+//
+// The HTTP/2 side is configured with ping-based idle detection: a
+// connection that goes silently dead mid-stream (a network blip, a
+// Wi-Fi roam, a laptop sleep/wake) otherwise sits in the client's
+// connection pool looking healthy -- canceling the one request riding
+// it only tears down that logical HTTP/2 stream, not the underlying TCP
+// connection, so the pool hands the same dead connection to the very
+// next request, which hangs identically. Left unconfigured, recovery
+// depends on the OS's own TCP retransmission timeout, which can take
+// many minutes. With ping enabled, an idle connection is probed after
+// readIdleTimeout and evicted if it doesn't answer within pingTimeout,
+// so a retry after a network blip gets a fresh connection instead of
+// the same poisoned one.
+var providerTransportOnce = sync.OnceValues(func() (http.RoundTripper, *http2.Transport) {
+	const (
+		readIdleTimeout = 30 * time.Second
+		pingTimeout     = 15 * time.Second
+	)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	h2, err := http2.ConfigureTransports(transport)
+	if err != nil {
+		slog.Warn("Failed to configure HTTP/2 ping-based dead connection detection", "error", err)
+		return transport, nil
 	}
-	return nil
+	h2.ReadIdleTimeout = readIdleTimeout
+	h2.PingTimeout = pingTimeout
+	return transport, h2
+})
+
+// providerTransport returns the shared RoundTripper from
+// providerTransportOnce; see its doc comment for what it configures and
+// why.
+func providerTransport() http.RoundTripper {
+	rt, _ := providerTransportOnce()
+	return rt
+}
+
+// baseHTTPClient returns the HTTP client every model provider builder
+// should use as its base, wrapping providerTransport with request/
+// response debug logging when debug mode is enabled in config.
+func (c *coordinator) baseHTTPClient() *http.Client {
+	transport := providerTransport()
+	if c.cfg.Config().Options.Debug {
+		transport = &log.HTTPRoundTripLogger{Transport: transport}
+	}
+	return &http.Client{Transport: transport}
 }
 
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
@@ -1394,10 +1440,7 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 	// leading Claude Code identity line into its own system block, which
 	// the subscription-OAuth endpoint requires (see cc_system_split.go).
 	// It is a no-op for non-Claude-Code system prompts.
-	var base http.RoundTripper = http.DefaultTransport
-	if hc := c.debugHTTPClient(); hc != nil {
-		base = hc.Transport
-	}
+	base := c.baseHTTPClient().Transport
 	// For a native Claude Code subscription provider, inject a fresh OAuth
 	// bearer token on every request. No api_key/shell helper is needed.
 	// Each subscription account is its own provider, and the source is
@@ -1422,7 +1465,7 @@ func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[st
 		openai.WithAPIKey(apiKey),
 		openai.WithUseResponsesAPI(),
 	}
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, openai.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
@@ -1438,7 +1481,7 @@ func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[stri
 	opts := []openrouter.Option{
 		openrouter.WithAPIKey(apiKey),
 	}
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, openrouter.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
@@ -1451,7 +1494,7 @@ func (c *coordinator) buildVercelProvider(_, apiKey string, headers map[string]s
 	opts := []vercel.Option{
 		vercel.WithAPIKey(apiKey),
 	}
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, vercel.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
@@ -1480,7 +1523,7 @@ func (c *coordinator) buildOpenaiCompatProvider(baseURL, apiKey string, headers 
 		httpClient = copilot.NewClient(isSubAgent, c.cfg.Config().Options.Debug)
 	}
 	if httpClient == nil {
-		httpClient = c.debugHTTPClient()
+		httpClient = c.baseHTTPClient()
 	}
 	if httpClient != nil {
 		opts = append(opts, openaicompat.WithHTTPClient(httpClient))
@@ -1503,7 +1546,7 @@ func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[str
 		azure.WithAPIKey(apiKey),
 		azure.WithUseResponsesAPI(),
 	}
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, azure.WithHTTPClient(hc))
 	}
 	if options == nil {
@@ -1521,7 +1564,7 @@ func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[str
 
 func (c *coordinator) buildBedrockProvider(apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
 	var opts []bedrock.Option
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, bedrock.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
@@ -1552,7 +1595,7 @@ func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[st
 		google.WithBaseURL(baseURL),
 		google.WithGeminiAPIKey(apiKey),
 	}
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, google.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
@@ -1563,7 +1606,7 @@ func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[st
 
 func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, options map[string]string) (fantasy.Provider, error) {
 	opts := []google.Option{}
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, google.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
@@ -1583,10 +1626,7 @@ func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, optio
 // and injects the subscription bearer, chatgpt-account-id, and Codex beta
 // headers on every request via codex.AuthTransport.
 func (c *coordinator) buildCodexProvider(baseURL, apiKey string, headers map[string]string) (fantasy.Provider, error) {
-	var base http.RoundTripper = http.DefaultTransport
-	if hc := c.debugHTTPClient(); hc != nil {
-		base = hc.Transport
-	}
+	base := c.baseHTTPClient().Transport
 
 	return codex.NewProvider(codex.ProviderOptions{
 		BaseURL: baseURL,
@@ -1610,10 +1650,7 @@ func (c *coordinator) buildGeminiCliProvider(apiKey string, headers, oauthExtra 
 	if oauthExtra != nil {
 		projectID = oauthExtra["project_id"]
 	}
-	var base http.RoundTripper = http.DefaultTransport
-	if hc := c.debugHTTPClient(); hc != nil {
-		base = hc.Transport
-	}
+	base := c.baseHTTPClient().Transport
 	httpClient := &http.Client{Transport: &geminicli.WireTransport{
 		Base:        base,
 		AccessToken: apiKey,
