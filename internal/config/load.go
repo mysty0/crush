@@ -400,7 +400,7 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 	// Code CLI's credentials file. Once it holds a token of its own it is
 	// seeded like every other logged-in account, against that token.
 	if pc, ok := c.Providers.Get(claudecode.ProviderID); ok && !pc.Disable && pc.OAuthToken == nil && len(pc.Models) == 0 {
-		pc.Models = seedModelsInBackground(store, claudecode.ProviderID, claudecode.DefaultModels(),
+		pc.Models = seedModels(c, store, claudecode.ProviderID, cmp.Or(pc.Name, "Claude Code"), claudecode.DefaultModels(),
 			func(ctx context.Context) ([]catwalk.Model, error) {
 				return claudecode.CachedModels(ctx), nil
 			})
