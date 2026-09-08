@@ -27,7 +27,7 @@ type BashParams struct {
 	Command             string `json:"command" description:"The command to execute"`
 	WorkingDir          string `json:"working_dir,omitempty" description:"The working directory to execute the command in (defaults to current directory)"`
 	RunInBackground     bool   `json:"run_in_background,omitempty" description:"Set to true (boolean) to run this command in the background. Use job_output to read the output later."`
-	AutoBackgroundAfter int    `json:"auto_background_after,omitempty" description:"Seconds to wait before automatically moving the command to a background job (default: 60)"`
+	AutoBackgroundAfter int    `json:"auto_background_after,omitempty" description:"Seconds to wait before automatically moving the command to a background job (default: 60). Keep this at or below 240: blocking a turn for longer lets the provider's prompt cache expire, which re-sends and re-caches the whole conversation on the next request."`
 }
 
 type BashPermissionsParams struct {

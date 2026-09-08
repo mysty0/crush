@@ -40,6 +40,15 @@ const (
 	// OAuth token for inference.
 	OAuthBeta = "oauth-2025-04-20"
 
+	// PlaceholderAPIKey stands in for the API key a subscription account
+	// does not have. The Anthropic SDK refuses to send a request when it
+	// can find no credential of its own, and it decides that before any
+	// transport runs -- so the real bearer token, which AuthTransport
+	// injects per request, comes too late to satisfy it. Handing the SDK
+	// this placeholder keeps the request alive; AuthTransport then strips
+	// it and sets the real Authorization header. It is never transmitted.
+	PlaceholderAPIKey = "claude-code-oauth-placeholder"
+
 	oauthClientID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	tokenURL         = "https://platform.claude.com/v1/oauth/token"
 	anthropicVersion = "2023-06-01"
@@ -558,9 +567,13 @@ func (t *AuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if src == nil {
 		src = DefaultSource()
 	}
+	// Drop any x-api-key unconditionally: a subscription account never
+	// authenticates with one, so whatever is present is a placeholder
+	// (see PlaceholderAPIKey) and must not reach the API, even when the
+	// token fetch below fails.
+	req.Header.Del("X-Api-Key")
 	if token, err := src.Token(req.Context()); err == nil {
 		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Del("X-Api-Key")
 		if beta := req.Header.Get("anthropic-beta"); beta == "" {
 			req.Header.Set("anthropic-beta", OAuthBeta)
 		} else if !strings.Contains(beta, OAuthBeta) {

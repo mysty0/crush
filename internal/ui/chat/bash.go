@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -30,9 +31,10 @@ func NewBashToolMessageItem(
 	toolCall message.ToolCall,
 	result *message.ToolResult,
 	canceled bool,
+	workingDir string,
 ) ToolMessageItem {
 	t := &BashToolMessageItem{}
-	t.baseToolMessageItem = newBaseToolMessageItem(sty, toolCall, result, &BashToolRenderContext{}, canceled)
+	t.baseToolMessageItem = newBaseToolMessageItem(sty, toolCall, result, &BashToolRenderContext{workingDir: workingDir}, canceled)
 	// The tool call is marked Finished as soon as its input is parsed —
 	// before the command actually runs — so the default spinning logic
 	// (!Finished) would freeze the spinner during execution. Keep spinning
@@ -45,7 +47,9 @@ func NewBashToolMessageItem(
 }
 
 // BashToolRenderContext renders bash tool messages.
-type BashToolRenderContext struct{}
+type BashToolRenderContext struct {
+	workingDir string
+}
 
 // RenderTool implements the [ToolRenderer] interface.
 func (b *BashToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
@@ -99,8 +103,15 @@ func (b *BashToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 	}
 
 	// Regular bash command.
-	cmd := strings.ReplaceAll(params.Command, "\n", " ")
+	cmd := params.Command
+	if !opts.ExpandedContent {
+		cmd = strings.ReplaceAll(cmd, "\n", " ")
+	}
 	cmd = strings.ReplaceAll(cmd, "\t", "    ")
+	cmd = common.StripBashDisplayPrefix(cmd, b.workingDir)
+	if highlighted, err := common.SyntaxHighlightLexerName(sty, cmd, "bash", nil); err == nil {
+		cmd = highlighted
+	}
 	toolParams := []string{cmd}
 	if params.RunInBackground {
 		toolParams = append(toolParams, "background", "true")

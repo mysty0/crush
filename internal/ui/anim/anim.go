@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/zeebo/xxh3"
 
 	"charm.land/lipgloss/v2"
@@ -51,7 +53,6 @@ const (
 var (
 	defaultGradColorA = color.RGBA{R: 0xff, G: 0, B: 0, A: 0xff}
 	defaultGradColorB = color.RGBA{R: 0, G: 0, B: 0xff, A: 0xff}
-	defaultLabelColor = color.RGBA{R: 0xcc, G: 0xcc, B: 0xcc, A: 0xff}
 )
 
 var (
@@ -82,9 +83,20 @@ var animCacheMap = csync.NewMap[string, *animCache]()
 // settingsHash creates a hash key for the settings to use for caching
 func settingsHash(opts Settings) string {
 	h := xxh3.New()
-	fmt.Fprintf(h, "%d-%s-%v-%v-%v-%t",
-		opts.Size, opts.Label, opts.LabelColor, opts.GradColorA, opts.GradColorB, opts.CycleColors)
+	fmt.Fprintf(h, "%d-%s-%v-%v-%v-%t-%v",
+		opts.Size, opts.Label, opts.LabelColor, opts.GradColorA, opts.GradColorB, opts.CycleColors, opts.SuffixColor)
 	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// StepMsg is a message type used to trigger the next step in the animation.
+// Gen carries the generation of the tick chain that produced it. A chain
+// started by a later Start() bumps the Anim's generation, so ticks from an
+// older chain (mismatched Gen) are dropped instead of advancing the frame.
+// This is what keeps a single spinner from being driven by two concurrent
+// tick chains (which would render as a doubled, double-speed animation).
+type StepMsg struct {
+	ID  string
+	Gen int64
 }
 
 // Settings defines settings for the animation.
@@ -102,6 +114,14 @@ type Settings struct {
 	// animated ellipsis are visible. Useful for non-LLM contexts where
 	// scrambled glyphs imply "thinking" rather than "running".
 	NoScramble bool
+
+	// Suffix is an optional function that returns a dynamic suffix string
+	// to render after the label and ellipsis. Called on every Render().
+	Suffix func() string
+
+	// SuffixColor is the color used to render the suffix text.
+	// Falls back to LabelColor if unset.
+	SuffixColor color.Color
 }
 
 // Default settings.
@@ -123,6 +143,15 @@ type Anim struct {
 	ellipsisStep     atomic.Int64         // current ellipsis frame step
 	ellipsisFrames   *csync.Slice[string] // ellipsis animation frames
 	id               string
+	suffix           func() string
+	suffixColor      color.Color
+
+	// gen identifies the currently armed tick chain. Start() bumps it and
+	// stamps every emitted StepMsg with the new value; Animate() drops ticks
+	// whose Gen does not match (unless Gen is the zero wildcard). Re-arming
+	// therefore supersedes any in-flight chain instead of running a second
+	// one concurrently, and Stop() bumps it to kill a chain outright.
+	gen atomic.Int64
 }
 
 // New creates a new Anim instance with the specified width and label.
@@ -138,9 +167,9 @@ func New(opts Settings) *Anim {
 	if colorIsUnset(opts.GradColorB) {
 		opts.GradColorB = defaultGradColorB
 	}
-	if colorIsUnset(opts.LabelColor) {
-		opts.LabelColor = defaultLabelColor
-	}
+	// A nil LabelColor means "use the terminal default foreground".
+	// No fallback is applied so non-interactive callers can opt out
+	// of explicit coloring.
 
 	if opts.ID != "" {
 		a.id = opts.ID
@@ -153,6 +182,16 @@ func New(opts Settings) *Anim {
 		a.cyclingCharWidth = opts.Size
 	}
 	a.labelColor = opts.LabelColor
+
+	// Store the suffix function if provided.
+	if opts.Suffix != nil {
+		a.suffix = opts.Suffix
+	}
+	if opts.SuffixColor != nil {
+		a.suffixColor = opts.SuffixColor
+	} else {
+		a.suffixColor = opts.LabelColor
+	}
 
 	// NoScramble means no cycling chars and no birth animation. Mark as
 	// initialized immediately so the label renders without a fade-in.
@@ -406,11 +445,29 @@ func (a *Anim) Render() string {
 		}
 	}
 	// Render animated ellipsis at the end of the label if all characters
-	// have been initialized.
+	// have been initialized. Skip when a suffix is active to avoid visual
+	// competition between the animated dots and the timer.
 	if a.initialized.Load() && a.labelWidth > 0 {
-		ellipsisStep := int(a.ellipsisStep.Load())
-		if ellipsisFrame, ok := a.ellipsisFrames.Get(ellipsisStep / ellipsisAnimSpeed); ok {
-			b.WriteString(ellipsisFrame)
+		showEllipsis := true
+		if a.suffix != nil {
+			if s := a.suffix(); s != "" {
+				showEllipsis = false
+			}
+		}
+		if showEllipsis {
+			ellipsisStep := int(a.ellipsisStep.Load())
+			if ellipsisFrame, ok := a.ellipsisFrames.Get(ellipsisStep / ellipsisAnimSpeed); ok {
+				b.WriteString(ellipsisFrame)
+			}
+		}
+	}
+
+	// Render optional suffix (e.g., elapsed time).
+	if a.suffix != nil {
+		suffixStr := a.suffix()
+		if suffixStr != "" {
+			b.WriteString(" ")
+			b.WriteString(lipgloss.NewStyle().Foreground(a.suffixColor).Render(suffixStr))
 		}
 	}
 
@@ -422,6 +479,46 @@ func (a *Anim) Render() string {
 // to every spinning item.
 func Interval() time.Duration {
 	return time.Second / time.Duration(fps)
+}
+
+// Step is a command that triggers the next step in the animation. The
+// emitted StepMsg carries the current generation so Animate() can tell
+// whether this tick still belongs to the armed chain.
+func (a *Anim) Step() tea.Cmd {
+	gen := a.gen.Load()
+	return tea.Tick(time.Second/time.Duration(fps), func(t time.Time) tea.Msg {
+		return StepMsg{ID: a.id, Gen: gen}
+	})
+}
+
+// Start arms a self-scheduling tick chain. This tree's UI drives spinners
+// from a single animation clock via Advance() instead, so Start/Stop/Animate
+// remain only for callers that want an Anim to tick itself. Bumping the
+// generation supersedes any chain a previous Start() armed, so its in-flight
+// StepMsgs are dropped rather than advancing the frame a second time.
+func (a *Anim) Start() tea.Cmd {
+	a.gen.Add(1)
+	return a.Step()
+}
+
+// Stop kills any in-flight tick chain without starting a new one. It bumps
+// the generation so outstanding StepMsgs no longer match; the next one to
+// arrive is dropped and the chain terminates.
+func (a *Anim) Stop() {
+	a.gen.Add(1)
+}
+
+// Animate advances the animation to the next step and re-arms the chain,
+// ignoring ticks from a superseded generation or a different Anim.
+func (a *Anim) Animate(msg StepMsg) tea.Cmd {
+	if msg.ID != a.id {
+		return nil
+	}
+	if msg.Gen != a.gen.Load() {
+		return nil
+	}
+	a.Advance()
+	return a.Step()
 }
 
 // makeGradientRamp() returns a slice of colors blended between the given keys.

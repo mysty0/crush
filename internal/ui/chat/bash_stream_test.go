@@ -26,7 +26,7 @@ func TestBashToolStreamsPartialOutput(t *testing.T) {
 		Input:    `{"command":"echo hello"}`,
 		Finished: true,
 	}
-	item := NewBashToolMessageItem(&sty, toolCall, nil, false)
+	item := NewBashToolMessageItem(&sty, toolCall, nil, false, "")
 
 	setter, ok := any(item).(PartialOutputSetter)
 	require.True(t, ok, "bash tool item must satisfy PartialOutputSetter")

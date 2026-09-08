@@ -24,7 +24,7 @@ func newAgentToolChatItem(t *testing.T, sty *styles.Styles, toolCallID string, p
 		ID:    toolCallID,
 		Name:  agent.AgentToolName,
 		Input: string(input),
-	}, nil, false)
+	}, nil, false, "")
 }
 
 func newTestUIWithChat(t *testing.T) (*UI, *Chat) {

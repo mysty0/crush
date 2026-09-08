@@ -44,9 +44,10 @@ func (c *controllerV1) handleGetVersion(w http.ResponseWriter, _ *http.Request) 
 //	@Summary		Send server control command
 //	@Tags			system
 //	@Accept			json
-//	@Param			request	body	proto.ServerControl	true	"Control command (e.g. shutdown)"
+//	@Param			request	body	proto.ServerControl	true	"Control command (e.g. shutdown, shutdown_if_idle)"
 //	@Success		200
 //	@Failure		400	{object}	proto.Error
+//	@Failure		409	{object}	proto.Error
 //	@Router			/control [post]
 func (c *controllerV1) handlePostControl(w http.ResponseWriter, r *http.Request) {
 	var req proto.ServerControl
@@ -57,8 +58,16 @@ func (c *controllerV1) handlePostControl(w http.ResponseWriter, r *http.Request)
 	}
 
 	switch req.Command {
-	case "shutdown":
-		c.backend.Shutdown()
+	case proto.ServerControlShutdown, proto.ServerControlShutdownIfIdle:
+		// Both spellings are conditional. Only the backend can rule on
+		// idleness without racing a session that arrives between a
+		// client's own check and its request, and guarding the plain
+		// command too means clients predating the check cannot take live
+		// sessions down either.
+		if !c.backend.ShutdownIfIdle() {
+			c.handleError(w, r, backend.ErrServerNotIdle)
+			return
+		}
 	default:
 		c.server.logError(r, "Unknown command", "command", req.Command)
 		jsonError(w, http.StatusBadRequest, "unknown command")
@@ -180,6 +189,21 @@ func (c *controllerV1) handlePostWorkspaceCurrentSession(w http.ResponseWriter, 
 		return
 	}
 	if err := c.backend.SetCurrentSession(id, clientID, req.SessionID); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+}
+
+// handleDeleteClient retires a client, releasing every claim it holds.
+//
+//	@Summary		Retire a client
+//	@Tags			system
+//	@Param			client_id	path	string	true	"Client ID (UUID)"
+//	@Success		200
+//	@Failure		400	{object}	proto.Error
+//	@Router			/clients/{client_id} [delete]
+func (c *controllerV1) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
+	if err := c.backend.RetireClient(r.PathValue("client_id")); err != nil {
 		c.handleError(w, r, err)
 		return
 	}
@@ -787,7 +811,17 @@ func (c *controllerV1) handlePostWorkspaceAgent(w http.ResponseWriter, r *http.R
 //	@Router			/workspaces/{id}/agent/init [post]
 func (c *controllerV1) handlePostWorkspaceAgentInit(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := c.backend.InitAgent(r.Context(), id); err != nil {
+
+	var req proto.AgentInitRequest
+	if r.Body != nil && r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			c.server.logError(r, "Failed to decode agent init request", "error", err)
+			jsonError(w, http.StatusBadRequest, "failed to decode request")
+			return
+		}
+	}
+
+	if err := c.backend.InitAgent(r.Context(), id, req.Interactive); err != nil {
 		c.handleError(w, r, err)
 		return
 	}
@@ -1070,6 +1104,58 @@ func (c *controllerV1) handlePostWorkspacePermissionsGrant(w http.ResponseWriter
 	jsonEncode(w, proto.PermissionGrantResponse{Resolved: resolved})
 }
 
+// handlePostWorkspaceQuestionsAnswer submits answers for a batch question.
+//
+//	@Summary		Answer question batch
+//	@Tags			questions
+//	@Accept			json
+//	@Param			id		path	string						true	"Workspace ID"
+//	@Param			request	body	proto.QuestionAnswer	true	"Question batch answer"
+//	@Success		200	{object}	proto.QuestionAnswerResponse
+//	@Failure		400	{object}	proto.Error
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/questions/answer [post]
+func (c *controllerV1) handlePostWorkspaceQuestionsAnswer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var req proto.QuestionAnswer
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		c.server.logError(r, "Failed to decode request", "error", err)
+		jsonError(w, http.StatusBadRequest, "failed to decode request")
+		return
+	}
+
+	resolved, err := c.backend.AnswerQuestion(id, req)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	jsonEncode(w, proto.QuestionAnswerResponse{Resolved: resolved})
+}
+
+// handlePostWorkspaceQuestionsCancel cancels the pending question
+// batch for a workspace.
+//
+//	@Summary		Cancel question batch
+//	@Tags			questions
+//	@Param			id	path	string	true	"Workspace ID"
+//	@Success		200	{object}	proto.QuestionAnswerResponse
+//	@Failure		400	{object}	proto.Error
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/questions/cancel [post]
+func (c *controllerV1) handlePostWorkspaceQuestionsCancel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	cancelled, err := c.backend.CancelQuestion(id)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	jsonEncode(w, proto.QuestionAnswerResponse{Resolved: cancelled})
+}
+
 // handlePostWorkspacePermissionsSkip sets whether to skip permission prompts.
 //
 //	@Summary		Set skip permissions
@@ -1194,9 +1280,19 @@ func (c *controllerV1) handleError(w http.ResponseWriter, r *http.Request, err e
 	case errors.Is(err, backend.ErrInvalidClientID):
 		status = http.StatusBadRequest
 	case errors.Is(err, backend.ErrClientNotAttached):
-		status = http.StatusNotFound
-	case errors.Is(err, backend.ErrWorkspaceClosing):
+		// 409, not 404: the workspace exists, the caller just has no live
+		// stream yet. A 404 here is indistinguishable from "workspace
+		// gone" and would trip clients that treat 404 as the trigger for
+		// workspace recovery.
 		status = http.StatusConflict
+	case errors.Is(err, backend.ErrWorkspaceClosing),
+		errors.Is(err, backend.ErrServerNotIdle),
+		errors.Is(err, backend.ErrClientRetired):
+		status = http.StatusConflict
+	case errors.Is(err, backend.ErrServerShuttingDown):
+		// 503, not 409: the request is not wrong, this process is just
+		// leaving. Clients retry against its replacement.
+		status = http.StatusServiceUnavailable
 	}
 	c.server.logError(r, err.Error())
 	jsonError(w, status, err.Error())

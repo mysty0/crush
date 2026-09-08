@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -14,7 +15,9 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/client"
+	"github.com/charmbracelet/crush/internal/commands"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/herdr"
 	"github.com/charmbracelet/crush/internal/history"
@@ -25,10 +28,13 @@ import (
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/rewind"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
+	"github.com/pkg/browser"
 )
 
 // ClientWorkspace implements the Workspace interface by delegating all
@@ -41,11 +47,36 @@ type ClientWorkspace struct {
 	mu     sync.RWMutex
 	ws     proto.Workspace
 	skills *skills.Manager
+	// lastSession is the most recent session ID reported via
+	// SetCurrentSession. The subscription loop re-asserts it after a
+	// reconnect, because the server's per-client presence entry (or the
+	// whole workspace) may have been re-created in the meantime.
+	lastSession string
+
+	// subCtx bounds the lifetime of the event subscription (and its
+	// reconnect loop). Shutdown cancels it so Subscribe stops
+	// reconnecting instead of racing the teardown.
+	subCtx    context.Context
+	subCancel context.CancelFunc
+	// subStarted reports whether the subscription loop ever ran, and
+	// subDone is closed when it returns. Shutdown uses them to let an
+	// in-flight workspace recovery finish before it says goodbye to the
+	// server, so the workspace it releases is the one recovery just
+	// minted.
+	subStarted atomic.Bool
+	subDone    chan struct{}
 
 	// herdrClient reports agent state to herdr when running inside
 	// a herdr-managed pane. Nil when not in a herdr environment.
 	herdrClient *herdr.Client
 }
+
+// SSE reconnect backoff bounds for the workspace event stream. Declared
+// as vars (not consts) so tests can shrink the delays.
+var (
+	sseReconnectInitialBackoff = 250 * time.Millisecond
+	sseReconnectMaxBackoff     = 10 * time.Second
+)
 
 // NewClientWorkspace creates a new ClientWorkspace that proxies all
 // operations through the given client SDK. The ws parameter is the
@@ -61,10 +92,14 @@ func NewClientWorkspace(c *client.Client, ws proto.Workspace) *ClientWorkspace {
 	}
 	states := protoToSkillStates(ws.Skills)
 	mgr := skills.NewManager(nil, nil, states, skills.WithGlobalMirror())
+	subCtx, subCancel := context.WithCancel(context.Background())
 	return &ClientWorkspace{
 		client:      c,
 		ws:          ws,
 		skills:      mgr,
+		subCtx:      subCtx,
+		subCancel:   subCancel,
+		subDone:     make(chan struct{}),
 		herdrClient: herdr.Init(),
 	}
 }
@@ -157,6 +192,9 @@ func (w *ClientWorkspace) ParseAgentToolSessionID(sessionID string) (string, str
 // the presence record is a hint, not correctness-critical state.
 func (w *ClientWorkspace) SetCurrentSession(ctx context.Context, sessionID string) error {
 	w.herdrClient.SetSessionID(sessionID)
+	w.mu.Lock()
+	w.lastSession = sessionID
+	w.mu.Unlock()
 	return w.client.SetCurrentSession(ctx, w.workspaceID(), sessionID)
 }
 
@@ -242,11 +280,27 @@ func (w *ClientWorkspace) AgentModel() AgentModel {
 }
 
 func (w *ClientWorkspace) AgentIsReady() bool {
+	return w.AgentReadyErr() == nil
+}
+
+func (w *ClientWorkspace) AgentReadyErr() error {
 	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
 	if err != nil {
-		return false
+		if errors.Is(err, client.ErrNotFound) {
+			// The server answered, it just does not know this workspace
+			// any more. The subscription loop is already re-registering;
+			// saying "lost connection" here would be plainly wrong.
+			return ErrWorkspaceGone
+		}
+		// The workspace/server could not be reached. This is distinct
+		// from an initialized-but-not-ready agent: the server may have
+		// torn the workspace down or restarted underneath us.
+		return fmt.Errorf("%w: %v", ErrServerUnreachable, err)
 	}
-	return info.IsReady
+	if !info.IsReady {
+		return ErrAgentNotInitialized
+	}
+	return nil
 }
 
 func (w *ClientWorkspace) AgentQueuedPrompts(sessionID string) int {
@@ -349,7 +403,11 @@ func (w *ClientWorkspace) UpdateAgentModel(ctx context.Context) error {
 }
 
 func (w *ClientWorkspace) InitCoderAgent(ctx context.Context) error {
-	return w.client.InitiateAgentProcessing(ctx, w.workspaceID())
+	return w.client.InitiateAgentProcessing(ctx, w.workspaceID(), true)
+}
+
+func (w *ClientWorkspace) InitCoderAgentNonInteractive(ctx context.Context) error {
+	return w.client.InitiateAgentProcessing(ctx, w.workspaceID(), false)
 }
 
 func (w *ClientWorkspace) GetDefaultSmallModel(providerID string) config.SelectedModel {
@@ -435,6 +493,40 @@ func (w *ClientWorkspace) PermissionPlanMode() bool {
 
 func (w *ClientWorkspace) PermissionSetPlanMode(plan bool) {
 	_ = w.client.SetPermissionsPlanMode(context.Background(), w.workspaceID(), plan)
+}
+
+// -- Questions --
+
+// QuestionAnswer submits answers for a question via the client SDK.
+func (w *ClientWorkspace) QuestionAnswer(responses []question.Answer) bool {
+	protoResp := proto.QuestionAnswer{
+		Responses: make([]proto.QuestionResponse, len(responses)),
+	}
+	for i, r := range responses {
+		protoResp.Responses[i] = proto.QuestionResponse{
+			QuestionID:  r.QuestionID,
+			SelectedIDs: r.SelectedIDs,
+			FillInText:  r.FillInText,
+			Yes:         r.Yes,
+			Notes:       r.Notes,
+		}
+	}
+	resolved, err := w.client.AnswerQuestionBatch(context.Background(), w.workspaceID(), protoResp)
+	if err != nil {
+		slog.Error("Failed to answer question", "error", err)
+		return false
+	}
+	return resolved
+}
+
+// QuestionCancel cancels the pending question via the client SDK.
+func (w *ClientWorkspace) QuestionCancel() bool {
+	cancelled, err := w.client.CancelQuestionBatch(context.Background(), w.workspaceID())
+	if err != nil {
+		slog.Error("Failed to cancel question", "error", err)
+		return false
+	}
+	return cancelled
 }
 
 // -- FileTracker --
@@ -695,6 +787,34 @@ func (w *ClientWorkspace) ReadMCPResource(ctx context.Context, name, uri string)
 	return result, nil
 }
 
+func (w *ClientWorkspace) ListMCPPrompts(ctx context.Context) ([]commands.MCPPrompt, error) {
+	prompts, err := w.client.ListMCPPrompts(ctx, w.workspaceID())
+	if err != nil {
+		return nil, err
+	}
+	result := make([]commands.MCPPrompt, len(prompts))
+	for i, prompt := range prompts {
+		arguments := make([]commands.Argument, len(prompt.Arguments))
+		for j, argument := range prompt.Arguments {
+			arguments[j] = commands.Argument{
+				ID:          argument.ID,
+				Title:       argument.Title,
+				Description: argument.Description,
+				Required:    argument.Required,
+			}
+		}
+		result[i] = commands.MCPPrompt{
+			ID:          prompt.ID,
+			Title:       prompt.Title,
+			Description: prompt.Description,
+			PromptID:    prompt.PromptID,
+			ClientID:    prompt.ClientID,
+			Arguments:   arguments,
+		}
+	}
+	return result, nil
+}
+
 func (w *ClientWorkspace) GetMCPPrompt(clientID, promptID string, args map[string]string) (string, error) {
 	return w.client.GetMCPPrompt(context.Background(), w.workspaceID(), clientID, promptID, args)
 }
@@ -707,6 +827,67 @@ func (w *ClientWorkspace) DisableDockerMCP() error {
 	return w.client.DisableDockerMCP(context.Background(), w.workspaceID())
 }
 
+func (w *ClientWorkspace) MCPAuthenticate(ctx context.Context, name string) error {
+	// The server suppresses its own browser open for this flow; the client
+	// polls the auth URL and opens it locally so the user authorizes on
+	// their own machine. The OAuth callback listener runs on the server
+	// (localhost ports shared when server and client are co-located).
+	authErr := make(chan error, 1)
+	go func() {
+		authErr <- w.client.MCPAuthenticate(ctx, w.workspaceID(), name)
+	}()
+
+	// Poll for the authorization URL so we can open it in the local
+	// browser as soon as the flow generates one.
+	var opened bool
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case err := <-authErr:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if opened {
+				continue
+			}
+			if u := w.MCPAuthURL(name); u != "" {
+				if err := browser.OpenURL(u); err != nil {
+					slog.Warn("Failed to open MCP OAuth URL in browser", "error", err)
+				}
+				opened = true
+			}
+		}
+	}
+}
+
+func (w *ClientWorkspace) MCPPendingAuth() []mcp.PendingAuthServer {
+	pending, err := w.client.MCPPendingAuth(context.Background(), w.workspaceID())
+	if err != nil {
+		slog.Warn("Failed to fetch MCP pending auth", "error", err)
+		return nil
+	}
+	result := make([]mcp.PendingAuthServer, len(pending))
+	for i, p := range pending {
+		result[i] = mcp.PendingAuthServer{Name: p.Name, URL: p.URL}
+	}
+	return result
+}
+
+func (w *ClientWorkspace) MCPAuthURL(name string) string {
+	// The server's in-progress authorization URL is exposed through the
+	// pending-auth list while the flow runs; a server in StateNeedsAuth
+	// paired with an active flow reports its URL here. Poll the server
+	// for the in-flight URL.
+	u, err := w.client.MCPAuthURL(context.Background(), w.workspaceID(), name)
+	if err != nil {
+		return ""
+	}
+	return u
+}
+
 // -- Lifecycle --
 
 func (w *ClientWorkspace) Subscribe(program *tea.Program) {
@@ -715,13 +896,199 @@ func (w *ClientWorkspace) Subscribe(program *tea.Program) {
 		program.Quit()
 	})
 
-	evc, err := w.client.SubscribeEvents(context.Background(), w.workspaceID())
-	if err != nil {
-		slog.Error("Failed to subscribe to events", "error", err)
-		return
+	w.runSubscription(program.Send)
+}
+
+// maxRecoveryEscalate is the number of consecutive failed workspace
+// recovery attempts after which the loop tells the UI the connection
+// looks unrecoverable. It keeps retrying regardless: a hard stop would
+// strand a user whose server comes back a minute later, and Shutdown can
+// always cancel it.
+const maxRecoveryEscalate = 20
+
+// recoveryCreateTimeout bounds a single re-registration attempt. It is
+// generous because workspace startup is slow (config, database, LSP, MCP);
+// it exists only so an unresponsive server cannot pin the subscription
+// goroutine indefinitely, and the loop simply retries when it trips.
+// A var, not a const, so tests can shrink it.
+var recoveryCreateTimeout = 30 * time.Second
+
+// runSubscription subscribes to the workspace event stream and forwards
+// translated events to send, reconnecting with capped exponential
+// backoff whenever the stream drops. It returns only when the
+// subscription context is cancelled (via Shutdown). Split out from
+// Subscribe so it can be tested without a real *tea.Program.
+//
+// Two failures need more than a retry. A 404 means the server no longer
+// knows this workspace, so resubscribing with the same ID can never
+// succeed and the loop re-registers instead. And any stream that closes
+// loses whatever was published while the client was away, so every
+// re-established stream — even one that reconnects on the first try —
+// re-asserts the client's session and asks the UI to resync.
+func (w *ClientWorkspace) runSubscription(send func(tea.Msg)) {
+	w.subStarted.Store(true)
+	defer close(w.subDone)
+
+	backoff := sseReconnectInitialBackoff
+	degraded := false
+	recoveryFailures := 0
+	markDegraded := func(err error, stuck bool) {
+		if degraded && !stuck {
+			return
+		}
+		degraded = true
+		send(ConnectionEvent{State: ConnectionDegraded, Err: err, Stuck: stuck})
 	}
 
-	w.consumeEvents(evc, program.Send)
+	for {
+		if w.subCtx.Err() != nil {
+			return
+		}
+
+		evc, err := w.client.SubscribeEvents(w.subCtx, w.workspaceID())
+		if err != nil {
+			if w.subCtx.Err() != nil {
+				return
+			}
+			markDegraded(err, false)
+			if !errors.Is(err, client.ErrNotFound) {
+				slog.Error("Failed to subscribe to workspace events; retrying",
+					"error", err, "retry_in", backoff)
+			} else if w.recoverWorkspace() == nil {
+				// Re-registered: resubscribe immediately under the fresh
+				// workspace ID.
+				backoff = sseReconnectInitialBackoff
+				continue
+			} else if w.subCtx.Err() == nil {
+				recoveryFailures++
+				if recoveryFailures == maxRecoveryEscalate {
+					markDegraded(ErrWorkspaceGone, true)
+				}
+			}
+			if !w.sleepOrDone(backoff) {
+				return
+			}
+			backoff = min(backoff*2, sseReconnectMaxBackoff)
+			continue
+		}
+
+		if degraded {
+			degraded = false
+			recoveryFailures = 0
+			w.afterReconnect(send)
+		}
+		backoff = sseReconnectInitialBackoff
+		w.consumeEvents(evc, send)
+
+		// The event channel closed: the server restarted, the stream was
+		// interrupted, or the workspace briefly went away. Reconnect
+		// after a short delay instead of leaving the TUI permanently
+		// orphaned, which is what surfaced as a stuck "coder agent is
+		// offline".
+		if w.subCtx.Err() != nil {
+			return
+		}
+		markDegraded(ErrStreamClosed, false)
+		slog.Warn("Workspace event stream closed; reconnecting", "retry_in", backoff)
+		if !w.sleepOrDone(backoff) {
+			return
+		}
+		backoff = min(backoff*2, sseReconnectMaxBackoff)
+	}
+}
+
+// recoverWorkspace re-registers the workspace after the server reported it
+// gone: it re-creates it from the cached snapshot (the server's own view of
+// path, data dir, flags and env), adopts the new ID, and re-initializes the
+// coder agent when the config is ready, mirroring the startup handshake. The
+// server's path dedupe means this either rejoins a live sibling workspace or
+// mints a fresh one. It must only be called from the subscription goroutine,
+// the only writer of the cached ID.
+//
+// The create deliberately runs detached from the subscription context: the
+// server does not abandon a create when the requesting connection goes away,
+// so cancelling would hide the outcome while the workspace got registered
+// anyway. Riding it out means the ID is known by the time Shutdown looks,
+// and retirement covers a lost response regardless. Its own timeout keeps a
+// wedged server from pinning the subscription goroutine forever; the client
+// SDK sets no request timeout of its own.
+func (w *ClientWorkspace) recoverWorkspace() error {
+	ctx, cancel := context.WithTimeout(
+		context.WithoutCancel(w.subCtx), recoveryCreateTimeout,
+	)
+	defer cancel()
+	created, err := w.client.CreateWorkspace(ctx, w.recreateArgs())
+	if err != nil {
+		slog.Error("Failed to re-register workspace; retrying", "error", err)
+		return err
+	}
+	if created.Config != nil {
+		created.Config.SetupAgents()
+	}
+	w.mu.Lock()
+	oldID := w.ws.ID
+	w.ws = *created
+	w.mu.Unlock()
+	slog.Info("Re-registered workspace after server-side loss",
+		"old_id", oldID, "new_id", created.ID)
+
+	if created.Config != nil && created.Config.IsConfigured() {
+		if err := w.InitCoderAgent(w.subCtx); err != nil {
+			// Matches the startup handshake: agent init failure is
+			// logged, not fatal, since the user can still pick a model.
+			slog.Error("Failed to initialize coder agent after workspace recovery", "error", err)
+		}
+	}
+	return nil
+}
+
+// recreateArgs derives the CreateWorkspace request used for recovery from
+// the cached snapshot. The ID is dropped so the server can dedupe by
+// path or mint a fresh workspace, and Version carries this client's
+// version, matching the startup handshake.
+func (w *ClientWorkspace) recreateArgs() proto.Workspace {
+	ws := w.cached()
+	return proto.Workspace{
+		Path:     ws.Path,
+		DataDir:  ws.DataDir,
+		Debug:    ws.Debug,
+		YOLO:     ws.YOLO,
+		Channels: ws.Channels,
+		Env:      ws.Env,
+		Version:  version.Version,
+	}
+}
+
+// afterReconnect runs once a degraded subscription is re-established. It
+// re-asserts the client's current-session selection, since the server's
+// presence entry (or the whole workspace) may have been re-created while we
+// were away, and tells the UI to resync state published while detached. The
+// SSE handler attaches the client before writing its 200, so the presence
+// call cannot be rejected as not-attached here.
+func (w *ClientWorkspace) afterReconnect(send func(tea.Msg)) {
+	w.mu.RLock()
+	sid := w.lastSession
+	w.mu.RUnlock()
+	if sid != "" {
+		if err := w.SetCurrentSession(w.subCtx, sid); err != nil {
+			slog.Warn("Failed to re-assert current session after reconnect", "error", err)
+		}
+	}
+	send(ConnectionEvent{State: ConnectionRecovered})
+}
+
+// sleepOrDone waits for d or until the subscription context is
+// cancelled. It reports false when the context was cancelled, signalling
+// the caller to stop reconnecting.
+func (w *ClientWorkspace) sleepOrDone(d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-w.subCtx.Done():
+		return false
+	}
 }
 
 // consumeEvents drives the workspace event loop. It is split out from
@@ -746,9 +1113,56 @@ func (w *ClientWorkspace) consumeEvents(evc <-chan any, send func(tea.Msg)) {
 	}
 }
 
+// shutdownDrainTimeout bounds how long Shutdown waits for the subscription
+// loop to stop. Exceeding it is not a correctness problem — retiring the
+// client releases whatever a late recovery registers — it only makes the
+// goodbye less tidy.
+const shutdownDrainTimeout = 5 * time.Second
+
 func (w *ClientWorkspace) Shutdown() {
+	// Stop the reconnect/recovery loop first, then wait for it: cancelling
+	// alone does not unwind a workspace recovery that is already in
+	// flight, and we want to release the workspace that recovery ended up
+	// with rather than one it is about to replace.
+	if w.subCancel != nil {
+		w.subCancel()
+	}
+	w.awaitSubscription()
 	w.herdrClient.Close()
+
+	// Retiring the client releases every claim it holds, on every workspace,
+	// and blocks any further create from this client ID. That is what makes
+	// teardown exact even when a recovery create's response was lost: the
+	// create either landed before this call, and its claim is released here,
+	// or it arrives afterwards and registers nothing.
+	err := w.client.RetireClient(context.Background())
+	if err == nil {
+		return
+	}
+	if !errors.Is(err, client.ErrUnsupported) {
+		slog.Warn("Failed to retire client on the server", "error", err)
+		return
+	}
+	// The server predates client retirement, so fall back to releasing
+	// the workspace we know about. Nothing better is possible against an
+	// older server.
 	_ = w.client.DeleteWorkspace(context.Background(), w.workspaceID())
+}
+
+// awaitSubscription waits for the subscription loop to return. It returns
+// immediately when the loop never started, which is the case for
+// workspaces shut down before Subscribe runs.
+func (w *ClientWorkspace) awaitSubscription() {
+	if !w.subStarted.Load() || w.subDone == nil {
+		return
+	}
+	t := time.NewTimer(shutdownDrainTimeout)
+	defer t.Stop()
+	select {
+	case <-w.subDone:
+	case <-t.C:
+		slog.Warn("Timed out waiting for the workspace subscription to stop")
+	}
 }
 
 // translateEvent converts proto-typed SSE events into the domain types
@@ -806,6 +1220,25 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 				Denied:     e.Payload.Denied,
 			},
 		}
+	case pubsub.Event[proto.QuestionRequest]:
+		return pubsub.Event[question.Request]{
+			Type: e.Type,
+			Payload: question.Request{
+				ID:                 e.Payload.ID,
+				SessionID:          e.Payload.SessionID,
+				ToolCallID:         e.Payload.ToolCallID,
+				Questions:          protoQuestionsToDomain(e.Payload.Questions),
+				ConfirmTitle:       e.Payload.ConfirmTitle,
+				ConfirmDescription: e.Payload.ConfirmDescription,
+			},
+		}
+	case pubsub.Event[proto.QuestionNotification]:
+		return pubsub.Event[question.Notification]{
+			Type: e.Type,
+			Payload: question.Notification{
+				BatchID: e.Payload.BatchID,
+			},
+		}
 	case pubsub.Event[proto.Message]:
 		return pubsub.Event[message.Message]{
 			Type:    e.Type,
@@ -827,6 +1260,8 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 			SessionTitle: e.Payload.SessionTitle,
 			RunID:        e.Payload.RunID,
 			Type:         notify.Type(e.Payload.Type),
+			AWSSOCommand: e.Payload.AWSSOCommand,
+			AWSSOURL:     e.Payload.AWSSOURL,
 		}
 		if e.Payload.Error != nil {
 			n.Message = e.Payload.Error.Error()
@@ -870,6 +1305,12 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 				ToolCallID: e.Payload.ToolCallID,
 				Output:     e.Payload.Output,
 			},
+		}
+	case pubsub.Event[proto.UpdateAvailable]:
+		return app.UpdateAvailableMsg{
+			CurrentVersion: e.Payload.CurrentVersion,
+			LatestVersion:  e.Payload.LatestVersion,
+			IsDevelopment:  e.Payload.IsDevelopment,
 		}
 	default:
 		slog.Warn("Unknown event type in translateEvent", "type", fmt.Sprintf("%T", ev))
@@ -946,13 +1387,14 @@ func protoToFile(f proto.File) history.File {
 
 func protoToMessage(m proto.Message) message.Message {
 	msg := message.Message{
-		ID:        m.ID,
-		SessionID: m.SessionID,
-		Role:      message.MessageRole(m.Role),
-		Model:     m.Model,
-		Provider:  m.Provider,
-		CreatedAt: m.CreatedAt,
-		UpdatedAt: m.UpdatedAt,
+		ID:               m.ID,
+		SessionID:        m.SessionID,
+		Role:             message.MessageRole(m.Role),
+		Model:            m.Model,
+		Provider:         m.Provider,
+		CreatedAt:        m.CreatedAt,
+		UpdatedAt:        m.UpdatedAt,
+		IsSummaryMessage: m.IsSummaryMessage,
 	}
 
 	for _, p := range m.Parts {
@@ -1072,6 +1514,32 @@ func todosToProto(todos []session.Todo) []proto.Todo {
 			Content:    t.Content,
 			Status:     string(t.Status),
 			ActiveForm: t.ActiveForm,
+		}
+	}
+	return out
+}
+
+func protoQuestionsToDomain(qs []proto.QuestionItem) []question.Question {
+	if len(qs) == 0 {
+		return nil
+	}
+	out := make([]question.Question, len(qs))
+	for i, q := range qs {
+		choices := make([]question.Choice, len(q.Choices))
+		for j, c := range q.Choices {
+			choices[j] = question.Choice{
+				ID:          c.ID,
+				Label:       c.Label,
+				Description: c.Description,
+			}
+		}
+		out[i] = question.Question{
+			ID:          q.ID,
+			Type:        question.Type(q.Type),
+			Label:       q.Label,
+			Text:        q.Question,
+			Description: q.Description,
+			Choices:     choices,
 		}
 	}
 	return out

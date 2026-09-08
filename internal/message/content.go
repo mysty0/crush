@@ -38,6 +38,11 @@ const (
 	FinishReasonToolUse   FinishReason = "tool_use"
 	FinishReasonCanceled  FinishReason = "canceled"
 	FinishReasonError     FinishReason = "error"
+	// FinishReasonContentFilter is a provider safety/refusal stop
+	// (Anthropic stop_reason=refusal, OpenAI content_filter, etc.).
+	// The TUI renders this as a REFUSED banner rather than a silent
+	// empty turn.
+	FinishReasonContentFilter FinishReason = "content_filter"
 
 	// Should never happen
 	FinishReasonUnknown FinishReason = "unknown"
@@ -276,6 +281,17 @@ func (m *Message) FinishReason() FinishReason {
 	return ""
 }
 
+// IsErrorLike reports whether the message finished with an error-style
+// banner (a real error or a provider safety refusal). The TUI renders
+// both through the same banner path.
+func (m *Message) IsErrorLike() bool {
+	switch m.FinishReason() {
+	case FinishReasonError, FinishReasonContentFilter:
+		return true
+	}
+	return false
+}
+
 func (m *Message) IsThinking() bool {
 	if m.ReasoningContent().Thinking != "" && m.Content().Text == "" && !m.IsFinished() {
 		return true
@@ -469,6 +485,23 @@ func (m *Message) Clone() Message {
 	clone.Parts = make([]ContentPart, len(m.Parts))
 	copy(clone.Parts, m.Parts)
 	return clone
+}
+
+// ResetStreamedContent removes all parts that were added during streaming
+// (text, reasoning, tool calls, finish) so the message is ready for a
+// retry. Non-streamed parts (images, binary attachments, tool results,
+// shell commands) are preserved.
+func (m *Message) ResetStreamedContent() {
+	kept := m.Parts[:0]
+	for _, part := range m.Parts {
+		switch part.(type) {
+		case TextContent, ReasoningContent, ToolCall, Finish:
+			// Drop streamed parts.
+		default:
+			kept = append(kept, part)
+		}
+	}
+	m.Parts = kept
 }
 
 func (m *Message) AddFinish(reason FinishReason, message, details string) {

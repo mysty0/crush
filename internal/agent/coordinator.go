@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -23,6 +24,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/claudecode"
 	"github.com/charmbracelet/crush/internal/compressd"
 	"github.com/charmbracelet/crush/internal/config"
@@ -38,12 +40,14 @@ import (
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/antigravity"
 	"github.com/charmbracelet/crush/internal/oauth/codex"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/oauth/geminicli"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
 	"golang.org/x/sync/errgroup"
@@ -56,7 +60,7 @@ import (
 	"charm.land/fantasy/providers/openaicompat"
 	"charm.land/fantasy/providers/openrouter"
 	"charm.land/fantasy/providers/vercel"
-	openaisdk "github.com/charmbracelet/openai-go/option"
+	openaisdk "github.com/openai/openai-go/v3/option"
 	"github.com/qjebbs/go-jsons"
 )
 
@@ -80,6 +84,9 @@ var copilotResponsesModels = map[string]bool{
 	"gpt-5.4-mini":  true,
 	"gpt-5.5":       true,
 	"gpt-5-mini":    true,
+	"gpt-5.6-luna":  true,
+	"gpt-5.6-terra": true,
+	"gpt-5.6-sol":   true,
 }
 
 // OpenCode models that use the Anthropic Messages API instead of Chat Completions.
@@ -196,6 +203,7 @@ type coordinator struct {
 	sessions    session.Service
 	messages    message.Service
 	permissions permission.Service
+	questions   question.Service
 	history     history.Service
 	filetracker filetracker.Service
 	lspManager  *lsp.Manager
@@ -215,6 +223,7 @@ type coordinator struct {
 	// costs nothing. Held on the coordinator rather than in the closure so
 	// it survives rebuilding the agents (e.g. on a model switch).
 	compressCache compressedOutputCache
+	interactive   bool
 
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
@@ -250,6 +259,15 @@ type coordinator struct {
 	// AgentProgress can report on them while they run.
 	subAgents *subAgentRegistry
 
+	// bgCompletions holds the cancel func of every in-flight
+	// backgrounded sub-agent completion delivery, keyed by sub-agent
+	// session. Those turns are started by the coordinator itself
+	// rather than by a user action, so nothing else has a handle on
+	// them; CancelAll uses these to stop them on shutdown. The zero
+	// value is usable -- the map is created on first delivery.
+	bgCompletionsMu sync.Mutex
+	bgCompletions   map[string]context.CancelFunc
+
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
 	activeSkills []*skills.Skill // Post-filter: active skills only.
@@ -267,44 +285,53 @@ type coordinator struct {
 	readyWg errgroup.Group
 }
 
-func NewCoordinator(
-	ctx context.Context,
-	cfg *config.ConfigStore,
-	sessions session.Service,
-	messages message.Service,
-	permissions permission.Service,
-	history history.Service,
-	filetracker filetracker.Service,
-	lspManager *lsp.Manager,
-	notify pubsub.Publisher[notify.Notification],
-	runComplete pubsub.Publisher[notify.RunComplete],
-	skillsMgr *skills.Manager,
-	mem *memory.Store,
-	compressdMgr *compressd.Manager,
-) (Coordinator, error) {
+// CoordinatorOptions holds the dependencies for NewCoordinator. Using a
+// struct keeps the constructor self-documenting and avoids a long
+// positional parameter list.
+type CoordinatorOptions struct {
+	Config      *config.ConfigStore
+	Sessions    session.Service
+	Messages    message.Service
+	Permissions permission.Service
+	Questions   question.Service
+	History     history.Service
+	FileTracker filetracker.Service
+	LSPManager  *lsp.Manager
+	Notify      pubsub.Publisher[notify.Notification]
+	RunComplete pubsub.Publisher[notify.RunComplete]
+	Skills      *skills.Manager
+	Memory      *memory.Store
+	// Compressd supervises the headroomd tool-output compression daemon.
+	// Nil disables compression (e.g. tests, or a build without it).
+	Compressd   *compressd.Manager
+	Interactive bool
+}
+
+func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, error) {
 	// Skills are pre-discovered by the caller (see app.New /
 	// backend.CreateWorkspace) and passed in via the manager. If no
 	// manager was provided (legacy callers), fall back to an in-line
 	// discovery so the coordinator still works.
 	var allSkills, activeSkills []*skills.Skill
-	if skillsMgr != nil {
-		allSkills = skillsMgr.AllSkills()
-		activeSkills = skillsMgr.ActiveSkills()
+	if opts.Skills != nil {
+		allSkills = opts.Skills.AllSkills()
+		activeSkills = opts.Skills.ActiveSkills()
 	} else {
-		allSkills, activeSkills = discoverSkills(cfg)
+		allSkills, activeSkills = discoverSkills(opts.Config)
 	}
 	skillTracker := skills.NewTracker(activeSkills)
 
 	c := &coordinator{
-		cfg:                 cfg,
-		sessions:            sessions,
-		messages:            messages,
-		permissions:         permissions,
-		history:             history,
-		filetracker:         filetracker,
-		lspManager:          lspManager,
-		notify:              notify,
-		runComplete:         runComplete,
+		cfg:                 opts.Config,
+		sessions:            opts.Sessions,
+		messages:            opts.Messages,
+		permissions:         opts.Permissions,
+		questions:           opts.Questions,
+		history:             opts.History,
+		filetracker:         opts.FileTracker,
+		lspManager:          opts.LSPManager,
+		notify:              opts.Notify,
+		runComplete:         opts.RunComplete,
 		agents:              make(map[string]SessionAgent),
 		taskAgents:          csync.NewMap[string, SessionAgent](),
 		defaultTaskAgentKey: csync.NewValue[string](""),
@@ -316,12 +343,13 @@ func NewCoordinator(
 		skillTracker:        skillTracker,
 		loadedSkills:        skills.NewLoadedStore(),
 		snapshots:           hashline.NewStore(),
-		memory:              mem,
-		compressdMgr:        compressdMgr,
+		memory:              opts.Memory,
+		compressdMgr:        opts.Compressd,
 		retrieveStore:       compressd.NewRetrievalStore(),
+		interactive:         opts.Interactive,
 	}
 
-	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
+	agentCfg, ok := opts.Config.Config().Agents[config.AgentCoder]
 	if !ok {
 		return nil, errCoderAgentNotConfigured
 	}
@@ -359,6 +387,26 @@ func (c *coordinator) RunAccepted(ctx context.Context, accept *AcceptedRun, sess
 func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	if err := c.readyWg.Wait(); err != nil {
 		return nil, err
+	}
+
+	// MCP servers connect asynchronously (see mcp.Initialize).
+	//
+	// Interactive runs never wait for that to finish: the tool list below
+	// is built from whatever is registered right now, servers still
+	// connecting are simply absent from this run's palette, and they are
+	// picked up by later runs once they register and publish
+	// EventToolsListChanged. Blocking here froze the TUI for the duration
+	// of the slowest server's connect timeout whenever a prompt was sent
+	// before initialization finished — most visibly on the first message.
+	//
+	// Non-interactive runs get a single shot at the tool palette, so they
+	// do wait for initialization to settle. The wait is bounded by each
+	// server's own connect timeout, so a hung server cannot stall the run
+	// indefinitely.
+	if !c.interactive {
+		if err := mcp.WaitForInit(ctx); err != nil {
+			return nil, fmt.Errorf("failed to wait for MCP initialization: %w", err)
+		}
 	}
 
 	// refresh models before each run
@@ -444,6 +492,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 			PresencePenalty:  callOpts.PresencePenalty,
 			OnComplete:       onComplete,
 			Accepted:         accept,
+			OnAuthRefresh:    c.makeAuthRefreshCallback(providerCfg),
 		})
 	}
 	beforeLoaded := c.skillTracker.LoadedNames()
@@ -458,8 +507,10 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)
 
 	// Notify only if still unauthorized after retry — a successful
-	// retry means the user doesn't need to re-authenticate.
-	if originalErr != nil && c.isUnauthorized(originalErr) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
+	// retry means the user doesn't need to re-authenticate. AWS SSO is
+	// handled transparently inside OnAuthRefresh, so it needs no post-run
+	// notification here.
+	if originalErr != nil && isUnauthorized(originalErr) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
 		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
 			Type:       notify.TypeReAuthenticate,
 			ProviderID: model.ModelCfg.Provider,
@@ -596,6 +647,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 				slog.Warn("Failed to parse provider options", "provider", openai.Name, "error", err)
 			}
 		}
+
 	case anthropic.Name, bedrock.Name:
 		var (
 			_, hasEffort = mergedOptions["effort"]
@@ -604,7 +656,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		)
 
 		switch providerCfg.ID {
-		case string(catwalk.InferenceProviderAlibabaSingapore):
+		case string(catwalk.InferenceProviderAlibabaSingapore), string(catwalk.InferenceProviderAlibabaUS):
 			switch {
 			case !hasEffort && shouldSetEffort:
 				extraBody["reasoning_effort"] = reasoningEffort
@@ -653,6 +705,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		} else {
 			slog.Warn("Failed to parse provider options", "provider", openrouter.Name, "error", err)
 		}
+
 	case vercel.Name:
 		_, hasReasoning := mergedOptions["reasoning"]
 		if !hasReasoning && shouldSetEffort {
@@ -667,6 +720,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		} else {
 			slog.Warn("Failed to parse provider options", "provider", vercel.Name, "error", err)
 		}
+
 	case google.Name:
 		_, hasReasoning := mergedOptions["thinking_config"]
 		if !hasReasoning && model.CatwalkCfg.CanReason {
@@ -705,6 +759,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		} else {
 			slog.Warn("Failed to parse provider options", "provider", google.Name, "error", err)
 		}
+
 	case openaicompat.Name, hyper.Name:
 		extraBody := make(map[string]any)
 
@@ -713,6 +768,13 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 			switch providerCfg.ID {
 			case string(catwalk.InferenceProviderIoNet):
 				extraBody["reasoning"] = map[string]string{"effort": reasoningEffort}
+			case string(catwalk.InferenceProviderOpenCodeGo), string(catwalk.InferenceProviderOpenCodeZen):
+				// MiniMax models use the "thinking" parameter instead of
+				// "reasoning_effort". Other models on these providers still
+				// use the standard field.
+				if !strings.HasPrefix(strings.ToLower(model.CatwalkCfg.ID), "minimax") {
+					mergedOptions["reasoning_effort"] = reasoningEffort
+				}
 			default:
 				mergedOptions["reasoning_effort"] = reasoningEffort
 			}
@@ -733,16 +795,14 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 					extraBody["reasoning"] = map[string]string{"effort": "none"}
 				}
 			}
+
 		case string(catwalk.InferenceProviderZAI), string(catwalk.InferenceProviderDeepSeek):
 			if model.ModelCfg.Think || reasoningEffort != "" {
-				extraBody["thinking"] = map[string]any{
-					"type": "enabled",
-				}
+				extraBody["thinking"] = map[string]any{"type": "enabled"}
 			} else {
-				extraBody["thinking"] = map[string]any{
-					"type": "disabled",
-				}
+				extraBody["thinking"] = map[string]any{"type": "disabled"}
 			}
+
 		case string(catwalk.InferenceProviderFireworks):
 			// NOTE: Fireworks break if we set both `reasoning_effort` and `thinking`.
 			if reasoningEffort == "" {
@@ -752,9 +812,28 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 					extraBody["thinking"] = map[string]any{"type": "disabled"}
 				}
 			}
-		case string(catwalk.InferenceProviderAlibabaSingapore):
+
+		case string(catwalk.InferenceProviderBaseten):
+			extraBody["chat_template_args"] = map[string]any{
+				"enable_thinking": model.ModelCfg.Think || reasoningEffort != "" && reasoningEffort != "none",
+			}
+
+		case string(catwalk.InferenceProviderOpenCodeGo), string(catwalk.InferenceProviderOpenCodeZen):
+			// MiniMax M3 uses the "thinking" parameter to control reasoning.
+			// "reasoning_split" must be true so thinking content is returned
+			// in the "reasoning_content" field instead of inline in "content".
+			if strings.HasPrefix(strings.ToLower(model.CatwalkCfg.ID), "minimax") {
+				if model.CatwalkCfg.CanReason && (model.ModelCfg.Think || reasoningEffort != "") {
+					extraBody["thinking"] = map[string]any{"type": "adaptive"}
+					extraBody["reasoning_split"] = true
+				} else {
+					extraBody["thinking"] = map[string]any{"type": "disabled"}
+				}
+			}
+
+		case string(catwalk.InferenceProviderAlibabaSingapore), string(catwalk.InferenceProviderAlibabaUS):
 			if model.CatwalkCfg.CanReason {
-				extraBody["enable_thinking"] = model.ModelCfg.Think
+				extraBody["enable_thinking"] = model.ModelCfg.Think || reasoningEffort != ""
 			}
 		}
 
@@ -766,6 +845,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		} else {
 			slog.Warn("Failed to parse provider options", "provider", openaicompat.Name, "error", err)
 		}
+
 	default:
 		// Known custom providers (litellm, ollama, omlx) are
 		// openai-compat under the hood.
@@ -868,8 +948,20 @@ func (c *coordinator) newTaskAgent(ctx context.Context, prompt *prompt.Prompt, a
 	// tool-less. See sessionAgent.ArmReady/WaitReady.
 	markReady := result.ArmReady(2)
 
+	// The readiness goroutines below perform one-time setup — building the
+	// system prompt and the initial tool list — whose results the
+	// coordinator needs for its whole lifetime, so they must survive the
+	// caller's context being canceled. Several entry points build an agent
+	// from a short-lived HTTP request context: the server's
+	// InitAgent/UpdateAgent handlers, and UpdateModels -> buildTools ->
+	// agentTool -> buildAgent for the sub-agent. The tool-list build reads
+	// the MCP registry as it stands; servers still connecting are picked up
+	// by later runs. WithoutCancel drops cancellation while keeping context
+	// values; the work is local and always completes.
+	initCtx := context.WithoutCancel(ctx)
+
 	c.readyWg.Go(func() error {
-		systemPrompt, err := prompt.Build(ctx, primary.Model.Provider(), primary.Model.Model(), c.cfg)
+		systemPrompt, err := prompt.Build(initCtx, primary.Model.Provider(), primary.Model.Model(), c.cfg)
 		if err != nil {
 			return err
 		}
@@ -879,7 +971,7 @@ func (c *coordinator) newTaskAgent(ctx context.Context, prompt *prompt.Prompt, a
 	})
 
 	c.readyWg.Go(func() error {
-		tools, err := c.buildTools(ctx, agent, isSubAgent)
+		tools, err := c.buildTools(initCtx, agent, isSubAgent)
 		if err != nil {
 			return err
 		}
@@ -1054,9 +1146,24 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		allTools = append(allTools, tools.NewRetrieveFullOutputTool(c.retrieveStore))
 	}
 
+	// Question tool is interactive-only and not available to sub-agents.
+	if !isSubAgent && c.interactive {
+		allTools = append(allTools, tools.NewQuestionTool(c.questions))
+	}
+
 	// Add LSP tools if user has configured LSPs or auto_lsp is enabled (nil or true).
 	if len(c.cfg.Config().LSP) > 0 || c.cfg.Config().Options.AutoLSP == nil || *c.cfg.Config().Options.AutoLSP {
-		allTools = append(allTools, tools.NewDiagnosticsTool(c.lspManager), tools.NewReferencesTool(c.lspManager), tools.NewLSPRestartTool(c.lspManager))
+		allTools = append(
+			allTools,
+			tools.NewDiagnosticsTool(c.lspManager),
+			tools.NewReferencesTool(c.lspManager),
+			tools.NewLSPRestartTool(c.lspManager),
+			tools.NewSymbolsTool(c.lspManager),
+			tools.NewDefinitionTool(c.lspManager),
+			tools.NewCallHierarchyTool(c.lspManager),
+			tools.NewRenameTool(c.lspManager, c.permissions, c.history, c.filetracker),
+			tools.NewReplaceSymbolTool(c.lspManager, c.permissions, c.history, c.filetracker),
+		)
 	}
 
 	if len(c.cfg.Config().MCP) > 0 {
@@ -1225,7 +1332,21 @@ func (c *coordinator) debugHTTPClient() *http.Client {
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
 	var opts []anthropic.Option
 
+	// A subscription account carries no API key: it authenticates with a
+	// per-request OAuth bearer injected by AuthTransport below. Resolved
+	// here because that changes which credential the SDK is handed.
+	oauthSubscription := claudecode.IsProviderID(providerID)
+
 	switch {
+	case oauthSubscription:
+		// NOTE: Prevent the SDK from picking up the API key from env.
+		os.Setenv("ANTHROPIC_API_KEY", "")
+		// The SDK refuses to send a request when it can find no
+		// credential of its own, and it decides that before any
+		// transport runs -- so the real bearer arrives too late to
+		// satisfy it. The placeholder keeps the request alive and is
+		// stripped again by AuthTransport, so it is never transmitted.
+		opts = append(opts, anthropic.WithAPIKey(claudecode.PlaceholderAPIKey))
 	case strings.HasPrefix(apiKey, "Bearer "):
 		// NOTE: Prevent the SDK from picking up the API key from env.
 		os.Setenv("ANTHROPIC_API_KEY", "")
@@ -1261,9 +1382,7 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 	// resolved per provider id: accounts added with `crush login
 	// claude-code` draw on their stored token, while the default provider
 	// keeps reading ~/.claude/.credentials.json.
-	oauthSubscription := claudecode.IsProviderID(providerID)
 	if oauthSubscription {
-		os.Setenv("ANTHROPIC_API_KEY", "")
 		base = &claudecode.AuthTransport{Base: base, Source: c.cfg.ClaudeCodeSource(providerID)}
 	}
 	// The subscription-OAuth endpoint requires the Claude Code identity as
@@ -1616,7 +1735,8 @@ func (c *coordinator) CancelKeepQueue(sessionID string) {
 // coder agent, every task/sub-agent instance dispatched via the
 // "agent" tool (each mode/model combination runs on its own
 // [SessionAgent], separate from currentAgent), every background
-// workflow, and every scheduled task. Called on app shutdown so
+// workflow, every scheduled task, and every pending backgrounded
+// sub-agent completion delivery. Called on app shutdown so
 // nothing is left running headless after the process exits — without
 // this, an in-flight sub-agent, workflow, or scheduled task is simply
 // abandoned, leaving its session with an unfinished tool call that
@@ -1634,6 +1754,7 @@ func (c *coordinator) CancelAll() {
 	for _, sched := range c.schedules.listAll() {
 		c.schedules.stop(sched.ID, "canceled")
 	}
+	c.cancelBackgroundCompletions()
 }
 
 func (c *coordinator) ClearQueue(sessionID string) {
@@ -1691,11 +1812,9 @@ func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 		slog.Error("Failed to refresh OAuth2 token before summarize. Proceeding with existing token.", "error", err)
 	}
 
-	summarize := func() error {
-		return c.currentAgent.Summarize(ctx, sessionID, getProviderOptions(c.currentAgent.Model(), providerCfg))
-	}
-
-	return c.runWithUnauthorizedRetry(ctx, providerCfg, summarize)
+	// Auth failures during summarize flow through fantasy's OnAuthRefresh,
+	// the same path used by regular turns.
+	return c.currentAgent.Summarize(ctx, sessionID, getProviderOptions(c.currentAgent.Model(), providerCfg), c.makeAuthRefreshCallback(providerCfg))
 }
 
 // GenerateTitle generates a session title using the current agent. It
@@ -1816,14 +1935,14 @@ func (c *coordinator) refreshTokenIfExpired(ctx context.Context, providerCfg con
 	return c.refreshOAuth2Token(ctx, providerCfg)
 }
 
-// runWithUnauthorizedRetry executes fn. If fn returns a 401 error, it
-// attempts to refresh credentials and re-runs fn once. Returns the
-// final error: from the retry if a retry was attempted, otherwise from
-// the original run. Callers that need to notify the user on persistent
-// failure should check isUnauthorized on the returned error.
+// runWithUnauthorizedRetry executes fn and, if it fails with a 401, refreshes
+// the provider's credentials and runs fn once more. This is the turn-level
+// counterpart to the per-request OnAuthRefresh callback: fantasy retries the
+// in-flight request, whereas a turn that has already returned unauthorized
+// needs a fresh attempt here.
 func (c *coordinator) runWithUnauthorizedRetry(ctx context.Context, providerCfg config.ProviderConfig, fn func() error) error {
 	err := fn()
-	if err != nil && c.isUnauthorized(err) {
+	if err != nil && isUnauthorized(err) {
 		if retryErr := c.retryAfterUnauthorized(ctx, providerCfg); retryErr == nil {
 			return fn()
 		}
@@ -1831,13 +1950,32 @@ func (c *coordinator) runWithUnauthorizedRetry(ctx context.Context, providerCfg 
 	return err
 }
 
-// retryAfterUnauthorized attempts to refresh credentials after receiving a 401
-// and returns nil if retry should be attempted.
+// retryAfterUnauthorized attempts to refresh credentials after an auth error
+// and returns nil if the request should be retried. For OAuth providers whose
+// refresh token is revoked, and for Bedrock providers whose AWS SSO session
+// has expired, it triggers interactive re-authentication and blocks until the
+// user completes it (or the context is cancelled).
 func (c *coordinator) retryAfterUnauthorized(ctx context.Context, providerCfg config.ProviderConfig) error {
 	switch {
 	case providerCfg.OAuthToken != nil:
 		slog.Debug("Received 401. Refreshing token and retrying", "provider", providerCfg.ID)
-		return c.refreshOAuth2Token(ctx, providerCfg)
+		if err := c.refreshOAuth2Token(ctx, providerCfg); err != nil {
+			// If the refresh token was revoked, trigger interactive
+			// re-auth and wait for the user to complete it.
+			var exchangeErr *oauth.TokenExchangeError
+			if c.notify != nil && errors.As(err, &exchangeErr) && exchangeErr.IsRefreshTokenRevoked() {
+				slog.Info("Refresh token revoked, waiting for re-authentication", "provider", providerCfg.ID)
+				c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+					Type:       notify.TypeReAuthenticate,
+					ProviderID: providerCfg.ID,
+				})
+				return c.waitForInteractiveReauth(ctx, providerCfg.ID)
+			}
+			return err
+		}
+		return nil
+	case providerCfg.AWSAuthRefresh != "":
+		return c.refreshAWSCredentials(ctx, providerCfg)
 	case strings.Contains(providerCfg.APIKeyTemplate, "$"):
 		slog.Debug("Received 401. Refreshing API Key template and retrying", "provider", providerCfg.ID)
 		return c.refreshAPIKeyTemplate(ctx, providerCfg)
@@ -1846,7 +1984,45 @@ func (c *coordinator) retryAfterUnauthorized(ctx context.Context, providerCfg co
 	}
 }
 
-func (c *coordinator) isUnauthorized(err error) bool {
+// errNoInteractiveAuth is returned by an OnAuthRefresh callback when a
+// provider needs interactive re-authentication but no notifier is available
+// to drive it (e.g. headless runs). Returning it surfaces the original auth
+// error rather than retrying.
+var errNoInteractiveAuth = errors.New("interactive authentication unavailable")
+
+// waitForInteractiveReauth blocks until interactive re-authentication for the
+// provider completes (signalled via SignalAuthComplete) or the context is
+// cancelled, then rebuilds models so the next attempt picks up fresh
+// credentials. Returns nil when the caller should retry.
+func (c *coordinator) waitForInteractiveReauth(ctx context.Context, providerID string) error {
+	// Use a detached context with a generous timeout so the wait survives
+	// agent run cancellation. The user needs time to complete browser-based
+	// authentication.
+	waitCtx, waitCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer waitCancel()
+	slog.Info("Blocking on WaitForTokenChange", "provider", providerID)
+	if waitErr := c.cfg.WaitForTokenChange(waitCtx, providerID); waitErr != nil {
+		slog.Info("WaitForTokenChange returned error", "provider", providerID, "error", waitErr)
+		return waitErr
+	}
+	// If the original context was cancelled during the wait, fantasy's retry
+	// would fail immediately, so surface the cancellation instead.
+	if ctx.Err() != nil {
+		slog.Warn("Original context cancelled during auth wait, cannot retry",
+			"provider", providerID, "ctx_err", ctx.Err())
+		return ctx.Err()
+	}
+	// Rebuild models so ModelProvider picks up the fresh credentials.
+	if updateErr := c.UpdateModels(waitCtx); updateErr != nil {
+		slog.Error("Failed to update models after re-authentication", "error", updateErr)
+		return updateErr
+	}
+	slog.Info("Models updated, returning nil to retry", "provider", providerID)
+	return nil
+}
+
+// isUnauthorized reports whether err is an HTTP 401 from a provider.
+func isUnauthorized(err error) bool {
 	var providerErr *fantasy.ProviderError
 	return errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusUnauthorized
 }
@@ -1947,6 +2123,20 @@ func retryStreamError(ctx context.Context, fn func() error, maxRetries int, init
 		err = fn()
 	}
 	return err
+}
+
+// makeAuthRefreshCallback returns an OnAuthRefresh callback for fantasy that
+// delegates to the coordinator's existing credential refresh logic. Returns
+// nil if no refresh mechanism is configured for the provider.
+func (c *coordinator) makeAuthRefreshCallback(providerCfg config.ProviderConfig) func(context.Context, *fantasy.ProviderError) error {
+	if providerCfg.OAuthToken == nil &&
+		!strings.Contains(providerCfg.APIKeyTemplate, "$") &&
+		providerCfg.AWSAuthRefresh == "" {
+		return nil
+	}
+	return func(ctx context.Context, _ *fantasy.ProviderError) error {
+		return c.retryAfterUnauthorized(ctx, providerCfg)
+	}
 }
 
 func (c *coordinator) refreshOAuth2Token(ctx context.Context, providerCfg config.ProviderConfig) error {
@@ -2083,6 +2273,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 				FrequencyPenalty: model.ModelCfg.FrequencyPenalty,
 				PresencePenalty:  model.ModelCfg.PresencePenalty,
 				NonInteractive:   true,
+				OnAuthRefresh:    c.makeAuthRefreshCallback(providerCfg),
 			})
 			return innerErr
 		})
@@ -2244,16 +2435,184 @@ func (c *coordinator) completeSubAgentBackgrounded(params subAgentParams, subSes
 	}
 	c.lingerSubAgentRemoval(subSession.ID)
 
-	// Queue the completion back into the coder session. Coordinator.Run
-	// enqueues behind any active turn or pending user messages, so this
-	// never interrupts the user -- it fires when the session is idle,
-	// exactly like a typed follow-up (see finishWorkflow for the same
-	// pattern with background workflows).
-	go func() {
-		if _, runErr := c.Run(context.Background(), params.SessionID, prompt); runErr != nil {
-			slog.Warn("Failed to queue backgrounded sub-agent completion", "session", params.SessionID, "error", runErr)
+	// Deliver the completion. This deliberately does not queue a coder
+	// turn into params.SessionID unconditionally: that session is
+	// whichever session dispatched the sub-agent, which for a nested
+	// dispatch is itself a sub-agent session (see
+	// deliverBackgroundedCompletion).
+	go c.deliverBackgroundedCompletion(params.SessionID, subSession.ID, prompt)
+}
+
+// maxSessionAncestorHops bounds the parent-chain walk in
+// topLevelAncestor. Real nesting is only ever a couple of levels deep
+// (conversation -> sub-agent -> agentic_fetch), so a chain longer than
+// this means a corrupt or cyclic parent link and is treated as
+// unresolvable rather than walked forever.
+const maxSessionAncestorHops = 8
+
+// backgroundCompletionRoute says where a finished backgrounded
+// sub-agent's completion text should be delivered.
+type backgroundCompletionRoute struct {
+	// TopLevelSessionID is the user-facing conversation the completion
+	// is queued into as a follow-up turn.
+	TopLevelSessionID string
+	// SteerSessionID, when set, is the sub-agent session that
+	// dispatched this sub-agent and is still running its own turn. The
+	// completion is injected into that turn first, and only falls back
+	// to TopLevelSessionID if the turn ended in the meantime.
+	SteerSessionID string
+	// Nested is true when the dispatching session was a sub-agent
+	// session rather than a top-level conversation, so a completion
+	// queued into TopLevelSessionID can say where it came from.
+	Nested bool
+}
+
+// routeBackgroundCompletion decides where the completion of a
+// backgrounded sub-agent dispatched from dispatchSessionID goes.
+//
+// A top-level (user-facing) session takes the completion as a follow-up
+// turn, which is what a backgrounded sub-agent has always done. A
+// sub-agent session must not: coordinator.Run hands the turn to the
+// coder agent, which would then hold a sub-agent session among its
+// active requests, where no user-facing cancel can reach it -- the
+// whole app then reads as busy forever. Nested dispatches (a sub-agent
+// backgrounding work of its own, e.g. agentic_fetch) are steered into
+// the still-running sub-agent turn instead, or, once that turn has
+// ended, attributed and queued into the nearest top-level ancestor.
+func (c *coordinator) routeBackgroundCompletion(ctx context.Context, dispatchSessionID string) (backgroundCompletionRoute, error) {
+	sess, err := c.sessions.Get(ctx, dispatchSessionID)
+	if err != nil {
+		return backgroundCompletionRoute{}, fmt.Errorf("look up dispatching session %q: %w", dispatchSessionID, err)
+	}
+	if sess.ParentSessionID == "" {
+		return backgroundCompletionRoute{TopLevelSessionID: dispatchSessionID}, nil
+	}
+
+	topLevel, err := c.topLevelAncestor(ctx, sess)
+	if err != nil {
+		return backgroundCompletionRoute{}, err
+	}
+	route := backgroundCompletionRoute{TopLevelSessionID: topLevel, Nested: true}
+	if c.subAgentSessionIsRunning(dispatchSessionID) {
+		route.SteerSessionID = dispatchSessionID
+	}
+	return route, nil
+}
+
+// topLevelAncestor walks the parent chain from sess up to the session
+// that has no parent -- the user-facing conversation every sub-agent,
+// workflow, and nested dispatch below it ultimately belongs to.
+func (c *coordinator) topLevelAncestor(ctx context.Context, sess session.Session) (string, error) {
+	start := sess.ID
+	for range maxSessionAncestorHops {
+		if sess.ParentSessionID == "" {
+			return sess.ID, nil
 		}
-	}()
+		parent, err := c.sessions.Get(ctx, sess.ParentSessionID)
+		if err != nil {
+			return "", fmt.Errorf("look up parent %q of session %q: %w", sess.ParentSessionID, sess.ID, err)
+		}
+		sess = parent
+	}
+	return "", fmt.Errorf("session %q has no top-level ancestor within %d levels", start, maxSessionAncestorHops)
+}
+
+// subAgentSessionIsRunning reports whether some task-agent instance is
+// currently running a turn for sessionID.
+func (c *coordinator) subAgentSessionIsRunning(sessionID string) bool {
+	if c.taskAgents == nil {
+		return false
+	}
+	for taskAgent := range c.taskAgents.Seq() {
+		if taskAgent != nil && taskAgent.IsSessionBusy(sessionID) {
+			return true
+		}
+	}
+	return false
+}
+
+// deliverBackgroundedCompletion delivers a finished backgrounded
+// sub-agent's completion text to whichever session can actually run it
+// (see routeBackgroundCompletion). It is called on its own goroutine
+// because the delivered turn only starts once the target session goes
+// idle, which can take arbitrarily long.
+//
+// If nothing can be resolved the completion is not re-queued anywhere,
+// but it is never lost: the sub-agent's own session keeps its full
+// transcript, and the failure is logged.
+func (c *coordinator) deliverBackgroundedCompletion(dispatchSessionID, subSessionID, prompt string) {
+	ctx, release := c.beginBackgroundCompletion(subSessionID)
+	defer release()
+
+	route, err := c.routeBackgroundCompletion(ctx, dispatchSessionID)
+	if err != nil {
+		slog.Warn("Could not route backgrounded sub-agent completion; it stays readable in the sub-agent's own session",
+			"sub_session", subSessionID, "dispatching_session", dispatchSessionID, "error", err)
+		return
+	}
+
+	if route.SteerSessionID != "" {
+		err := c.SendToSubAgent(ctx, route.SteerSessionID, prompt)
+		switch {
+		case err == nil:
+			return
+		case errors.Is(err, errSubAgentNotRunning), errors.Is(err, errTaskAgentNotConfigured):
+			// The dispatching sub-agent's turn ended between routing
+			// and delivery -- fall through to its conversation.
+		default:
+			slog.Warn("Failed to deliver backgrounded sub-agent completion to the sub-agent that dispatched it",
+				"sub_session", subSessionID, "dispatching_session", route.SteerSessionID, "error", err)
+			return
+		}
+	}
+
+	if route.Nested {
+		prompt = fmt.Sprintf(
+			"A sub-agent (session %s) started background work that only finished after the sub-agent's own turn ended, so the result is reported here instead.\n\n%s",
+			dispatchSessionID, prompt,
+		)
+	}
+
+	// Coordinator.Run enqueues behind any active turn or pending user
+	// messages, so this never interrupts the user -- it fires when the
+	// session is idle, exactly like a typed follow-up (see
+	// finishWorkflow for the same pattern with background workflows).
+	if _, err := c.Run(ctx, route.TopLevelSessionID, prompt); err != nil {
+		slog.Warn("Failed to queue backgrounded sub-agent completion", "session", route.TopLevelSessionID, "error", err)
+	}
+}
+
+// beginBackgroundCompletion returns the context a backgrounded
+// completion delivery runs under, plus the func that releases it. The
+// context is cancelable and registered on the coordinator so CancelAll
+// can stop a delivery that has not started its turn yet (blocked on
+// model refresh or on interactive reauth, say) instead of leaving it
+// running headless past shutdown. Once the turn itself is under way,
+// the agent's own active-request cancel takes over.
+func (c *coordinator) beginBackgroundCompletion(subSessionID string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c.bgCompletionsMu.Lock()
+	if c.bgCompletions == nil {
+		c.bgCompletions = make(map[string]context.CancelFunc)
+	}
+	c.bgCompletions[subSessionID] = cancel
+	c.bgCompletionsMu.Unlock()
+	return ctx, func() {
+		c.bgCompletionsMu.Lock()
+		delete(c.bgCompletions, subSessionID)
+		c.bgCompletionsMu.Unlock()
+		cancel()
+	}
+}
+
+// cancelBackgroundCompletions cancels every in-flight backgrounded
+// sub-agent completion delivery.
+func (c *coordinator) cancelBackgroundCompletions() {
+	c.bgCompletionsMu.Lock()
+	defer c.bgCompletionsMu.Unlock()
+	for _, cancel := range c.bgCompletions {
+		cancel()
+	}
 }
 
 // subAgentLingerAfterFinish is how long a finished sub-agent remains
@@ -2297,7 +2656,7 @@ func subAgentOutput(result *fantasy.AgentResult) string {
 // both the synchronous and backgrounded sub-agent completion paths notify
 // identically.
 func (c *coordinator) notifyIfUnauthorized(model Model, err error) {
-	if err != nil && c.isUnauthorized(err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
+	if err != nil && isUnauthorized(err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
 		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
 			Type:       notify.TypeReAuthenticate,
 			ProviderID: model.ModelCfg.Provider,

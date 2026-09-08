@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -110,7 +111,7 @@ func (m *UI) buildSubAgentMessageItems(msgs []message.Message) []chat.MessageIte
 	toolResultMap := chat.BuildToolResultMap(msgPtrs)
 	items := make([]chat.MessageItem, 0, len(msgs)*2)
 	for _, msg := range msgPtrs {
-		items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
+		items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
 	}
 	return items
 }
@@ -150,7 +151,7 @@ func (m *UI) appendSubAgentMessage(msg message.Message) tea.Cmd {
 		if m.subAgentChat.MessageItem(msg.ID) != nil {
 			return nil
 		}
-		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil)
+		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir())
 		if cmd := m.startAnimClock(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -203,7 +204,7 @@ func (m *UI) updateSubAgentMessage(msg message.Message) tea.Cmd {
 			}
 		}
 		if existingToolItem == nil {
-			items = append(items, chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false))
+			items = append(items, chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false, m.com.Workspace.WorkingDir()))
 		}
 	}
 	if cmd := m.startAnimClock(); cmd != nil {
@@ -423,9 +424,36 @@ func (m *UI) agentListEntries() []agentListEntry {
 		if isSubAgentKind(t.Ref.Kind) && t.State != agent.TaskRunning {
 			continue
 		}
+		if finishedBashHasAgedOut(t) {
+			continue
+		}
 		entries = append(entries, taskListEntry(t))
 	}
 	return entries
+}
+
+// finishedBashLinger is how long a completed background bash job stays
+// in the task picker after it ends, so its ✓/✗ marker is visible for a
+// moment without the list filling up with finished work.
+//
+// The job itself lives much longer in the shell manager (see
+// shell.CompletedJobRetentionMinutes), which is what keeps its output
+// retrievable via job_output and the fullscreen bash view. This only
+// governs how long it occupies a row.
+const finishedBashLinger = 30 * time.Second
+
+// finishedBashHasAgedOut reports whether t is a background bash job that
+// finished longer ago than finishedBashLinger. A job with no recorded
+// finish time is never aged out, so an unknown timestamp keeps the row
+// rather than hiding work that may still be live.
+func finishedBashHasAgedOut(t agent.TaskStatus) bool {
+	if t.Ref.Kind != agent.TaskKindBash || t.State == agent.TaskRunning {
+		return false
+	}
+	if t.FinishedAt.IsZero() {
+		return false
+	}
+	return time.Since(t.FinishedAt) > finishedBashLinger
 }
 
 // isSubAgentKind reports whether a task kind is an agent-tool sub-agent

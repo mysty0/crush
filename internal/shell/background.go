@@ -168,6 +168,11 @@ type BackgroundJobStatus struct {
 	StartedAt   time.Time
 	Done        bool
 	Err         error
+	// CompletedAt is when the job finished, or the zero time while it is
+	// still running. Callers use it to age long-finished jobs out of
+	// user-facing lists without dropping them from the manager, which
+	// retains output for job_output well past that point.
+	CompletedAt time.Time
 }
 
 // Statuses returns a value snapshot of every tracked background job.
@@ -175,6 +180,10 @@ func (m *BackgroundShellManager) Statuses() []BackgroundJobStatus {
 	var out []BackgroundJobStatus
 	for _, bs := range m.shells.Seq2() {
 		_, _, done, err := bs.GetOutput()
+		var completedAt time.Time
+		if ts := bs.completedAt.Load(); ts > 0 {
+			completedAt = time.Unix(ts, 0)
+		}
 		out = append(out, BackgroundJobStatus{
 			ID:          bs.ID,
 			SessionID:   bs.SessionID,
@@ -183,6 +192,7 @@ func (m *BackgroundShellManager) Statuses() []BackgroundJobStatus {
 			StartedAt:   bs.startedAt,
 			Done:        done,
 			Err:         err,
+			CompletedAt: completedAt,
 		})
 	}
 	return out

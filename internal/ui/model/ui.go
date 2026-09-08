@@ -37,12 +37,15 @@ import (
 	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/commands"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/home"
+	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/stringext"
@@ -99,6 +102,7 @@ const (
 	uiFocusNone uiFocusState = iota
 	uiFocusEditor
 	uiFocusMain
+	uiFocusSidebar
 )
 
 type uiState uint8
@@ -172,9 +176,10 @@ type (
 		sessionFiles []SessionFile
 	}
 	// creditsUpdatedMsg is sent when the remaining Hyper credits have been
-	// fetched from the API.
+	// fetched from the API. credits is nil when the team has hypercredit
+	// display disabled.
 	creditsUpdatedMsg struct {
-		credits int
+		credits *int
 	}
 )
 
@@ -228,6 +233,14 @@ type UI struct {
 	// backgroundNow (background.go).
 	backgroundArmed bool
 
+	// ctrlCArmed tracks whether a Ctrl+C press already asked the current
+	// session to cancel its turn. It arms the escape hatch: if the next
+	// consecutive Ctrl+C still finds the session busy, it opens the quit
+	// dialog instead of cancelling again, so Ctrl+C can never be
+	// swallowed forever by a turn that refuses to end. Any other key
+	// disarms it. See handleKeyPressMsg's quit branch.
+	ctrlCArmed bool
+
 	// cancelRestore holds the prompt to return to the editor after a
 	// no-output cancel finalizes. Set when Escape cancels a turn that has
 	// produced no visible output (thinking is discarded), consumed once the
@@ -267,6 +280,12 @@ type UI struct {
 
 	// Editor components
 	textarea textarea.Model
+
+	// Active inline editor replaces the textarea when non-nil.
+	activeInline dialog.InlineEditor
+	// inlineCursor stores the cursor from the last inline editor
+	// Draw call, used by the cursor positioning logic below.
+	inlineCursor *tea.Cursor
 
 	// Attachment list
 	attachments *attachments.Attachments
@@ -348,8 +367,19 @@ type UI struct {
 		yesInitializeSelected bool
 	}
 
-	// lsp
-	lspStates map[string]workspace.LSPClientInfo
+	// lspStates / lspDiagnostics memoize the workspace LSP state and
+	// per-server severity counts (each probe behind them is a synchronous
+	// HTTP round-trip in client/server mode, and the sidebar, landing view,
+	// and compact header render them every frame). LSP events refresh them
+	// off-thread with a TTL backstop; see lsp.go.
+	lspStates        map[string]workspace.LSPClientInfo
+	lspDiagnostics   map[string]lsp.DiagnosticCounts
+	lspFetchInFlight bool
+	// lspRefreshQueued records that an LSP event arrived while a fetch was
+	// already in flight; applyLSPStates re-dispatches so the freshest state
+	// still lands.
+	lspRefreshQueued bool
+	lspCheckedAt     time.Time
 
 	// mcp
 	mcpStates map[string]mcp.ClientInfo
@@ -359,6 +389,18 @@ type UI struct {
 
 	// sidebarLogo keeps a cached version of the sidebar sidebarLogo.
 	sidebarLogo string
+
+	// Sidebar scroll state for virtual scrolling.
+	sidebarOffset           int  // current scroll offset in lines
+	sidebarScrollable       bool // true when sidebar content exceeds available height
+	sidebarScrollbarVisible bool
+	sidebarScrollbarSeq     int    // sequence number for auto-hide timer
+	sidebarMaxOffsetVal     int    // max scroll offset, computed in updateSidebarScrollState
+	sidebarContent          string // cached rendered sidebar content
+	sidebarTotalLines       int    // total lines in sidebarContent
+	sidebarContentHeight    int    // available height for sidebar content
+	sidebarContentWidth     int    // available width for sidebar content
+	sidebarDrawLogo         string // logo to render (may differ from sidebarLogo for short heights)
 
 	// Notification state
 	notifyBackend       notification.Backend
@@ -381,8 +423,36 @@ type UI struct {
 	pillsExpanded      bool
 	pillsAutoExpanded  bool
 	focusedPillSection pillSection
-	promptQueue        int
-	pillsView          string
+	// promptQueue / promptQueueItems mirror the session's queued prompts.
+	// They are event-driven with a TTL backstop, fetched off-thread by
+	// dispatchPromptQueueRefresh (see workspace_cache.go); promptQueue is
+	// always len(promptQueueItems).
+	promptQueue          int
+	promptQueueItems     []string
+	promptQueueCheckedAt time.Time
+	promptQueueInFlight  bool
+	// promptQueueGen is bumped by every queue state transition; an
+	// in-flight fetch captures it at dispatch and its result is discarded
+	// if the generation has moved on (see workspace_cache.go).
+	promptQueueGen uint64
+	// agentBusyCache / yoloCache memoize the workspace busy and permission
+	// probes (synchronous HTTP round-trips in client/server mode). Reads
+	// never probe; refreshes happen off-thread (see workspace_cache.go).
+	agentBusyCache    ttlCache
+	yoloCache         ttlCache
+	busyFetchInFlight bool
+	// agentReady / agentModel memoize the coordinator readiness and
+	// selected model (AgentIsReady/AgentModel are synchronous HTTP GETs in
+	// client/server mode, and modelInfo renders them every frame). Seeded
+	// once at construction and refreshed by the same off-thread probe as
+	// agentBusyCache.
+	agentReady bool
+	agentModel workspace.AgentModel
+	// busyFetchGen is bumped by every busy/permission state transition;
+	// like promptQueueGen it lets a stale in-flight probe result be
+	// discarded and re-fetched instead of clobbering newer state.
+	busyFetchGen uint64
+	pillsView    string
 
 	// Todo spinner
 	todoSpinner    spinner.Model
@@ -396,8 +466,12 @@ type UI struct {
 
 	// mouse highlighting related state
 	lastClickTime time.Time
+	hoverX        int
+	hoverY        int
 
 	// hyperCredits is the remaining Hyper credits, updated after each prompt.
+	// It is nil when unknown, or when the team has hypercredit display
+	// disabled, and no balance is rendered in either case.
 	hyperCredits *int
 
 	// Prompt history for up/down navigation through previous messages.
@@ -454,6 +528,7 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 			com.Styles.Attachments.Image,
 			com.Styles.Attachments.Text,
 			com.Styles.Attachments.Skill,
+			com.Styles.Attachments.Remove,
 		),
 		attachments.Keymap{
 			DeleteMode: keyMap.Editor.AttachmentDeleteMode,
@@ -492,7 +567,20 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 		ui.themeKey = styles.ThemeKeyForProvider(cfg.Models[config.SelectedModelTypeLarge].Provider)
 	}
 
-	ui.setEditorPrompt(com.Workspace.PermissionSkipRequests())
+	// Seed the yolo cache once at construction; afterwards it is kept
+	// fresh by write-through toggles and off-thread refreshes so Update
+	// and View never probe the workspace synchronously.
+	yolo := com.Workspace.PermissionSkipRequests()
+	ui.yoloCache.set(yolo)
+
+	// Seed the memoized agent ready/model state the same way so the first
+	// frame renders the model info; the busy probe keeps it fresh
+	// afterwards.
+	if com.Workspace.AgentIsReady() {
+		ui.agentReady = true
+		ui.agentModel = com.Workspace.AgentModel()
+	}
+	ui.setEditorPrompt(yolo)
 	ui.randomizePlaceholders()
 	ui.textarea.Placeholder = ui.readyPlaceholder
 	ui.status = status
@@ -541,6 +629,10 @@ func (m *UI) Init() tea.Cmd {
 	cmds = append(cmds, m.loadCustomCommands())
 	// load prompt history async
 	cmds = append(cmds, m.loadPromptHistory())
+	// Prime the memoized LSP state off-thread.
+	if cmd := m.requestLSPRefresh(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	// load initial session if specified
 	if cmd := m.loadInitialSession(); cmd != nil {
 		cmds = append(cmds, cmd)
@@ -548,6 +640,11 @@ func (m *UI) Init() tea.Cmd {
 	if m.com.IsHyper() {
 		cmds = append(cmds, m.fetchHyperCredits())
 	}
+	// Prime the memoized busy/permission state off-thread.
+	if cmd := m.dispatchBusyRefresh(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	cmds = append(cmds, m.checkPendingMCPAuth())
 	return tea.Batch(cmds...)
 }
 
@@ -587,9 +684,13 @@ func (m *UI) sendNotification(n notification.Notification) tea.Cmd {
 // change.
 func selectNotificationBackend(caps common.Capabilities, cfg *config.Config) notification.Backend {
 	// Check for explicit user preference first.
-	if cfg != nil && cfg.Options != nil && cfg.Options.NotificationStyle != "" {
-		switch cfg.Options.NotificationStyle {
+	if cfg != nil && cfg.Options != nil && cfg.Options.Notifications != "" {
+		switch cfg.Options.Notifications {
 		case "native":
+			if !notification.NativeSupported {
+				slog.Debug("Native notifications unavailable on this platform; using OSC backend", "osc99_supported", caps.OSC99Notifications)
+				return notification.NewOSCBackend(notification.Icon, caps.OSC99Notifications)
+			}
 			slog.Debug("Using native backend (user preference)")
 			return notification.NewNativeBackend(notification.Icon)
 		case "osc":
@@ -604,7 +705,7 @@ func selectNotificationBackend(caps common.Capabilities, cfg *config.Config) not
 		case "auto":
 			// Fall through to auto-detection below.
 		default:
-			slog.Warn("Unknown notification style, using auto", "style", cfg.Options.NotificationStyle)
+			slog.Warn("Unknown notification style, using auto", "style", cfg.Options.Notifications)
 		}
 	}
 
@@ -619,9 +720,10 @@ func selectNotificationBackend(caps common.Capabilities, cfg *config.Config) not
 
 	// Local sessions: prefer OSC on macOS because the native backend (beeep)
 	// uses terminal-notifier or AppleScript, which is slow and doesn't display
-	// icons properly. OSC 99 provides a more polished experience with icon support.
-	if runtime.GOOS == "darwin" {
-		slog.Debug("Selected OSCBackend for local macOS session", "osc99_supported", caps.OSC99Notifications)
+	// icons properly. Also prefer OSC where native notifications are unavailable
+	// (illumos/solaris). OSC 99 provides a polished experience with icon support.
+	if runtime.GOOS == "darwin" || !notification.NativeSupported {
+		slog.Debug("Selected OSCBackend for local session", "osc99_supported", caps.OSC99Notifications, "native_supported", notification.NativeSupported)
 		return notification.NewOSCBackend(notification.Icon, caps.OSC99Notifications)
 	}
 
@@ -647,7 +749,7 @@ func (m *UI) updateNotificationBackend() {
 // focused, and notifications must not be disabled in config.
 func (m *UI) shouldSendNotification() bool {
 	cfg := m.com.Config()
-	if cfg != nil && cfg.Options != nil && cfg.Options.NotificationStyle == "disabled" {
+	if cfg != nil && cfg.Options != nil && cfg.Options.Notifications == "disabled" {
 		return false
 	}
 	return m.caps.ReportFocusEvents && !m.notifyWindowFocused
@@ -684,7 +786,7 @@ func (m *UI) loadCustomCommands() tea.Cmd {
 
 // loadMCPrompts loads the MCP prompts asynchronously.
 func (m *UI) loadMCPrompts() tea.Msg {
-	prompts, err := commands.LoadMCPPrompts()
+	prompts, err := m.com.Workspace.ListMCPPrompts(context.Background())
 	if err != nil {
 		slog.Error("Failed to load MCP prompts", "error", err)
 	}
@@ -699,13 +801,6 @@ func (m *UI) loadMCPrompts() tea.Msg {
 func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	defer m.watchdog.enter(fmt.Sprintf("Update %T", msg))()
 	var cmds []tea.Cmd
-	if m.hasSession() && m.isAgentBusy() {
-		queueSize := m.com.Workspace.AgentQueuedPrompts(m.session.ID)
-		if queueSize != m.promptQueue {
-			m.promptQueue = queueSize
-			m.updateLayoutAndSize()
-		}
-	}
 	// Update terminal capabilities
 	m.caps.Update(msg)
 	switch msg := msg.(type) {
@@ -727,13 +822,56 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.handleAgentNotification(msg.Payload); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case busyStateMsg:
+		cmds = append(cmds, m.applyBusyState(msg)...)
+	case promptQueueMsg:
+		cmds = append(cmds, m.applyPromptQueue(msg)...)
+	case lspStatesMsg:
+		if cmd := m.applyLSPStates(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case agentModelChangedMsg:
+		// The coordinator model changed (selection, thinking, reasoning):
+		// re-fetch the memoized ready/model state off-thread.
+		m.invalidateBusyCaches()
+		if cmd := m.dispatchBusyRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case agentRunSubmittedMsg:
+		// A prompt was just accepted (run started or enqueued): fetch the
+		// authoritative busy/queue state to confirm the optimistic values
+		// sendMessage wrote.
+		m.invalidateBusyCaches()
+		m.invalidatePromptQueue()
+		if cmd := m.dispatchBusyRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if cmd := m.dispatchPromptQueueRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case loadSessionMsg:
 		if m.forceCompactMode {
 			m.isCompact = true
 		}
 		m.setState(uiChat, m.focus)
 		m.session = msg.session
+		m.sidebarOffset = 0
 		m.sessionFiles = msg.files
+		// Session switch: the memoized busy state and queued prompts
+		// belong to the previous session. Drop them and re-fetch
+		// off-thread so the queue pill and esc behavior track the new
+		// session instead of a stale one.
+		m.invalidateBusyCaches()
+		m.invalidatePromptQueue()
+		m.promptQueue = 0
+		m.promptQueueItems = nil
+		m.promptQueueCheckedAt = time.Time{}
+		if cmd := m.dispatchBusyRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if cmd := m.dispatchPromptQueueRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		cmds = append(cmds, m.startLSPs(msg.lspFilePaths()))
 		if cmd := m.syncTmuxSession(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -747,6 +885,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 		if cmd := m.setSessionMessages(msgs); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if cmd := m.restoreModelFromSession(msgs); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 		if cmd := m.autoExpandPillsIfReasonable(); cmd != nil {
@@ -839,6 +980,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case mcpStateChangedMsg:
 		m.mcpStates = msg.states
+		// Auto-open the MCP auth dialog if any servers need authentication.
+		if cmd := m.openMCPAuthDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case mcpPromptsLoadedMsg:
 		m.mcpPrompts = msg.Prompts
 		dia := m.dialog.Dialog(dialog.CommandsID)
@@ -923,6 +1068,20 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case pubsub.CreatedEvent:
 			cmds = append(cmds, m.appendSessionMessage(msg.Payload))
+			// A new message is a run boundary — a user prompt starting
+			// a turn or the agent replying/dequeueing. Drop the
+			// memoized busy state and re-fetch it and the queue
+			// off-thread. Per-chunk UpdatedEvents deliberately do NOT
+			// trigger this: during streaming that would put workspace
+			// probes on every token.
+			m.invalidateBusyCaches()
+			m.invalidatePromptQueue()
+			if cmd := m.dispatchBusyRefresh(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			if cmd := m.dispatchPromptQueueRefresh(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		case pubsub.UpdatedEvent:
 			cmds = append(cmds, m.updateSessionMessage(msg.Payload))
 		case pubsub.DeletedEvent:
@@ -945,9 +1104,16 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pubsub.Event[history.File]:
 		cmds = append(cmds, m.handleFileEvent(msg.Payload))
 	case pubsub.Event[app.LSPEvent]:
-		m.lspStates = m.com.Workspace.LSPGetStates()
+		// Refresh the memoized LSP state off-thread: LSPGetStates is a
+		// synchronous HTTP round-trip in client/server mode and diagnostics
+		// events can arrive per edited file.
+		if cmd := m.requestLSPRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case pubsub.Event[workspace.LSPEvent]:
-		m.lspStates = m.com.Workspace.LSPGetStates()
+		if cmd := m.requestLSPRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case pubsub.Event[skills.Event]:
 		m.skillStates = msg.Payload.States
 		// Refresh the command palette so newly discovered user-invocable
@@ -979,6 +1145,19 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case pubsub.Event[permission.PermissionNotification]:
 		m.handlePermissionNotification(msg.Payload)
+	case pubsub.Event[question.Request]:
+		m.openBatchFormDialog(msg.Payload)
+		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if cmd := m.sendNotification(notification.Notification{
+			Title:   "Crush is waiting...",
+			Message: fmt.Sprintf("%d questions need your input", len(msg.Payload.Questions)),
+		}); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case pubsub.Event[question.Notification]:
+		m.handleQuestionNotification(msg.Payload)
 	case cancelTimerExpiredMsg:
 		m.isCanceling = false
 	case backgroundTimerExpiredMsg:
@@ -992,6 +1171,12 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		// Suppress the chat's full-height scan during the resize so a drag
+		// only reflows visible items; it settles (and recomputes) shortly
+		// after the last resize event.
+		if m.state == uiChat {
+			cmds = append(cmds, m.chat.BeginResize())
+		}
 		m.updateLayoutAndSize()
 		if m.state == uiChat && m.chat.Follow() {
 			if cmd := m.chat.ScrollToBottom(); cmd != nil {
@@ -1016,8 +1201,32 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
+		// Route clicks to inline editors that support mouse interaction.
+		if m.activeInline != nil {
+			if clickable, ok := m.activeInline.(dialog.MouseClickableEditor); ok {
+				if done, handled := clickable.HandleMouseClick(msg.X, msg.Y); handled {
+					if done {
+						m.activeInline = nil
+						m.textarea.Focus()
+						m.updateLayoutAndSize()
+					}
+					return m, tea.Batch(cmds...)
+				}
+			}
+		}
+
 		if cmd := m.handleClickFocus(msg); cmd != nil {
 			cmds = append(cmds, cmd)
+		}
+
+		// Check if the click landed on an attachment's remove button.
+		// The attachment chips are rendered on the first row of the
+		// editor layout area, above the textarea.
+		if m.activeInline == nil && msg.Button == uv.MouseLeft && len(m.attachments.List()) > 0 && msg.Y == m.layout.editor.Min.Y {
+			relX := msg.X - m.layout.editor.Min.X
+			if m.attachments.HandleClick(relX) {
+				return m, tea.Batch(cmds...)
+			}
 		}
 
 		switch m.state {
@@ -1043,8 +1252,25 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
+		// Track hover position for inline editors.
+		if m.activeInline != nil {
+			if m.hoverX != msg.X || m.hoverY != msg.Y {
+				m.hoverX = msg.X
+				m.hoverY = msg.Y
+				if clickable, ok := m.activeInline.(dialog.MouseClickableEditor); ok {
+					clickable.SetHover(msg.X, msg.Y)
+				}
+			}
+		}
+
 		switch m.state {
 		case uiChat:
+			// Skip chat edge-scrolling when an inline editor is
+			// active to prevent accidental scrolling while hovering
+			// over question forms or other inline components.
+			if m.activeInline != nil && m.focus == uiFocusEditor {
+				break
+			}
 			// Only auto-scroll near the viewport edges while a
 			// text-selection drag is in progress. Without this guard,
 			// any mouse movement near the top/bottom row (even a plain
@@ -1105,6 +1331,16 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case common.CoalescedWheelMsg:
+		// Route wheel events to active inline editor only when the
+		// mouse is over the editor area, so scrolling over the chat
+		// still scrolls the chat.
+		if m.activeInline != nil && image.Pt(msg.Mouse.X, msg.Mouse.Y).In(m.layout.editor) {
+			if we, ok := m.activeInline.(common.WheelScrollable); ok {
+				we.HandleWheel(msg.DeltaX, msg.DeltaY)
+				return m, tea.Batch(cmds...)
+			}
+		}
+
 		// Pass mouse events to dialogs first if any are open.
 		if m.dialog.HasDialogs() {
 			m.dialog.Update(msg)
@@ -1117,6 +1353,17 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// others send DeltaY=1.
 		switch m.state {
 		case uiChat:
+			// When sidebar is focused, route wheel events to sidebar scrolling.
+			if m.focus == uiFocusSidebar {
+				lines := int(msg.DeltaY)
+				if lines != 0 {
+					m.sidebarOffset = max(0, min(m.sidebarOffset+lines, m.sidebarMaxOffsetVal))
+					m.sidebarScrollbarSeq++
+					m.sidebarScrollbarVisible = true
+					cmds = append(cmds, sidebarScrollbarHideCmd(m.sidebarScrollbarSeq))
+				}
+				break
+			}
 			activeChat := m.activeChat()
 			if msg.DeltaX != 0 {
 				activeChat.ScrollSelectedShellHorizontal(int(msg.DeltaX))
@@ -1149,6 +1396,23 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state == uiChat {
 			m.chat.HideScrollbar(msg.seq)
 		}
+	case chatWarmMsg:
+		// A resize has settled; warm the message cache one batch at a time
+		// so the scrollbar recompute never blocks the UI thread.
+		if m.state == uiChat {
+			cmd, done := m.chat.WarmStep(msg.seq)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			} else if done {
+				// Heights are cached now, so the final layout pass (scrollbar
+				// reservation) is cheap.
+				m.updateLayoutAndSize()
+			}
+		}
+	case sidebarScrollbarHideMsg:
+		if msg.seq == m.sidebarScrollbarSeq && m.focus != uiFocusSidebar {
+			m.sidebarScrollbarVisible = false
+		}
 	case spinner.TickMsg:
 		if m.dialog.HasDialogs() {
 			// route to dialog
@@ -1170,6 +1434,14 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 	case tea.PasteMsg:
+		if m.activeInline != nil && m.focus == uiFocusEditor {
+			if p, ok := m.activeInline.(dialog.PasteableEditor); ok {
+				if cmd := p.HandlePaste(msg); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				return m, tea.Batch(cmds...)
+			}
+		}
 		if cmd := m.handlePasteMsg(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -1285,7 +1557,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 	case creditsUpdatedMsg:
-		m.hyperCredits = &msg.credits
+		m.hyperCredits = msg.credits
 	case util.InfoMsg:
 		if msg.Type == util.InfoTypeError {
 			slog.Error("Error reported", "error", msg.Msg)
@@ -1316,6 +1588,8 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			TTL:  ttl,
 		})
 		cmds = append(cmds, clearInfoMsgCmd(ttl))
+	case workspace.ConnectionEvent:
+		cmds = append(cmds, m.handleConnectionEvent(msg)...)
 	case util.ClearStatusMsg:
 		m.status.ClearInfoMsg()
 	case completions.CompletionItemsLoadedMsg:
@@ -1327,6 +1601,14 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			slog.Warn("Unexpected Kitty graphics response",
 				"response", string(msg.Payload),
 				"options", msg.Options)
+		}
+	case dialog.ActionMCPAuthStarted:
+		cmds = append(cmds, m.authenticateMCP(msg.Ctx, msg.Name))
+	case dialog.ActionMCPAuthComplete, dialog.ActionMCPAuthErrored:
+		if m.dialog.HasDialogs() {
+			if cmd := m.handleDialogMsg(msg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 	default:
 		if m.dialog.HasDialogs() {
@@ -1348,10 +1630,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.textarea.Placeholder = m.readyPlaceholder
 		}
-		if !m.bangMode && m.com.Workspace.PermissionSkipRequests() {
+		if !m.bangMode && m.yoloModeCached() {
 			m.textarea.Placeholder = "Yolo mode!"
 		}
 	}
+
+	// TTL backstop: schedule an off-thread re-probe for any memoized
+	// workspace state that has gone stale. Never does IO on this
+	// goroutine.
+	cmds = append(cmds, m.staleWorkspaceRefreshCmds()...)
 
 	// at this point this can only handle [message.Attachment] message, and we
 	// should return all cmds anyway.
@@ -1440,15 +1727,15 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 		switch msg.Role {
 		case message.User:
 			m.lastUserMessageTime = msg.CreatedAt
-			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
+			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
 		case message.Assistant:
-			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
+			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
 			if msg.FinishPart() != nil && msg.FinishPart().Reason == message.FinishReasonEndTurn {
 				infoItem := chat.NewAssistantInfoItem(m.com.Styles, msg, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
 				items = append(items, infoItem)
 			}
 		default:
-			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
+			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
 		}
 	}
 
@@ -1458,14 +1745,52 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 	if cmd := m.chat.SetMessages(items...); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
-	// If the user switches between sessions while the agent is working
-	// the loaded items may still be spinning; make sure the animation
-	// clock is running so they animate.
-	if cmd := m.startAnimClock(); cmd != nil {
-		cmds = append(cmds, cmd)
+	// If the user switches between sessions while the agent is working the
+	// loaded items may still be spinning, so make sure the animation clock
+	// is running. Gate on the agent actually being busy: a session killed
+	// mid-generation can persist an assistant message with no Finish part,
+	// which still looks spinning; starting the clock for it would leave a
+	// ghost "working" spinner after the session is reloaded.
+	if m.isAgentBusy() {
+		if cmd := m.startAnimClock(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
 	m.chat.SelectLast()
 	return tea.Sequence(cmds...)
+}
+
+// handleConnectionEvent reports the health of the client-server link and,
+// once it recovers, reloads the open session. A reload is always needed
+// after a degraded episode: events published while the stream was down are
+// gone, and if the workspace itself was re-created any run died with it.
+func (m *UI) handleConnectionEvent(msg workspace.ConnectionEvent) []tea.Cmd {
+	info := util.InfoMsg{
+		Type: util.InfoTypeWarn,
+		Msg:  "Lost connection to the Crush server — reconnecting…",
+		TTL:  30 * time.Second,
+	}
+	switch msg.State {
+	case workspace.ConnectionDegraded:
+		slog.Warn("Server connection degraded", "error", msg.Err, "stuck", msg.Stuck)
+		if msg.Stuck {
+			info.Type = util.InfoTypeError
+			info.Msg = "Can't restore the connection to the Crush server. Restart Crush to recover."
+			info.TTL = time.Minute
+		}
+	case workspace.ConnectionRecovered:
+		info = util.InfoMsg{
+			Type: util.InfoTypeSuccess,
+			Msg:  "Reconnected to the Crush server.",
+			TTL:  DefaultStatusTTL,
+		}
+	}
+	m.status.SetInfoMsg(info)
+	cmds := []tea.Cmd{clearInfoMsgCmd(info.TTL)}
+	if msg.State == workspace.ConnectionRecovered && m.session != nil {
+		cmds = append(cmds, m.loadSession(m.session.ID))
+	}
+	return cmds
 }
 
 // loadNestedToolCalls recursively loads nested tool calls for agent/agentic_fetch tools.
@@ -1530,7 +1855,7 @@ func (m *UI) loadNestedToolCalls(items []chat.MessageItem) {
 		// Extract nested tool items.
 		var nestedTools []chat.ToolMessageItem
 		for _, nestedMsg := range nestedMsgPtrs {
-			nestedItems := chat.ExtractMessageItems(m.com.Styles, nestedMsg, nestedToolResultMap)
+			nestedItems := chat.ExtractMessageItems(m.com.Styles, nestedMsg, nestedToolResultMap, m.com.Workspace.WorkingDir())
 			for _, nestedItem := range nestedItems {
 				if nestedToolItem, ok := nestedItem.(chat.ToolMessageItem); ok {
 					// Mark nested tools as simple (compact) rendering.
@@ -1580,7 +1905,7 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 			return nil
 		}
 		m.lastUserMessageTime = msg.CreatedAt
-		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil)
+		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir())
 		if cmd := m.startAnimClock(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -1589,7 +1914,7 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 	case message.Assistant:
-		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil)
+		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir())
 		// Drop any items that already exist in the chat. Tool items are
 		// keyed by tool-call ID, and updateSessionMessage may have
 		// already created them from an earlier UpdatedEvent that arrived
@@ -1645,14 +1970,23 @@ func (m *UI) handleClickFocus(msg tea.MouseClickMsg) (cmd tea.Cmd) {
 	switch {
 	case m.state != uiChat:
 		return nil
-	case image.Pt(msg.X, msg.Y).In(m.layout.sidebar):
+	case m.focus != uiFocusSidebar && image.Pt(msg.X, msg.Y).In(m.layout.sidebar) && m.sidebarScrollable:
+		m.focus = uiFocusSidebar
+		m.textarea.Blur()
+		m.chat.Blur()
 		return nil
 	case m.focus != uiFocusEditor && image.Pt(msg.X, msg.Y).In(m.layout.editor):
 		m.focus = uiFocusEditor
-		cmd = m.textarea.Focus()
+		if m.activeInline != nil {
+			m.activeInline.SetFocused(true)
+		} else {
+			cmd = m.textarea.Focus()
+		}
+		m.sidebarScrollbarVisible = false
 		m.activeChat().Blur()
 	case m.focus != uiFocusMain && image.Pt(msg.X, msg.Y).In(m.layout.main):
 		m.focus = uiFocusMain
+		m.sidebarScrollbarVisible = false
 		m.textarea.Blur()
 		m.activeChat().Focus()
 	}
@@ -1682,7 +2016,13 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 
 	if existingItem != nil {
 		if assistantItem, ok := existingItem.(*chat.AssistantMessageItem); ok {
+			// A message can transition back to spinning here (e.g. its
+			// streamed content was reset for a retry), so nudge the
+			// animation clock afterwards to make sure it is running.
 			assistantItem.SetMessage(&msg)
+			if cmd := m.startAnimClock(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 	}
 
@@ -1720,7 +2060,7 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 			}
 		}
 		if existingToolItem == nil {
-			newItem := chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false)
+			newItem := chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false, m.com.Workspace.WorkingDir())
 			if tc.Name == agent.AgentToolName {
 				m.seedResumedAgentTools(newItem, tc)
 			}
@@ -1734,10 +2074,9 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 
 	m.chat.AppendMessages(items...)
 	if m.chat.Follow() {
-		if cmd := m.chat.ScrollToBottom(); cmd != nil {
+		if cmd := m.chat.ScrollToBottomAndSelectLast(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-		m.chat.SelectLast()
 	}
 
 	return tea.Sequence(cmds...)
@@ -1863,7 +2202,7 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 		}
 		if !found {
 			// Create a new nested tool item.
-			nestedItem := chat.NewToolMessageItem(m.com.Styles, event.Payload.ID, tc, nil, false)
+			nestedItem := chat.NewToolMessageItem(m.com.Styles, event.Payload.ID, tc, nil, false, m.com.Workspace.WorkingDir())
 			if simplifiable, ok := nestedItem.(chat.Compactable); ok {
 				simplifiable.SetCompact(true)
 			}
@@ -1891,10 +2230,9 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 	m.chat.UpdateNestedToolIDs(toolCallID)
 
 	if m.chat.Follow() {
-		if cmd := m.chat.ScrollToBottom(); cmd != nil {
+		if cmd := m.chat.ScrollToBottomAndSelectLast(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-		m.chat.SelectLast()
 	}
 
 	return tea.Sequence(cmds...)
@@ -1950,9 +2288,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 
 	// Command dialog messages.
 	case dialog.ActionToggleYoloMode:
-		yolo := !m.com.Workspace.PermissionSkipRequests()
-		m.com.Workspace.PermissionSetSkipRequests(yolo)
-		m.setEditorPrompt(yolo)
+		m.toggleYoloMode()
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionTogglePlanMode:
 		plan := !m.com.Workspace.PermissionPlanMode()
@@ -2015,8 +2351,8 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 	case dialog.ActionSelectNotificationStyle:
 		cfg := m.com.Config()
 		if cfg != nil && cfg.Options != nil {
-			cfg.Options.NotificationStyle = msg.Style
-			if err := m.com.Workspace.SetConfigField(config.ScopeGlobal, "options.notification_style", msg.Style); err != nil {
+			cfg.Options.Notifications = msg.Style
+			if err := m.com.Workspace.SetConfigField(config.ScopeGlobal, "options.notifications", msg.Style); err != nil {
 				cmds = append(cmds, util.ReportError(err))
 			} else {
 				cmds = append(cmds, util.CmdHandler(util.NewInfoMsg("Notifications set to: "+msg.Style)))
@@ -2110,7 +2446,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleThinking:
-		cmds = append(cmds, func() tea.Msg {
+		cmds = append(cmds, m.updateAgentModelCmd(func() tea.Msg {
 			cfg := m.com.Config()
 			if cfg == nil {
 				return util.ReportError(errors.New("configuration not found"))()
@@ -2132,7 +2468,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 				status = "enabled"
 			}
 			return util.NewInfoMsg("Thinking mode " + status)
-		})
+		}))
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleTransparentBackground:
 		cmds = append(cmds, func() tea.Msg {
@@ -2222,10 +2558,10 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		if usingThinkingBudget {
 			infoMsg = "Thinking budget set to " + common.FormatReasoningEffort(msg.Effort)
 		}
-		cmds = append(cmds, func() tea.Msg {
+		cmds = append(cmds, m.updateAgentModelCmd(func() tea.Msg {
 			m.com.Workspace.UpdateAgentModel(context.TODO())
 			return util.NewInfoMsg(infoMsg)
-		})
+		}))
 		m.dialog.CloseDialog(dialog.ReasoningID)
 	case dialog.ActionPermissionResponse:
 		m.dialog.CloseDialog(dialog.PermissionsID)
@@ -2369,6 +2705,69 @@ func (m *UI) fetchHyperCredits() tea.Cmd {
 	}
 }
 
+// restoreModelFromSession checks the last assistant message in the
+// loaded session and, if it used a different provider/model than the
+// current config, restores that model/provider provided it is still
+// available. Returns a tea.Cmd that rebuilds the agent models if a
+// switch was made, or nil if no switch was needed.
+func (m *UI) restoreModelFromSession(msgs []message.Message) tea.Cmd {
+	var lastAssistant *message.Message
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == message.Assistant && !msgs[i].IsSummaryMessage {
+			lastAssistant = &msgs[i]
+			break
+		}
+	}
+	if lastAssistant == nil || lastAssistant.Provider == "" || lastAssistant.Model == "" {
+		return nil
+	}
+
+	cfg := m.com.Config()
+	if cfg == nil {
+		return nil
+	}
+
+	currentLarge := cfg.Models[config.SelectedModelTypeLarge]
+	if currentLarge.Provider == lastAssistant.Provider && currentLarge.Model == lastAssistant.Model {
+		return nil
+	}
+
+	if !cfg.IsModelAvailable(lastAssistant.Provider, lastAssistant.Model) {
+		slog.Debug("Skipping model restoration: provider/model not available",
+			"provider", lastAssistant.Provider,
+			"model", lastAssistant.Model)
+		return nil
+	}
+
+	selectedModel := config.SelectedModel{
+		Provider: lastAssistant.Provider,
+		Model:    lastAssistant.Model,
+	}
+	if err := m.com.Workspace.UpdatePreferredModel(config.ScopeGlobal, config.SelectedModelTypeLarge, selectedModel); err != nil {
+		slog.Error("Failed to restore model from session", "error", err)
+		return nil
+	}
+
+	m.applyThemeForProvider(lastAssistant.Provider)
+
+	if _, ok := cfg.Models[config.SelectedModelTypeSmall]; !ok {
+		smallModel := m.com.Workspace.GetDefaultSmallModel(lastAssistant.Provider)
+		if err := m.com.Workspace.UpdatePreferredModel(config.ScopeGlobal, config.SelectedModelTypeSmall, smallModel); err != nil {
+			slog.Error("Failed to set small model during session restore", "error", err)
+		}
+	}
+
+	return m.updateAgentModelCmd(func() tea.Msg {
+		if err := m.com.Workspace.UpdateAgentModel(context.TODO()); err != nil {
+			return util.ReportError(err)
+		}
+		slog.Info("Restored model from session",
+			"provider", lastAssistant.Provider,
+			"model", lastAssistant.Model)
+		return nil
+	})
+}
+
 // handleSelectModel performs the model selection after any provider
 // pre-checks (such as a silent Hyper OAuth refresh) have completed.
 func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
@@ -2433,7 +2832,7 @@ func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 		}
 	}
 
-	cmds = append(cmds, func() tea.Msg {
+	cmds = append(cmds, m.updateAgentModelCmd(func() tea.Msg {
 		if err := m.com.Workspace.UpdateAgentModel(context.TODO()); err != nil {
 			return util.ReportError(err)
 		}
@@ -2448,7 +2847,7 @@ func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 		modelMsg := fmt.Sprintf("%s model changed to %s", modelType, modelName)
 
 		return util.NewInfoMsg(modelMsg)
-	})
+	}))
 
 	m.dialog.CloseDialog(dialog.APIKeyInputID)
 	m.dialog.CloseDialog(dialog.OAuthID)
@@ -2459,6 +2858,13 @@ func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 		m.com.Config().SetupAgents()
 		if err := m.com.Workspace.InitCoderAgent(context.TODO()); err != nil {
 			cmds = append(cmds, util.ReportError(err))
+		}
+		// The agent just came up: re-fetch the memoized ready/model state
+		// so the landing view shows the selected model without waiting for
+		// the TTL backstop.
+		m.invalidateBusyCaches()
+		if cmd := m.dispatchBusyRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 	} else if m.com.IsHyper() {
 		cmds = append(cmds, m.fetchHyperCredits())
@@ -2496,6 +2902,13 @@ func (m *UI) openAuthenticationDialog(provider catwalk.Provider, model config.Se
 func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	var cmds []tea.Cmd
 
+	// The Ctrl+C escape hatch only survives back-to-back Ctrl+C presses:
+	// any other key disarms it so it can never go stale and surprise the
+	// user with a quit dialog several turns later.
+	if m.ctrlCArmed && !key.Matches(msg, m.keyMap.Quit) {
+		m.ctrlCArmed = false
+	}
+
 	handleGlobalKeys := func(msg tea.KeyPressMsg) bool {
 		switch {
 		case key.Matches(msg, m.keyMap.Help):
@@ -2521,6 +2934,13 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			m.detailsOpen = !m.detailsOpen
 			m.updateLayoutAndSize()
 			return true
+		case key.Matches(msg, m.keyMap.Chat.EndFollow):
+			if m.state == uiChat && m.hasSession() {
+				if cmd := m.chat.ScrollToBottomAndSelectLast(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				return true
+			}
 		case key.Matches(msg, m.keyMap.Chat.TogglePills):
 			if m.state == uiChat && m.hasSession() {
 				if cmd := m.togglePillsExpanded(); cmd != nil {
@@ -2550,9 +2970,7 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			cmds = append(cmds, tea.Suspend)
 			return true
 		case key.Matches(msg, m.keyMap.ToggleYolo):
-			yolo := !m.com.Workspace.PermissionSkipRequests()
-			m.com.Workspace.PermissionSetSkipRequests(yolo)
-			m.setEditorPrompt(yolo)
+			yolo := m.toggleYoloMode()
 			status := "disabled"
 			if yolo {
 				status = "enabled"
@@ -2564,16 +2982,39 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	}
 
 	if key.Matches(msg, m.keyMap.Quit) && !m.dialog.ContainsDialog(dialog.QuitID) {
-		// While the agent is busy, Ctrl+C cancels the current turn
-		// immediately instead of opening the quit dialog, matching the
-		// "cancel first" Ctrl+C convention. A second Ctrl+C, once idle,
-		// opens the quit dialog as usual.
-		if m.hasSession() && m.isAgentBusy() {
+		// While the session the user is looking at is busy, Ctrl+C
+		// cancels its turn immediately instead of opening the quit
+		// dialog, matching the "cancel first" Ctrl+C convention.
+		//
+		// The gate is deliberately session-scoped. The memoized global
+		// busy state is true whenever any session is running, including
+		// sub-agent child sessions the UI holds no handle on and can
+		// never cancel, so gating on it left Ctrl+C permanently dead
+		// once such a session got stuck. AgentIsSessionBusy is a
+		// synchronous probe (an HTTP round-trip in client/server mode),
+		// which is fine for a single deliberate keypress but must stay
+		// out of per-frame paths.
+		if m.hasSession() && m.isCurrentSessionBusy() {
+			// Escape hatch: if the previous Ctrl+C already asked this
+			// session to cancel and it is still busy, quit instead. Two
+			// consecutive presses always reach the quit dialog, whatever
+			// state the agent machinery is in.
+			if m.ctrlCArmed {
+				m.ctrlCArmed = false
+				if cmd := m.openQuitDialog(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				return tea.Batch(cmds...)
+			}
+			m.ctrlCArmed = true
 			if cmd := m.ctrlCCancelAgent(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 			return tea.Batch(cmds...)
 		}
+
+		// The session is idle, so the press is not a cancel: disarm.
+		m.ctrlCArmed = false
 
 		// If the editor has unsent text, the first Ctrl+C clears it
 		// instead of opening the quit dialog — same "cancel first"
@@ -2610,6 +3051,41 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	// active.
 	if m.bashViewJobID != "" {
 		return m.handleBashOutputViewKeyMsg(msg)
+	}
+
+	// Tab always toggles focus between editor and chat, even when
+	// an inline editor is active. This lets users collapse the
+	// question form to view chat.
+	if m.activeInline != nil && key.Matches(msg, m.keyMap.Tab) {
+		if m.focus == uiFocusEditor {
+			m.focus = uiFocusMain
+			m.activeInline.SetFocused(false)
+			m.chat.Focus()
+			m.chat.SetSelected(m.chat.Len() - 1)
+		} else {
+			m.focus = uiFocusEditor
+			m.activeInline.SetFocused(true)
+			m.chat.Blur()
+		}
+		m.updateLayoutAndSize()
+		return tea.Batch(cmds...)
+	}
+
+	// Route keys to active inline editor if one is showing.
+	if m.activeInline != nil && m.focus == uiFocusEditor {
+		if done, cmd := m.activeInline.HandleKey(msg); done {
+			m.activeInline = nil
+			m.textarea.Focus()
+			m.updateLayoutAndSize()
+		} else {
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			if m.activeInline.HeightChanged() {
+				m.updateLayoutAndSize()
+			}
+		}
+		return tea.Batch(cmds...)
 	}
 
 	// Keyboard visual-selection mode ("v"/"V") takes full priority over
@@ -2739,8 +3215,7 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 				if m.bangMode && value != "" {
 					m.bangMode = false
-					yolo := m.com.Workspace.PermissionSkipRequests()
-					m.setEditorPrompt(yolo)
+					m.setEditorPrompt(m.yoloModeCached())
 					m.randomizePlaceholders()
 					m.historyReset()
 					return tea.Batch(m.runShellCommand(value))
@@ -2836,8 +3311,7 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				if m.bangMode && m.bangWasEmpty && msg.Code == tea.KeyBackspace {
 					m.bangMode = false
 					m.bangWasEmpty = false
-					yolo := m.com.Workspace.PermissionSkipRequests()
-					m.setEditorPrompt(yolo)
+					m.setEditorPrompt(m.yoloModeCached())
 					break
 				}
 
@@ -2886,8 +3360,7 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 					m.textarea.SetValue(stripped)
 					m.textarea.SetCursorColumn(max(0, col-(len(newVal)-len(stripped))))
 					_ = line // cursor line doesn't change; prefix removed
-					yolo := m.com.Workspace.PermissionSkipRequests()
-					m.setEditorPrompt(yolo)
+					m.setEditorPrompt(m.yoloModeCached())
 				} else if m.bangMode && newVal == "" && curValue != "" {
 					// Just cleared last character; mark empty, stay in bang mode.
 					m.bangWasEmpty = true
@@ -2933,8 +3406,14 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			switch {
 			case key.Matches(msg, m.keyMap.Tab):
 				m.focus = uiFocusEditor
+				m.sidebarScrollbarVisible = false
 				cmds = append(cmds, m.textarea.Focus())
 				activeChat.Blur()
+			case key.Matches(msg, m.keyMap.Chat.FocusSidebar):
+				if m.state == uiChat && !m.isCompact && m.hasSession() && m.sidebarScrollable {
+					m.focus = uiFocusSidebar
+					activeChat.Blur()
+				}
 			case key.Matches(msg, m.keyMap.Chat.NewSession):
 				if !m.hasSession() {
 					break
@@ -3017,16 +3496,47 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				}
 				activeChat.SelectFirst()
 			case key.Matches(msg, m.keyMap.Chat.End):
-				if cmd := activeChat.ScrollToBottom(); cmd != nil {
+				if cmd := activeChat.ScrollToBottomAndSelectLast(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
-				activeChat.SelectLast()
 			default:
 				if ok, cmd := activeChat.HandleKeyMsg(msg); ok {
 					cmds = append(cmds, cmd)
 				} else {
 					handleGlobalKeys(msg)
 				}
+			}
+		case uiFocusSidebar:
+			if m.state != uiChat || m.isCompact || !m.hasSession() {
+				break
+			}
+			switch {
+			case key.Matches(msg, m.keyMap.Chat.Up):
+				m.sidebarOffset = max(0, m.sidebarOffset-4)
+				m.sidebarScrollbarSeq++
+			case key.Matches(msg, m.keyMap.Chat.Down):
+				maxOffset := m.sidebarMaxOffsetVal
+				if m.sidebarOffset < maxOffset {
+					m.sidebarOffset = min(m.sidebarOffset+4, maxOffset)
+					m.sidebarScrollbarSeq++
+				}
+			case key.Matches(msg, m.keyMap.Chat.Home):
+				m.sidebarOffset = 0
+				m.sidebarScrollbarSeq++
+			case key.Matches(msg, m.keyMap.Chat.End):
+				m.sidebarOffset = m.sidebarMaxOffsetVal
+				m.sidebarScrollbarSeq++
+			case key.Matches(msg, m.keyMap.Chat.FocusChat):
+				m.focus = uiFocusMain
+				m.sidebarScrollbarVisible = false
+				m.chat.Focus()
+			case key.Matches(msg, m.keyMap.Tab):
+				m.focus = uiFocusEditor
+				m.sidebarScrollbarVisible = false
+				cmds = append(cmds, m.textarea.Focus())
+				m.chat.Blur()
+			default:
+				handleGlobalKeys(msg)
 			}
 		default:
 			handleGlobalKeys(msg)
@@ -3047,6 +3557,7 @@ func (m *UI) drawHeader(scr uv.Screen, area uv.Rectangle) {
 		m.isCompact,
 		m.detailsOpen,
 		area.Dx(),
+		m.lspErrorCount(),
 		m.hyperCredits,
 	)
 }
@@ -3065,6 +3576,10 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		// renderPills, but only when the layout actually differs;
 		// this catches the steady-state case.
 		m.renderPills()
+	}
+
+	if m.state == uiChat && m.hasSession() && !m.isCompact {
+		m.updateSidebarScrollState()
 	}
 
 	// Clear the screen first
@@ -3088,8 +3603,21 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		main := uv.NewStyledString(m.landingView())
 		main.Draw(scr, layout.main)
 
-		editor := uv.NewStyledString(m.renderEditorView(scr.Bounds().Dx()))
-		editor.Draw(scr, layout.editor)
+		if m.activeInline != nil {
+			m.activeInline.SetFocused(m.focus == uiFocusEditor)
+			if m.focus == uiFocusEditor {
+				m.inlineCursor = m.activeInline.Draw(scr, layout.editor)
+			} else if qf, ok := m.activeInline.(*dialog.QuestionForm); ok && m.shouldCollapseQuestion(qf) {
+				qf.DrawCollapsed(scr, layout.editor)
+				m.inlineCursor = nil
+			} else {
+				m.inlineCursor = m.activeInline.Draw(scr, layout.editor)
+			}
+		} else {
+			editor := uv.NewStyledString(m.renderEditorView(scr.Bounds().Dx()))
+			editor.Draw(scr, layout.editor)
+			m.inlineCursor = nil
+		}
 
 	case uiChat:
 		if m.isCompact {
@@ -3112,12 +3640,25 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 			uv.NewStyledString(m.pillsView).Draw(scr, layout.pills)
 		}
 
-		editorWidth := scr.Bounds().Dx()
-		if !m.isCompact {
-			editorWidth -= layout.sidebar.Dx()
+		if m.activeInline != nil {
+			m.activeInline.SetFocused(m.focus == uiFocusEditor)
+			if m.focus == uiFocusEditor {
+				m.inlineCursor = m.activeInline.Draw(scr, layout.editor)
+			} else if qf, ok := m.activeInline.(*dialog.QuestionForm); ok && m.shouldCollapseQuestion(qf) {
+				qf.DrawCollapsed(scr, layout.editor)
+				m.inlineCursor = nil
+			} else {
+				m.inlineCursor = m.activeInline.Draw(scr, layout.editor)
+			}
+		} else {
+			editorWidth := scr.Bounds().Dx()
+			if !m.isCompact {
+				editorWidth -= layout.sidebar.Dx()
+			}
+			editor := uv.NewStyledString(m.renderEditorView(editorWidth))
+			editor.Draw(scr, layout.editor)
+			m.inlineCursor = nil
 		}
-		editor := uv.NewStyledString(m.renderEditorView(editorWidth))
-		editor.Draw(scr, layout.editor)
 
 		if layout.agentList.Dy() > 0 {
 			uv.NewStyledString(m.renderAgentList(layout.agentList.Dx())).Draw(scr, layout.agentList)
@@ -3183,6 +3724,15 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 			return nil
 		}
 
+		if m.activeInline != nil {
+			if cur := m.inlineCursor; cur != nil {
+				cur.X++                        // Adjust for app margins
+				cur.Y += m.layout.editor.Min.Y // Inline editor draws from area top
+				return cur
+			}
+			return nil
+		}
+
 		if m.textarea.Focused() {
 			cur := m.textarea.Cursor()
 			cur.X++                            // Adjust for app margins
@@ -3201,7 +3751,11 @@ func (m *UI) View() tea.View {
 	if !m.isTransparent {
 		v.BackgroundColor = m.com.Styles.Background
 	}
-	v.MouseMode = tea.MouseModeCellMotion
+	if m.activeInline != nil {
+		v.MouseMode = tea.MouseModeAllMotion
+	} else {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	v.ReportFocus = m.caps.ReportFocusEvents
 	v.WindowTitle = "crush " + home.Short(m.com.Workspace.WorkingDir())
 
@@ -3231,6 +3785,12 @@ func (m *UI) View() tea.View {
 func (m *UI) ShortHelp() []key.Binding {
 	var binds []key.Binding
 	k := &m.keyMap
+
+	// When an inline editor is active, show its help.
+	if m.activeInline != nil {
+		return m.activeInline.ShortHelp()
+	}
+
 	tab := k.Tab
 	commands := k.Commands
 	if m.focus == uiFocusEditor && m.textarea.Value() == "" {
@@ -3246,7 +3806,7 @@ func (m *UI) ShortHelp() []key.Binding {
 			cancelBinding := k.Chat.Cancel
 			if m.isCanceling {
 				cancelBinding.SetHelp("esc", "press again to cancel")
-			} else if m.com.Workspace.AgentQueuedPrompts(m.session.ID) > 0 {
+			} else if m.promptQueue > 0 {
 				cancelBinding.SetHelp("esc", "clear queue")
 			}
 			binds = append(binds, cancelBinding)
@@ -3262,9 +3822,10 @@ func (m *UI) ShortHelp() []key.Binding {
 			binds = append(binds, bgBinding)
 		}
 
-		if m.focus == uiFocusEditor {
+		switch m.focus {
+		case uiFocusEditor:
 			tab.SetHelp("tab", "focus chat")
-		} else {
+		default:
 			tab.SetHelp("tab", "focus editor")
 		}
 
@@ -3280,6 +3841,12 @@ func (m *UI) ShortHelp() []key.Binding {
 			binds = append(
 				binds,
 				k.Editor.Newline,
+			)
+		case uiFocusSidebar:
+			binds = append(
+				binds,
+				k.Chat.UpDown,
+				k.Chat.FocusChat,
 			)
 		case uiFocusMain:
 			binds = append(
@@ -3317,6 +3884,11 @@ func (m *UI) ShortHelp() []key.Binding {
 
 // FullHelp implements [help.KeyMap].
 func (m *UI) FullHelp() [][]key.Binding {
+	// When an inline editor is active, show its help.
+	if m.activeInline != nil {
+		return [][]key.Binding{m.activeInline.ShortHelp()}
+	}
+
 	var binds [][]key.Binding
 	k := &m.keyMap
 	help := k.Help
@@ -3340,7 +3912,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 			cancelBinding := k.Chat.Cancel
 			if m.isCanceling {
 				cancelBinding.SetHelp("esc", "press again to cancel")
-			} else if m.com.Workspace.AgentQueuedPrompts(m.session.ID) > 0 {
+			} else if m.promptQueue > 0 {
 				cancelBinding.SetHelp("esc", "clear queue")
 			}
 			binds = append(binds, []key.Binding{cancelBinding})
@@ -3358,9 +3930,10 @@ func (m *UI) FullHelp() [][]key.Binding {
 
 		mainBinds := []key.Binding{}
 		tab := k.Tab
-		if m.focus == uiFocusEditor {
+		switch m.focus {
+		case uiFocusEditor:
 			tab.SetHelp("tab", "focus chat")
-		} else {
+		default:
 			tab.SetHelp("tab", "focus editor")
 		}
 
@@ -3373,7 +3946,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 			k.ToggleYolo,
 		)
 		if hasSession {
-			mainBinds = append(mainBinds, k.Chat.NewSession)
+			mainBinds = append(mainBinds, k.Chat.NewSession, k.Chat.EndFollow)
 		}
 
 		binds = append(binds, mainBinds)
@@ -3399,6 +3972,20 @@ func (m *UI) FullHelp() [][]key.Binding {
 					},
 				)
 			}
+		case uiFocusSidebar:
+			binds = append(
+				binds,
+				[]key.Binding{
+					k.Chat.UpDown,
+				},
+				[]key.Binding{
+					k.Chat.FocusChat,
+				},
+				[]key.Binding{
+					k.Chat.Home,
+					k.Chat.End,
+				},
+			)
 		case uiFocusMain:
 			binds = append(
 				binds,
@@ -3413,6 +4000,8 @@ func (m *UI) FullHelp() [][]key.Binding {
 					k.Chat.HalfPageDown,
 					k.Chat.Home,
 					k.Chat.End,
+					k.Chat.EndFollow,
+					k.Chat.FocusSidebar,
 				},
 				[]key.Binding{
 					k.Chat.Copy,
@@ -3588,9 +4177,24 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 	// The help height
 	helpHeight := 1
 	// The editor height: textarea height + margin for attachments and bottom spacing.
+	// When an inline editor is active, use its height instead.
 	editorHeight := m.textarea.Height() + editorHeightMargin
+	if m.activeInline != nil {
+		// The editor content width depends only on terminal width
+		// and layout (not on editor height), so passing the current
+		// frame's width to Height() keeps layout in sync with the
+		// width Draw will use, preventing flicker during fast resize.
+		editorWidth := m.editorContentWidth()
+		if m.focus == uiFocusEditor {
+			editorHeight = m.activeInline.Height(editorWidth)
+		} else if qf, ok := m.activeInline.(*dialog.QuestionForm); ok && m.shouldCollapseQuestion(qf) {
+			editorHeight = qf.CollapsedHeight() + 1
+		} else {
+			editorHeight = m.activeInline.Height(editorWidth)
+		}
+	}
 	// The sidebar width
-	sidebarWidth := 30
+	sidebarWidth := 32
 	// The header height
 	const landingHeaderHeight = 4
 
@@ -4031,13 +4635,34 @@ func isWhitespace(b byte) bool {
 }
 
 // isAgentBusy returns true if the agent coordinator exists and is currently
-// busy processing a request.
+// busy processing a request. It only reads the memoized state (it runs in
+// per-message paths like the textarea placeholder, where a workspace probe
+// would be an HTTP round-trip per keystroke in client/server mode); the
+// value is refreshed off-thread, see workspace_cache.go.
 func (m *UI) isAgentBusy() bool {
 	if m.bangCancel != nil {
 		return true
 	}
-	return m.com.Workspace.AgentIsReady() &&
-		m.com.Workspace.AgentIsBusy()
+	return m.agentBusyCache.val
+}
+
+// isCurrentSessionBusy reports whether the session the user is looking at
+// is running a turn. Unlike isAgentBusy, which serves the memoized global
+// state (true while any session runs, including sub-agent child sessions
+// the UI cannot cancel), this asks about this session specifically.
+//
+// It probes the workspace synchronously, which is an HTTP round-trip in
+// client/server mode, so it must only be used on deliberate, low-frequency
+// paths such as a single Ctrl+C keypress — never per frame or per
+// keystroke.
+func (m *UI) isCurrentSessionBusy() bool {
+	if m.bangCancel != nil {
+		return true
+	}
+	if !m.hasSession() {
+		return false
+	}
+	return m.com.Workspace.AgentIsSessionBusy(m.session.ID)
 }
 
 // hasSession returns true if there is an active session with a valid ID.
@@ -4057,6 +4682,12 @@ func (m *UI) RestartRequested() (sessionID string, ok bool) {
 		sessionID = m.session.ID
 	}
 	return sessionID, true
+}
+
+// CurrentSession returns the active session, or nil when there is none.
+// It is safe to call after the TUI has exited.
+func (m *UI) CurrentSession() *session.Session {
+	return m.session
 }
 
 // mimeOf detects the MIME type of the given content.
@@ -4146,6 +4777,7 @@ func (m *UI) refreshStyles() {
 		t.Attachments.Image,
 		t.Attachments.Text,
 		t.Attachments.Skill,
+		t.Attachments.Remove,
 	)
 	m.todoSpinner.Style = t.Pills.TodoSpinner
 	m.status.help.Styles = t.Help
@@ -4178,9 +4810,12 @@ func (m *UI) attachSkill(skillID, name string) tea.Cmd {
 
 // sendMessage sends a message with the given content and attachments.
 func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.Cmd {
-	if !m.com.Workspace.AgentIsReady() {
-		return util.ReportError(fmt.Errorf("coder agent is not initialized"))
+	if err := m.com.Workspace.AgentReadyErr(); err != nil {
+		return util.ReportError(err)
 	}
+
+	// Start the turn timer.
+	common.StartTurn()
 
 	var cmds []tea.Cmd
 	if !m.hasSession() {
@@ -4209,19 +4844,28 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 
 	// Capture session ID to avoid race with main goroutine updating m.session.
 	sessionID := m.session.ID
+	// Optimistically mark the agent busy: the prompt we are about to submit
+	// either starts a run or is enqueued behind one. This keeps esc pressed
+	// right after enter routing to cancelAgent instead of reading a stale
+	// idle value; the authoritative state arrives via agentRunSubmittedMsg.
+	// Bump the busy/queue generations so any probe started before this
+	// optimistic write is discarded rather than reverting us to idle.
+	m.agentBusyCache.set(true)
+	m.busyFetchGen++
+	m.invalidatePromptQueue()
 	cmds = append(cmds, func() tea.Msg {
 		// AgentRun is fire-and-forget: it returns once the prompt has
 		// been accepted (HTTP 202) or synchronously with a validation
 		// or transport error. Run failures and cancellation surface
 		// through SSE-derived events, not this return value.
 		err := m.com.Workspace.AgentRun(context.Background(), sessionID, content, attachments...)
-		if err != nil {
+		if err != nil && !errors.Is(err, context.Canceled) {
 			return util.InfoMsg{
 				Type: util.InfoTypeError,
 				Msg:  fmt.Sprintf("%v", err),
 			}
 		}
-		return nil
+		return agentRunSubmittedMsg{}
 	})
 	return tea.Batch(cmds...)
 }
@@ -4343,20 +4987,35 @@ func (m *UI) cancelAgent() tea.Cmd {
 		return nil
 	}
 
-	if !m.com.Workspace.AgentIsReady() {
+	// Gate on the memoized ready state: esc is a hot key and AgentIsReady
+	// is a synchronous HTTP round-trip in client/server mode.
+	if !m.agentReady {
 		return nil
 	}
 
 	if m.isCanceling {
 		// Second escape press — actually cancel.
 		m.isCanceling = false
+		// doCancelAgent cancels any bang command and the agent, and stops
+		// the todo spinner. Drop the memoized busy state it just changed so
+		// the pill re-renders from last-known state now, and again when the
+		// off-thread refresh (and the agent's own events) land.
 		m.doCancelAgent()
-		return nil
+		m.invalidateBusyCaches()
+		return m.dispatchBusyRefresh()
 	}
 
-	// Check if there are queued prompts - if so, clear the queue.
-	if m.com.Workspace.AgentQueuedPrompts(m.session.ID) > 0 {
+	// Queued prompts pending: esc clears the queue. Decide from the cached
+	// count (event-driven) instead of a synchronous workspace probe.
+	if m.promptQueue > 0 {
 		m.com.Workspace.AgentClearQueue(m.session.ID)
+		m.promptQueue = 0
+		m.promptQueueItems = nil
+		m.promptQueueCheckedAt = time.Now()
+		// Bump the queue generation so a fetch started before this clear
+		// cannot land and repopulate the pill we just emptied.
+		m.invalidatePromptQueue()
+		m.updateLayoutAndSize()
 		return nil
 	}
 
@@ -4733,6 +5392,7 @@ func (m *UI) openFilesDialog() tea.Cmd {
 	filePicker, cmd := dialog.NewFilePicker(m.com)
 	filePicker.SetImageCapabilities(&m.caps)
 	m.dialog.OpenDialog(filePicker)
+	event.FilePickerOpened()
 
 	return cmd
 }
@@ -4751,6 +5411,61 @@ func (m *UI) openPermissionsDialog(perm permission.PermissionRequest) tea.Cmd {
 	permDialog := dialog.NewPermissions(m.com, perm, opts...)
 	m.dialog.OpenDialogWithGrace(permDialog)
 	return nil
+}
+
+// openBatchFormDialog activates a tabbed multi-question form in
+// the editor area. Single questions render without tabs or confirm.
+func (m *UI) openBatchFormDialog(batch question.Request) {
+	// Close any existing question form first to prevent stacking.
+	if qf, ok := m.activeInline.(*dialog.QuestionForm); ok && qf != nil {
+		m.activeInline = nil
+	}
+
+	form := dialog.NewQuestionForm(m.com.Styles, batch)
+	form.OnAnswer = func(responses []question.Answer) {
+		m.com.Workspace.QuestionAnswer(responses)
+	}
+	form.OnCancel = func() {
+		m.com.Workspace.QuestionCancel()
+	}
+	m.activeInline = form
+	m.textarea.Blur()
+	m.focus = uiFocusEditor
+	m.activeInline.SetFocused(true)
+	m.updateLayoutAndSize()
+}
+
+// handleQuestionNotification dismisses an open question form when
+// any client resolved the pending batch. Only one question can be
+// pending at a time, so any notification means the current form
+// is stale regardless of BatchID.
+func (m *UI) handleQuestionNotification(_ question.Notification) {
+	if _, ok := m.activeInline.(*dialog.QuestionForm); ok {
+		m.activeInline = nil
+		m.textarea.Focus()
+		m.updateLayoutAndSize()
+	}
+}
+
+// editorContentWidth returns the content width available to the
+// editor area for the current state. It depends only on terminal
+// width and layout (not on editor height), so it can be computed
+// before the editor's height is known. This is the single source
+// of truth for the inline editor width used by both layout sizing
+// and Height() queries.
+func (m *UI) editorContentWidth() int {
+	width := m.width - 2 // appRect horizontal margins
+	if m.state == uiChat && !m.isCompact {
+		width -= 30 // sidebar column
+	}
+	return width
+}
+
+// shouldCollapseQuestion reports whether a question form should render
+// in its collapsed one-line view. This is true only when the form is
+// unfocused and would consume more than half the terminal height.
+func (m *UI) shouldCollapseQuestion(qf *dialog.QuestionForm) bool {
+	return m.focus != uiFocusEditor && m.height > 0 && qf.Height(m.editorContentWidth()) > m.height*2/5
 }
 
 // handlePermissionNotification updates tool items when permission state changes.
@@ -4781,9 +5496,10 @@ func (m *UI) handlePermissionNotification(notification permission.PermissionNoti
 // handleAgentNotification translates domain agent events into desktop
 // notifications using the UI notification backend.
 func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
+	var cmds []tea.Cmd
 	switch n.Type {
 	case notify.TypeAgentFinished:
-		var cmds []tea.Cmd
+		common.StopTurn()
 		cmds = append(cmds, m.sendNotification(notification.Notification{
 			Title:   "Crush is waiting...",
 			Message: fmt.Sprintf("Agent's turn completed in \"%s\"", n.SessionTitle),
@@ -4791,12 +5507,31 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		if m.com.IsHyper() {
 			cmds = append(cmds, m.fetchHyperCredits())
 		}
-		return tea.Batch(cmds...)
+	case notify.TypeAgentError:
+		// Terminal edge like TypeAgentFinished; fall through to the
+		// busy/queue refresh below.
 	case notify.TypeReAuthenticate:
 		return m.handleReAuthenticate(n.ProviderID)
+	case notify.TypeAWSSSOAuth:
+		return m.handleAWSSSOAuth(n.AWSSOCommand, n.AWSSOURL)
+	case notify.TypeAWSSSOAuthResult:
+		return m.handleAWSSSOAuthResult(n.Message)
 	default:
 		return nil
 	}
+	// TypeAgentFinished / TypeAgentError are the busy→idle edge: the agent
+	// clears its active request before publishing precisely so observers
+	// can re-probe. Drop the memoized busy state and re-fetch it and the
+	// prompt queue off-thread.
+	m.invalidateBusyCaches()
+	m.invalidatePromptQueue()
+	if cmd := m.dispatchBusyRefresh(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if cmd := m.dispatchPromptQueueRefresh(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *UI) handleReAuthenticate(providerID string) tea.Cmd {
@@ -4815,6 +5550,49 @@ func (m *UI) handleReAuthenticate(providerID string) tea.Cmd {
 	return m.openAuthenticationDialog(providerCfg.ToProvider(), cfg.Models[agentCfg.Model], agentCfg.Model)
 }
 
+// handleAWSSSOAuth opens the AWS SSO progress dialog (or updates the SSO URL
+// on an already-open one). The refresh command runs in the coordinator; this
+// dialog is a display surface driven by agent notifications.
+func (m *UI) handleAWSSSOAuth(command, url string) tea.Cmd {
+	// Update the URL on an already-open dialog.
+	if existing := m.dialog.Dialog(dialog.AWSSSOID); existing != nil {
+		if awsDlg, ok := existing.(*dialog.AWSSSO); ok && url != "" {
+			awsDlg.SetURL(url)
+		}
+		m.dialog.BringToFront(dialog.AWSSSOID)
+		return nil
+	}
+	if command == "" {
+		return nil
+	}
+	dlg, cmd := dialog.NewAWSSSO(m.com, command)
+	if url != "" {
+		dlg.SetURL(url)
+	}
+	m.dialog.OpenDialogWithGrace(dlg)
+	return cmd
+}
+
+// handleAWSSSOAuthResult finishes the AWS SSO dialog once the refresh command
+// exits: it closes on success or shows the error so the user can dismiss it.
+func (m *UI) handleAWSSSOAuthResult(errMsg string) tea.Cmd {
+	existing := m.dialog.Dialog(dialog.AWSSSOID)
+	if existing == nil {
+		return nil
+	}
+	awsDlg, ok := existing.(*dialog.AWSSSO)
+	if !ok {
+		return nil
+	}
+	if errMsg == "" {
+		// Success: the turn retries transparently, so no need to linger.
+		m.dialog.CloseDialog(dialog.AWSSSOID)
+		return nil
+	}
+	awsDlg.Finish(errMsg)
+	return nil
+}
+
 // newSession clears the current session state and prepares for a new session.
 // The actual session creation happens when the user sends their first message.
 // Returns a command to reload prompt history.
@@ -4824,6 +5602,7 @@ func (m *UI) newSession() tea.Cmd {
 	}
 
 	m.session = nil
+	m.sidebarOffset = 0
 	m.sessionFiles = nil
 	m.sessionFileReads = nil
 	m.setState(uiLanding, uiFocusEditor)
@@ -4833,6 +5612,10 @@ func (m *UI) newSession() tea.Cmd {
 	m.pillsExpanded = false
 	m.pillsAutoExpanded = false
 	m.promptQueue = 0
+	m.promptQueueItems = nil
+	m.promptQueueCheckedAt = time.Now()
+	m.invalidateBusyCaches()
+	m.invalidatePromptQueue()
 	m.pillsView = ""
 	m.historyReset()
 	agenttools.ResetCache()
@@ -4864,8 +5647,7 @@ func (m *UI) checkBangModeAfterPaste() {
 	m.textarea.SetValue(stripped)
 	col := m.textarea.Column()
 	m.textarea.SetCursorColumn(max(0, col-(len(val)-len(stripped))))
-	yolo := m.com.Workspace.PermissionSkipRequests()
-	m.setEditorPrompt(yolo)
+	m.setEditorPrompt(m.yoloModeCached())
 }
 
 // handlePasteMsg handles a paste message.
@@ -5157,12 +5939,12 @@ func (m *UI) runMCPPrompt(clientID, promptID string, arguments map[string]string
 }
 
 func (m *UI) handleStateChanged() tea.Cmd {
-	return func() tea.Msg {
+	return m.updateAgentModelCmd(func() tea.Msg {
 		m.com.Workspace.UpdateAgentModel(context.Background())
 		return mcpStateChangedMsg{
 			states: m.com.Workspace.MCPGetStates(),
 		}
-	}
+	})
 }
 
 func handleMCPPromptsEvent(ws workspace.Workspace, name string) tea.Cmd {
