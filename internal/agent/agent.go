@@ -2050,13 +2050,26 @@ If not, please feel free to ignore. Again do not mention this message to the use
 			),
 		))
 	}
-	// Collect all tool call IDs present in assistant messages and all tool
-	// result IDs present in tool messages. This lets us detect both orphaned
-	// tool results (result without a call) and orphaned tool calls (call
-	// without a result).
+	// Collect every tool call ID present in assistant messages (so a
+	// result with no matching call anywhere can be dropped as truly
+	// orphaned -- see filterOrphanedToolResults) and the actual result
+	// content for every tool call that already has one, keyed by call
+	// ID.
+	//
+	// The result is pulled forward and emitted immediately after its
+	// own tool_call below (see toolResultsFor), regardless of where it
+	// actually falls in chronological order. Every major provider API
+	// requires a tool_use to be immediately followed by its
+	// tool_result; relying on natural chronological adjacency is not
+	// safe -- an interleaved turn (e.g. a backgrounded sub-agent's
+	// completion landing mid-tool-call, or two Crush processes racing
+	// on the same session) can insert other messages between a call
+	// and its own result. Once that gap is in the history it
+	// permanently 400s every future turn, since the gap itself is
+	// replayed back on each request. Reassembling adjacency here heals
+	// it on every prompt build, independent of how the gap happened.
 	knownToolCallIDs := make(map[string]struct{})
-	knownToolResultIDs := make(map[string]struct{})
-	seenToolResultIDs := make(map[string]struct{})
+	resultPartsByCallID := make(map[string]fantasy.MessagePart)
 	for _, m := range msgs {
 		switch m.Role {
 		case message.Assistant:
@@ -2064,11 +2077,27 @@ If not, please feel free to ignore. Again do not mention this message to the use
 				knownToolCallIDs[tc.ID] = struct{}{}
 			}
 		case message.Tool:
-			for _, tr := range m.ToolResults() {
-				knownToolResultIDs[tr.ToolCallID] = struct{}{}
+			for _, aiMsg := range m.ToAIMessage() {
+				for _, part := range aiMsg.Content {
+					tr, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](part)
+					if !ok {
+						continue
+					}
+					if _, dup := resultPartsByCallID[tr.ToolCallID]; dup {
+						slog.Warn("Multiple tool results for the same tool call; keeping the earliest",
+							"tool_call_id", tr.ToolCallID)
+						continue
+					}
+					resultPartsByCallID[tr.ToolCallID] = part
+				}
 			}
 		}
 	}
+	// Tracks every tool_call_id whose result has already been placed
+	// in history, whether pulled forward by toolResultsFor or (in the
+	// ordinary case) reached naturally. Prevents the same result from
+	// being emitted twice.
+	consumedToolResultIDs := make(map[string]struct{})
 
 	for _, m := range msgs {
 		if len(m.Parts) == 0 {
@@ -2079,26 +2108,21 @@ If not, please feel free to ignore. Again do not mention this message to the use
 			continue
 		}
 		if m.Role == message.Tool {
-			msg, ok := filterOrphanedToolResults(m, knownToolCallIDs, seenToolResultIDs)
+			// Every tool result this message carries for a known call
+			// was already pulled forward and emitted immediately after
+			// that call, when its owning assistant message was reached
+			// below (see toolResultsFor) -- including the ordinary case
+			// where nothing interleaved and this message is reached
+			// right after its call, same as before. What's left here is
+			// either a duplicate of an already-emitted result, or one
+			// whose call ID is unknown anywhere (e.g. the assistant
+			// message that made it fell outside this summary window):
+			// both are dropped, exactly as before.
+			msg, ok := filterOrphanedToolResults(m, knownToolCallIDs, consumedToolResultIDs)
 			if !ok {
 				continue
 			}
-			// Anthropic (and most providers) require every tool_result
-			// answering a batch of parallel tool_use calls to arrive in a
-			// single message immediately following the assistant turn that
-			// issued them. Each tool result is persisted as its own DB
-			// message as results stream in (see OnToolResult), so when a
-			// step makes more than one tool call, replaying them verbatim
-			// would split their results across consecutive tool messages --
-			// only the first tool_use id would have an "immediately after"
-			// result, and the API rejects the rest as orphaned. Coalesce
-			// consecutive tool-role entries in history into one message to
-			// match what the API expects.
-			if n := len(history); n > 0 && history[n-1].Role == fantasy.MessageRoleTool {
-				history[n-1].Content = append(history[n-1].Content, msg.Content...)
-			} else {
-				history = append(history, msg)
-			}
+			appendToolMessage(&history, msg)
 			continue
 		}
 		aiMsgs := m.ToAIMessage()
@@ -2112,8 +2136,8 @@ If not, please feel free to ignore. Again do not mention this message to the use
 		history = append(history, aiMsgs...)
 
 		if m.Role == message.Assistant {
-			if msg, ok := syntheticToolResultsForOrphanedCalls(m, knownToolResultIDs); ok {
-				history = append(history, msg)
+			if msg, ok := toolResultsFor(m, resultPartsByCallID, consumedToolResultIDs); ok {
+				appendToolMessage(&history, msg)
 			}
 		}
 	}
@@ -2198,17 +2222,31 @@ func filterOrphanedToolResults(m message.Message, knownToolCallIDs, seenToolResu
 	return msg, true
 }
 
-// syntheticToolResultsForOrphanedCalls returns a tool message containing
-// synthetic tool results for any tool calls in the assistant message that
-// have no matching result in knownToolResultIDs. LLM APIs require every
-// tool_use to be immediately followed by a tool_result; an interrupted
-// session can leave orphaned tool_use blocks that permanently lock the
-// conversation. Returns the message and true if any synthetic results were
-// produced.
-func syntheticToolResultsForOrphanedCalls(m message.Message, knownToolResultIDs map[string]struct{}) (fantasy.Message, bool) {
-	var syntheticParts []fantasy.MessagePart
+// toolResultsFor returns a tool-role message containing the result for
+// every tool call in assistant message m, meant to be appended
+// immediately after m in the assembled history (see preparePrompt).
+// A call's real result is used, and its ID marked consumed in
+// consumedToolResultIDs, when resultPartsByCallID already has one --
+// regardless of where in the raw chronological history that result
+// actually landed. This is what pulls a result forward when something
+// interleaved between a call and its own result. Otherwise a
+// synthetic, error-flagged result is substituted (mirroring the
+// cleanup a live run's own error path performs -- see
+// reconcileSessionMessages) so the tool_use is never left dangling;
+// this covers a run genuinely interrupted before any result came
+// back. Every major provider API rejects a tool_use with no
+// immediately following tool_result, which would otherwise
+// permanently lock the session. Returns the message and true if it
+// has any content.
+func toolResultsFor(m message.Message, resultPartsByCallID map[string]fantasy.MessagePart, consumedToolResultIDs map[string]struct{}) (fantasy.Message, bool) {
+	var parts []fantasy.MessagePart
 	for _, tc := range m.ToolCalls() {
-		if _, hasResult := knownToolResultIDs[tc.ID]; hasResult {
+		if _, done := consumedToolResultIDs[tc.ID]; done {
+			continue
+		}
+		consumedToolResultIDs[tc.ID] = struct{}{}
+		if part, ok := resultPartsByCallID[tc.ID]; ok {
+			parts = append(parts, part)
 			continue
 		}
 		slog.Warn(
@@ -2216,20 +2254,35 @@ func syntheticToolResultsForOrphanedCalls(m message.Message, knownToolResultIDs 
 			"tool_call_id", tc.ID,
 			"tool_name", tc.Name,
 		)
-		syntheticParts = append(syntheticParts, fantasy.ToolResultPart{
+		parts = append(parts, fantasy.ToolResultPart{
 			ToolCallID: tc.ID,
 			Output: fantasy.ToolResultOutputContentError{
 				Error: errors.New("tool call was interrupted and did not produce a result, you may retry this call if the result is still needed"),
 			},
 		})
 	}
-	if len(syntheticParts) == 0 {
+	if len(parts) == 0 {
 		return fantasy.Message{}, false
 	}
 	return fantasy.Message{
 		Role:    fantasy.MessageRoleTool,
-		Content: syntheticParts,
+		Content: parts,
 	}, true
+}
+
+// appendToolMessage appends msg to *history, merging it into the
+// previous entry instead if that entry is already a tool-role
+// message. Every major provider API requires every tool_result
+// answering a batch of parallel tool_use calls to arrive in a single
+// message immediately following the assistant turn that issued them,
+// so results for the same step must never be split across consecutive
+// tool messages.
+func appendToolMessage(history *[]fantasy.Message, msg fantasy.Message) {
+	if n := len(*history); n > 0 && (*history)[n-1].Role == fantasy.MessageRoleTool {
+		(*history)[n-1].Content = append((*history)[n-1].Content, msg.Content...)
+		return
+	}
+	*history = append(*history, msg)
 }
 
 func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.Session) ([]message.Message, error) {
