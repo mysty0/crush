@@ -107,21 +107,29 @@ func (c *Config) seedOAuthProviders(ctx context.Context, store *ConfigStore) {
 // model line-up in the background via fetch. Once the fetch succeeds,
 // the result is merged into the live config store so a session started
 // moments after Crush launches still ends up with the account's actual
-// models, without holding up startup for it. A failed fetch is silently
-// left as fallback: it is not a warning-worthy condition here since the
-// synchronous behavior it replaces already used the same fallback on
-// error.
+// models, without holding up startup for it.
+//
+// A failed fetch is retried with backoff (see
+// seedModelsInBackgroundRetryDelays) rather than given up on after one
+// attempt: a burst of Crush launches all refreshing OAuth tokens and
+// fetching model lists at once (e.g. many tmux panes restoring
+// simultaneously) can transiently fail or rate-limit a single request,
+// and with no retry that left the affected process permanently stuck
+// on the static fallback list for its entire lifetime -- invisibly,
+// since nothing was logged and there was nothing to wait for. If every
+// attempt still fails, that is logged so the failure is at least
+// diagnosable instead of silent.
 func seedModelsInBackground(store *ConfigStore, providerID string, fallback []catwalk.Model, fetch func(ctx context.Context) ([]catwalk.Model, error)) []catwalk.Model {
-	// Skipped under test: this would otherwise fire a real network call
-	// with a goroutine that outlives its originating test.
+	// Skipped under test: this would otherwise fire real network calls
+	// with a goroutine (and real sleeps) that outlive its originating
+	// test. fetchModelsWithRetry, the retry logic itself, takes
+	// injectable delays and is tested directly instead.
 	if testing.Testing() {
 		return fallback
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		models, err := fetch(ctx)
-		if err != nil || len(models) == 0 {
+		models, err := fetchModelsWithRetry(providerID, fetch, seedModelsInBackgroundRetryDelays)
+		if err != nil {
 			return
 		}
 		store.mutateInMemory(func(nc *Config) {
@@ -133,6 +141,41 @@ func seedModelsInBackground(store *ConfigStore, providerID string, fallback []ca
 		store.SetupAgents()
 	}()
 	return fallback
+}
+
+// fetchModelsWithRetry calls fetch once per entry in delays, sleeping
+// for that entry's duration before each attempt after the first (so a
+// leading zero delay means "try immediately"), and returns as soon as
+// one attempt succeeds with a non-empty model list. If every attempt
+// fails, the last error is logged (so the failure is at least
+// diagnosable instead of silent) and returned.
+func fetchModelsWithRetry(providerID string, fetch func(ctx context.Context) ([]catwalk.Model, error), delays []time.Duration) ([]catwalk.Model, error) {
+	var lastErr error
+	for i, delay := range delays {
+		if i > 0 {
+			time.Sleep(delay)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		models, err := fetch(ctx)
+		cancel()
+		if err == nil && len(models) > 0 {
+			return models, nil
+		}
+		lastErr = err
+	}
+	slog.Warn("Giving up on background model discovery after repeated failures; the static default list will be used for the rest of this session",
+		"provider", providerID, "attempts", len(delays), "error", lastErr)
+	return nil, cmp.Or(lastErr, fmt.Errorf("model discovery returned no models after %d attempts", len(delays)))
+}
+
+// seedModelsInBackgroundRetryDelays is the wait before each retry
+// attempt in seedModelsInBackground (the first attempt has no delay).
+// Bounded at five attempts / under two minutes total so a permanently
+// broken account (bad token, wrong endpoint) does not retry forever,
+// while comfortably riding out a transient burst of rate limiting or
+// network congestion.
+var seedModelsInBackgroundRetryDelays = []time.Duration{
+	0, 5 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second,
 }
 
 // isSelectedModelProvider reports whether providerID is the provider

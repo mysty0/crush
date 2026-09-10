@@ -226,3 +226,67 @@ func TestSeedModelsResolvesSelectedProviderSynchronously(t *testing.T) {
 		assert.Equal(t, fallback, got)
 	})
 }
+
+// TestFetchModelsWithRetry is a regression test for a real bug: the
+// background model-discovery fetch used to give up permanently after
+// its single attempt failed, silently and with no retry, leaving the
+// affected Crush process stuck on the static fallback model list for
+// its entire lifetime -- e.g. a burst of many simultaneous launches
+// (tmux restoring dozens of panes at once) transiently failing or
+// getting rate-limited on the OAuth token refresh or model-list fetch.
+func TestFetchModelsWithRetry(t *testing.T) {
+	t.Parallel()
+
+	// Delays are all zero so the test runs instantly regardless of how
+	// many attempts it takes; only the number and outcome of attempts
+	// matters here, not real wall-clock backoff (that is a fixed,
+	// hardcoded schedule in seedModelsInBackgroundRetryDelays, not
+	// worth re-asserting here).
+	fastDelays := []time.Duration{0, 0, 0, 0, 0}
+
+	t.Run("succeeds on a later attempt", func(t *testing.T) {
+		t.Parallel()
+		var attempts int
+		want := []catwalk.Model{{ID: "claude-sonnet-5"}}
+
+		got, err := fetchModelsWithRetry("claude-code-work", func(context.Context) ([]catwalk.Model, error) {
+			attempts++
+			if attempts < 3 {
+				return nil, fmt.Errorf("rate limited")
+			}
+			return want, nil
+		}, fastDelays)
+
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+		assert.Equal(t, 3, attempts, "must stop retrying as soon as an attempt succeeds")
+	})
+
+	t.Run("gives up after exhausting every attempt", func(t *testing.T) {
+		t.Parallel()
+		var attempts int
+
+		got, err := fetchModelsWithRetry("claude-code-work", func(context.Context) ([]catwalk.Model, error) {
+			attempts++
+			return nil, fmt.Errorf("network unreachable")
+		}, fastDelays)
+
+		require.Error(t, err)
+		assert.Nil(t, got)
+		assert.Equal(t, len(fastDelays), attempts, "must use every configured attempt before giving up")
+	})
+
+	t.Run("an empty model list on success is treated as a failure", func(t *testing.T) {
+		t.Parallel()
+		var attempts int
+
+		got, err := fetchModelsWithRetry("claude-code-work", func(context.Context) ([]catwalk.Model, error) {
+			attempts++
+			return []catwalk.Model{}, nil
+		}, fastDelays)
+
+		require.Error(t, err, "a nil error with zero models is not a usable result")
+		assert.Nil(t, got)
+		assert.Equal(t, len(fastDelays), attempts)
+	})
+}
