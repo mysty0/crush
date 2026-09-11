@@ -107,6 +107,14 @@ func (w *countingWorkspace) ListMessages(context.Context, string) ([]message.Mes
 	return nil, nil
 }
 
+func (w *countingWorkspace) ListMessagesWindow(context.Context, string, int) ([]message.Message, bool, error) {
+	return nil, false, nil
+}
+
+func (w *countingWorkspace) ListOlderMessages(context.Context, string, int64, int) ([]message.Message, error) {
+	return nil, nil
+}
+
 func (w *countingWorkspace) ListUserMessages(context.Context, string) ([]message.Message, error) {
 	return nil, nil
 }

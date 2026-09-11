@@ -86,6 +86,34 @@ func (m *UI) exitSubAgentView() {
 	m.updateLayoutAndSize()
 }
 
+// maybeExitFinishedSubAgentView snaps the fullscreen sub-agent view
+// back to whatever it was opened from (the main chat, or the workflow
+// two-pane view) once the sub-agent being watched reaches a terminal
+// state. Without this a sub-agent that finishes while its view is open
+// -- typical for a backgrounded one, whose tool call already returned,
+// so the tool-result exit in appendSessionMessage never fires -- leaves
+// the user stranded in a dead view with no entry left in the picker
+// list to navigate back with.
+func (m *UI) maybeExitFinishedSubAgentView(ref agent.TaskRef) tea.Cmd {
+	if m.subAgentSessionID == "" || ref.ID != m.subAgentSessionID || !isSubAgentKind(ref.Kind) {
+		return nil
+	}
+	for _, t := range m.backgroundTasks() {
+		if t.Ref.ID == ref.ID && t.State == agent.TaskRunning {
+			return nil
+		}
+	}
+	// Either the task is done, or it belongs to another owner session
+	// (a workflow's agent, drilled into from the workflow view) and
+	// only publishes here once it finishes.
+	backTo := "main chat"
+	if m.workflowViewReturnSessionID != "" {
+		backTo = "workflow view"
+	}
+	m.exitSubAgentView()
+	return util.ReportInfo("Sub-agent finished — back to the " + backTo + ".")
+}
+
 // loadSubAgentMessages fetches a sub-agent session's message history
 // asynchronously.
 func (m *UI) loadSubAgentMessages(sessionID string) tea.Cmd {

@@ -13,21 +13,26 @@ import (
 	"github.com/charmbracelet/crush/internal/memory"
 )
 
-// nativeWebSearch performs a web search using the active model provider's
-// built-in web search tool. It currently supports Anthropic-family providers
+// nativeWebSearch performs a web search using model's provider's built-in
+// web search tool. It currently supports Anthropic-family providers
 // (including the Claude subscription provider), where the search rides the
 // same authenticated request as normal model calls.
 //
-// The bool return reports whether the search was handled natively. When it is
-// false (nil error), the active provider has no native web search and the
-// caller should fall back to DuckDuckGo.
-func (c *coordinator) nativeWebSearch(ctx context.Context, query string, maxResults int) (string, bool, error) {
-	large, _, err := c.buildAgentModels(ctx, false)
-	if err != nil {
-		return "", false, err
-	}
-
-	providerCfg, ok := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
+// model is the model actually dispatching the search -- e.g. the fetch
+// model an agentic_fetch call resolved, or a workflow's resolved primary
+// model -- not necessarily the globally configured "large" model. Native
+// search is gated on whichever model is really doing the work: a session
+// can have models.large set to a non-Anthropic provider while routing
+// agentic_fetch/Workflow sub-agents to Claude (e.g. via
+// options.agent_models), and native search must follow that routing
+// rather than silently falling back to DuckDuckGo because it checked the
+// wrong model.
+//
+// The bool return reports whether the search was handled natively. When it
+// is false (nil error), the active provider has no native web search and
+// the caller should fall back to DuckDuckGo.
+func (c *coordinator) nativeWebSearch(ctx context.Context, model Model, query string, maxResults int) (string, bool, error) {
+	providerCfg, ok := c.cfg.Config().Providers.Get(model.ModelCfg.Provider)
 	if !ok {
 		return "", false, nil
 	}
@@ -46,7 +51,7 @@ func (c *coordinator) nativeWebSearch(ctx context.Context, query string, maxResu
 		fantasy.NewUserMessage("Perform a web search for the query: " + query),
 	}
 
-	resp, err := large.Model.Generate(ctx, fantasy.Call{
+	resp, err := model.Model.Generate(ctx, fantasy.Call{
 		Prompt: prompt,
 		Tools:  []fantasy.Tool{searchTool},
 	})
@@ -54,7 +59,7 @@ func (c *coordinator) nativeWebSearch(ctx context.Context, query string, maxResu
 		return "", false, err
 	}
 
-	c.recordBackgroundUsage(ctx, large, memory.ProjectScope(c.cfg.WorkingDir()),
+	c.recordBackgroundUsage(ctx, model, memory.ProjectScope(c.cfg.WorkingDir()),
 		bgSourceWebSearch, "Web searches", "Searched: "+query, resp.Usage)
 
 	return formatNativeSearchResponse(resp), true, nil
@@ -101,8 +106,9 @@ func formatNativeSearchResponse(resp *fantasy.Response) string {
 }
 
 // webSearchOptions builds the WebSearch tool options from config, wiring the
-// native searcher when the native provider is selected.
-func (c *coordinator) webSearchOptions() tools.WebSearchOptions {
+// native searcher -- bound to model, the actual model dispatching the
+// enclosing sub-agent/workflow -- when the native provider is selected.
+func (c *coordinator) webSearchOptions(model Model) tools.WebSearchOptions {
 	cfg := c.cfg.Config().Tools.WebSearch
 	opts := tools.WebSearchOptions{
 		DefaultMaxResults: 10,
@@ -112,7 +118,9 @@ func (c *coordinator) webSearchOptions() tools.WebSearchOptions {
 	}
 	if cfg.GetProvider() == config.WebSearchProviderNative {
 		opts.UseNative = true
-		opts.Native = c.nativeWebSearch
+		opts.Native = func(ctx context.Context, query string, maxResults int) (string, bool, error) {
+			return c.nativeWebSearch(ctx, model, query, maxResults)
+		}
 	}
 	return opts
 }

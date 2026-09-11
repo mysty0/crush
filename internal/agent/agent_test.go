@@ -1020,6 +1020,123 @@ func TestPreparePrompt_MergesParallelToolResults(t *testing.T) {
 	require.ElementsMatch(t, []string{"call_a", "call_b"}, ids)
 }
 
+// TestPreparePrompt_ReordersNonAdjacentToolResult is a regression test
+// for a real corrupted-session scenario observed in the wild: an
+// unrelated turn (e.g. a backgrounded sub-agent's completion landing,
+// or two Crush processes both dispatching work on the same session)
+// interleaved into the message history between a tool call and its
+// own tool result, which arrived much later. Every major provider API
+// rejects a tool_use with no immediately following tool_result, so
+// once persisted this way the session 400s on every future turn.
+// preparePrompt must pull the real result forward to sit immediately
+// after its call -- not drop it, and not duplicate it -- so a session
+// that already has this gap in its history self-heals on next load.
+func TestPreparePrompt_ReordersNonAdjacentToolResult(t *testing.T) {
+	env := testEnv(t)
+	sa := testSessionAgent(env, nil, nil, "test prompt")
+	agent := sa.(*sessionAgent)
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "test")
+	require.NoError(t, err)
+
+	// Turn 1 starts: assistant makes a tool call and is still waiting
+	// on its result.
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ToolCall{ID: "call_slow", Name: "bash", Input: `{"command":"sleep 90"}`, Finished: true},
+		},
+	})
+	require.NoError(t, err)
+
+	// An unrelated turn interleaves before call_slow's result comes
+	// back -- e.g. a backgrounded sub-agent's completion.
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "the sub-agent finished"},
+		},
+	})
+	require.NoError(t, err)
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "noted"},
+			message.ToolCall{ID: "call_other", Name: "view", Input: `{"path":"/x"}`, Finished: true},
+		},
+	})
+	require.NoError(t, err)
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "call_other", Name: "view", Content: "other content"},
+		},
+	})
+	require.NoError(t, err)
+
+	// call_slow finally returns, long after it was made.
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "call_slow", Name: "bash", Content: "slow result"},
+		},
+	})
+	require.NoError(t, err)
+
+	msgs, err := env.messages.List(ctx, sess.ID)
+	require.NoError(t, err)
+
+	history, _ := agent.preparePrompt(msgs, true)
+
+	// Find the assistant message that made call_slow and assert the
+	// very next history entry is a tool message answering exactly
+	// that call, with its real (not synthetic) content.
+	idx := -1
+	for i, msg := range history {
+		if msg.Role != fantasy.MessageRoleAssistant {
+			continue
+		}
+		for _, part := range msg.Content {
+			if tc, ok := fantasy.AsMessagePart[fantasy.ToolCallPart](part); ok && tc.ToolCallID == "call_slow" {
+				idx = i
+			}
+		}
+	}
+	require.NotEqual(t, -1, idx, "history must still contain the assistant message that made call_slow")
+	require.Less(t, idx+1, len(history), "call_slow's tool_use must be immediately followed by a tool_result")
+	require.Equal(t, fantasy.MessageRoleTool, history[idx+1].Role, "tool_use must be immediately followed by tool_result, not an interleaved turn")
+
+	var found bool
+	for _, part := range history[idx+1].Content {
+		tr, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](part)
+		if !ok || tr.ToolCallID != "call_slow" {
+			continue
+		}
+		found = true
+		text, ok := tr.Output.(fantasy.ToolResultOutputContentText)
+		require.True(t, ok, "the real result must be used, not a synthetic error")
+		require.Equal(t, "slow result", text.Text)
+	}
+	require.True(t, found, "call_slow's real result must be pulled forward to immediately follow its call")
+
+	// Nothing was silently dropped: the interleaved turn's own content
+	// is still present in history, just reordered to come after.
+	var interleavedTextSeen, callOtherResultSeen bool
+	for _, msg := range history {
+		for _, part := range msg.Content {
+			if text, ok := fantasy.AsMessagePart[fantasy.TextPart](part); ok && strings.Contains(text.Text, "sub-agent finished") {
+				interleavedTextSeen = true
+			}
+			if tr, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](part); ok && tr.ToolCallID == "call_other" {
+				callOtherResultSeen = true
+			}
+		}
+	}
+	require.True(t, interleavedTextSeen, "the interleaved turn's user message must survive")
+	require.True(t, callOtherResultSeen, "the interleaved turn's own tool call must still get its result")
+}
+
 func TestWorkaroundProviderMediaLimitations_TextOnlyModel(t *testing.T) {
 	env := testEnv(t)
 	sa := testSessionAgent(env, nil, nil, "test prompt")

@@ -224,7 +224,8 @@ func (c *cannedTool) Run(_ context.Context, call fantasy.ToolCall) (fantasy.Tool
 		c.badArgs.Add(1)
 		return fantasy.NewTextErrorResponse(fmt.Sprintf(
 			"missing required parameter(s): %s. Load this tool's schema before calling it.",
-			strings.Join(missing, ", "))), nil
+			strings.Join(missing, ", "),
+		)), nil
 	}
 	return fantasy.NewTextResponse(c.body), nil
 }
@@ -268,7 +269,8 @@ func (s *searchTool) Run(_ context.Context, call fantasy.ToolCall) (fantasy.Tool
 			names = append(names, n)
 		}
 		return fantasy.NewTextErrorResponse(fmt.Sprintf(
-			"unknown tool %q; %d tools are available", in.Name, len(names))), nil
+			"unknown tool %q; %d tools are available", in.Name, len(names),
+		)), nil
 	}
 	b, err := json.Marshal(sc)
 	if err != nil {

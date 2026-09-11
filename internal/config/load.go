@@ -101,21 +101,17 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 		assignIfNil(&cfg.Options.TUI.Transparent, true)
 	}
 
-	// Load known providers, this loads the config from catwalk. A failed
-	// refresh still yields the cached or embedded catalog, so only an empty
-	// list is fatal: starting up without providers is worse than starting
-	// up with slightly stale ones. Pass a Hyper token refresher so the
-	// catalog fetch can retry on 401.
-	providers, err := Providers(cfg, func(ctx context.Context) error {
+	// Load known providers from the on-disk cache (or the embedded
+	// catalog bundled with this release) instantly, with no network
+	// call. The live catwalk.charm.land / Hyper catalogs are fetched in
+	// the background and merged in once they land (see
+	// refreshProvidersInBackground) so a slow or unreachable network
+	// never holds up startup; the cached/embedded catalog is a sound
+	// enough answer to get the TUI on screen immediately.
+	store.knownProviders = providersFast(cfg)
+	refreshProvidersInBackground(store, func(ctx context.Context) error {
 		return store.RefreshOAuthToken(ctx, ScopeGlobal, "hyper")
 	})
-	if err != nil {
-		if len(providers) == 0 {
-			return nil, err
-		}
-		slog.Warn("Continuing with the previously known providers", "error", err)
-	}
-	store.knownProviders = providers
 
 	env := env.New()
 	// Configure providers
@@ -147,20 +143,27 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 	cfg.Models[SelectedModelTypeLarge] = resolved.Large
 	cfg.Models[SelectedModelTypeSmall] = resolved.Small
 
-	// Persist any fallback corrections while we still hold writeMu.
+	// A configured model that fails validation (e.g. the provider is
+	// temporarily unreachable at boot, or the model ID was renamed
+	// upstream) is corrected to a default for this run only -- it is
+	// never written back to disk. Persisting it here would mean a
+	// single transient failure permanently overrides the user's actual
+	// preference on every future launch, across every project, since
+	// this runs against the global config scope. Surface it as a
+	// startup toast instead, on the same channel as the OAuth
+	// model-discovery warnings below, so the substitution is visible
+	// but not sticky.
 	if resolved.LargeFallback {
-		if err := store.updateLocked(ScopeGlobal, func(c *Config) map[string]any {
-			return store.updatePreferredModelFields(c, SelectedModelTypeLarge, resolved.Large)
-		}); err != nil {
-			return nil, fmt.Errorf("failed to update preferred large model: %w", err)
-		}
+		cfg.OAuthModelWarnings = append(cfg.OAuthModelWarnings, fmt.Sprintf(
+			"Configured large model %q is unavailable; using %s/%s for this session.",
+			resolved.LargeRequested, resolved.Large.Provider, resolved.Large.Model,
+		))
 	}
 	if resolved.SmallFallback {
-		if err := store.updateLocked(ScopeGlobal, func(c *Config) map[string]any {
-			return store.updatePreferredModelFields(c, SelectedModelTypeSmall, resolved.Small)
-		}); err != nil {
-			return nil, fmt.Errorf("failed to update preferred small model: %w", err)
-		}
+		cfg.OAuthModelWarnings = append(cfg.OAuthModelWarnings, fmt.Sprintf(
+			"Configured small model %q is unavailable; using %s/%s for this session.",
+			resolved.SmallRequested, resolved.Small.Provider, resolved.Small.Model,
+		))
 	}
 
 	// Resolve the inline model set once, after providers and the
@@ -397,9 +400,10 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 	// Code CLI's credentials file. Once it holds a token of its own it is
 	// seeded like every other logged-in account, against that token.
 	if pc, ok := c.Providers.Get(claudecode.ProviderID); ok && !pc.Disable && pc.OAuthToken == nil && len(pc.Models) == 0 {
-		mctx, mcancel := context.WithTimeout(ctx, 5*time.Second)
-		pc.Models = claudecode.CachedModels(mctx)
-		mcancel()
+		pc.Models = seedModels(c, store, claudecode.ProviderID, cmp.Or(pc.Name, "Claude Code"), claudecode.DefaultModels(),
+			func(ctx context.Context) ([]catwalk.Model, error) {
+				return claudecode.CachedModels(ctx), nil
+			})
 		c.Providers.Set(claudecode.ProviderID, pc)
 	}
 
@@ -408,19 +412,36 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 	// configured and skip custom-provider discovery below.
 	c.seedOAuthProviders(ctx, store)
 
-	// Discover models concurrently for custom providers that need it.
 	// A provider needs discovery when discover_models is explicitly true,
 	// or when the models list is empty (auto-trigger, unless opted out).
+	//
+	// A provider that has discovered models successfully before uses
+	// that on-disk cache instantly and refreshes it in the background
+	// (refreshCustomModelsInBackground), so Load never blocks on a
+	// provider it has already seen. A provider with no cached success
+	// -- including one that has never once succeeded, e.g. because of
+	// a bad API key or an unreachable endpoint -- is not waited on
+	// either: it is simply skipped for this run (dropped below by the
+	// "no models" check, exactly like any other misconfigured
+	// provider) and discovered in the background instead
+	// (discoverCustomProviderInBackground), splicing itself into the
+	// live config once it lands. Without this, a single slow or
+	// permanently broken custom provider would add its full discovery
+	// latency to every launch, forever, since a failing call is never
+	// cached.
+	//
+	// Tests exercise discovery synchronously (bounded by discoverCtx's
+	// 3s timeout) so a single configureProviders call has a
+	// deterministic, assertable result.
 	type discoveryResult struct {
 		models []catwalk.Model
 		err    error
 	}
 
 	discoveryResults := make(map[string]discoveryResult)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
 
 	discoverCtx, discoverCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer discoverCancel()
 	for id, pc := range c.Providers.Seq2() {
 		if knownProviderNames[id] {
 			continue
@@ -434,7 +455,7 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 			continue
 		}
 		providerID := cmp.Or(pc.ID, id)
-		cfg := discover.Config{
+		discoverCfg := discover.Config{
 			ID:             providerID,
 			BaseURL:        pc.BaseURL,
 			APIKey:         pc.APIKey,
@@ -442,20 +463,33 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 			ExistingModels: pc.Models,
 		}
 		providerType := cmp.Or(pc.Type, catwalk.TypeOpenAICompat)
-		wg.Go(func() {
-			models, err := discover.DiscoverModels(discoverCtx, cfg, resolver)
+		runDiscovery := func(ctx context.Context) ([]catwalk.Model, error) {
+			models, err := discover.DiscoverModels(ctx, discoverCfg, resolver)
 			if err == nil && len(models) > 0 {
 				if enricher := discover.GetEnricher(string(providerType)); enricher != nil {
-					models, _ = enricher.EnrichModels(discoverCtx, cfg, resolver, models)
+					models, _ = enricher.EnrichModels(ctx, discoverCfg, resolver, models)
 				}
 			}
-			mu.Lock()
+			return models, err
+		}
+
+		if testing.Testing() {
+			models, err := runDiscovery(discoverCtx)
 			discoveryResults[id] = discoveryResult{models: models, err: err}
-			mu.Unlock()
-		})
+			continue
+		}
+
+		// Skipped-under-test cache read: this would otherwise read
+		// the real on-disk cache shared with the developer's own
+		// Crush data directory instead of a hermetic per-test one.
+		if cached, _, err := newCache[[]catwalk.Model](customModelsCachePath(id, pc.BaseURL, pc.APIKey)).Get(); err == nil && len(cached) > 0 {
+			discoveryResults[id] = discoveryResult{models: cached}
+			refreshCustomModelsInBackground(store, id, pc.BaseURL, pc.APIKey, runDiscovery)
+			continue
+		}
+
+		discoverCustomProviderInBackground(store, id, pc, runDiscovery)
 	}
-	wg.Wait()
-	discoverCancel()
 
 	// Validate the custom providers.
 	for id, providerConfig := range c.Providers.Seq2() {
@@ -806,10 +840,12 @@ func (c *Config) defaultModelSelection(knownProviders []catwalk.Provider) (large
 // resolvedModels holds the result of resolving user-configured model
 // selections against the provider catalog.
 type resolvedModels struct {
-	Large         SelectedModel
-	Small         SelectedModel
-	LargeFallback bool // true if Large was corrected to a default
-	SmallFallback bool // true if Small was corrected to a default
+	Large          SelectedModel
+	Small          SelectedModel
+	LargeFallback  bool   // true if Large was corrected to a default
+	SmallFallback  bool   // true if Small was corrected to a default
+	LargeRequested string // "provider/model" that failed validation, set only if LargeFallback
+	SmallRequested string // "provider/model" that failed validation, set only if SmallFallback
 }
 
 // resolveSelectedModels validates the user's configured model selections
@@ -835,6 +871,7 @@ func resolveSelectedModels(cfg *Config, knownProviders []catwalk.Provider) (reso
 		}
 		model := cfg.GetModel(large.Provider, large.Model)
 		if model == nil {
+			result.LargeRequested = fmt.Sprintf("%s/%s", large.Provider, large.Model)
 			large = defaultLarge
 			result.LargeFallback = true
 		} else {
@@ -849,6 +886,8 @@ func resolveSelectedModels(cfg *Config, knownProviders []catwalk.Provider) (reso
 				large.ReasoningEffort = model.DefaultReasoningEffort
 			}
 			large.Think = largeModelSelected.Think
+			large.AutoContinueOnEmpty = largeModelSelected.AutoContinueOnEmpty
+			large.AutoContinueOnRateLimit = largeModelSelected.AutoContinueOnRateLimit
 			if largeModelSelected.Temperature != nil {
 				large.Temperature = largeModelSelected.Temperature
 			}
@@ -880,6 +919,7 @@ func resolveSelectedModels(cfg *Config, knownProviders []catwalk.Provider) (reso
 
 		model := cfg.GetModel(small.Provider, small.Model)
 		if model == nil {
+			result.SmallRequested = fmt.Sprintf("%s/%s", small.Provider, small.Model)
 			small = defaultSmall
 			result.SmallFallback = true
 		} else {
@@ -912,6 +952,8 @@ func resolveSelectedModels(cfg *Config, knownProviders []catwalk.Provider) (reso
 				small.ProviderOptions = maps.Clone(smallModelSelected.ProviderOptions)
 			}
 			small.Think = smallModelSelected.Think
+			small.AutoContinueOnEmpty = smallModelSelected.AutoContinueOnEmpty
+			small.AutoContinueOnRateLimit = smallModelSelected.AutoContinueOnRateLimit
 		}
 	}
 

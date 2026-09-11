@@ -179,12 +179,14 @@ func evalTaskTools(env fakeEnv, mode string, store *hashline.Store) []fantasy.Ag
 		base = append(base, tools.NewAstGrepTool(env.workingDir))
 	}
 	if mode == config.EditModeHashline {
-		return append(base,
+		return append(
+			base,
 			tools.NewViewTool(nil, env.permissions, *env.filetracker, nil, nil, config.EditModeHashline, store, os.Getenv("CRUSH_EDIT_EVAL_SUMMARIZE") != "", 0, envInt("CRUSH_EDIT_EVAL_BUDGET", 400), env.workingDir),
 			tools.NewHashlineEditTool(nil, env.permissions, env.history, *env.filetracker, store, tsblock.New(), env.workingDir, os.Getenv("CRUSH_EDIT_EVAL_LINT") != "0"),
 		)
 	}
-	return append(base,
+	return append(
+		base,
 		tools.NewViewTool(nil, env.permissions, *env.filetracker, nil, nil, config.EditModeString, nil, os.Getenv("CRUSH_EDIT_EVAL_SUMMARIZE") != "", 0, envInt("CRUSH_EDIT_EVAL_BUDGET", 400), env.workingDir),
 		tools.NewEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewMultiEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
@@ -526,7 +528,8 @@ func printScoreboard(t *testing.T, modelID string, n int, modes []string, aggs m
 		if a.total == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "%-10s  %4d/%-3d  %9.1f%%  %11.2f  %9.2f  %8d  %9d\n",
+		fmt.Fprintf(
+			&b, "%-10s  %4d/%-3d  %9.1f%%  %11.2f  %9.2f  %8d  %9d\n",
 			mode, a.passed, a.total,
 			100*float64(a.passed)/float64(a.total),
 			float64(a.editCalls)/float64(a.total),

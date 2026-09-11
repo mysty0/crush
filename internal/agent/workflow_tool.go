@@ -50,10 +50,12 @@ type WorkflowParams struct {
 // shell commands, or spawn further agents/workflows. Phase-specific
 // behavior (search vs. extract vs. verify) comes entirely from the
 // prompt text the script sends, matching how the reference workflow
-// this was ported from scopes its sub-agent.
-func (c *coordinator) workflowSubAgentTools(tmpDir string, client *http.Client) []fantasy.AgentTool {
+// this was ported from scopes its sub-agent. primary is the model this
+// sub-agent actually runs on, so native web search (if enabled) is gated
+// on it rather than the unrelated globally configured "large" model.
+func (c *coordinator) workflowSubAgentTools(tmpDir string, client *http.Client, primary Model) []fantasy.AgentTool {
 	return []fantasy.AgentTool{
-		tools.NewWebSearchTool(client, c.webSearchOptions()),
+		tools.NewWebSearchTool(client, c.webSearchOptions(primary)),
 		tools.NewWebFetchTool(tmpDir, client, c.webFetchOptions()),
 		tools.NewGlobTool(tmpDir, c.cfg.Config().Tools.Glob),
 		tools.NewGrepTool(tmpDir, c.cfg.Config().Tools.Grep),
@@ -267,7 +269,7 @@ func (c *coordinator) buildWorkflowSubAgent(ctx context.Context, tmpDir string, 
 		IsYolo:               c.permissions.SkipRequests(),
 		Sessions:             c.sessions,
 		Messages:             c.messages,
-		Tools:                c.workflowSubAgentTools(tmpDir, httpClient),
+		Tools:                c.workflowSubAgentTools(tmpDir, httpClient, primary),
 	}), nil
 }
 

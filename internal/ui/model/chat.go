@@ -471,6 +471,70 @@ func (m *Chat) AppendMessages(msgs ...chat.MessageItem) {
 	m.list.AppendItems(items...)
 }
 
+// PrependMessages inserts older message items at the front of the chat
+// list (see UI.applyOlderMessages), shifting every existing entry in
+// idInxMap forward by the number of items prepended before adding the
+// new ones at the front.
+func (m *Chat) PrependMessages(msgs ...chat.MessageItem) {
+	if len(msgs) == 0 {
+		return
+	}
+	shifted := make(map[string]int, len(m.idInxMap)+len(msgs))
+	for id, idx := range m.idInxMap {
+		shifted[id] = idx + len(msgs)
+	}
+	m.idInxMap = shifted
+
+	items := make([]list.Item, len(msgs))
+	for i, msg := range msgs {
+		m.idInxMap[msg.ID()] = i
+		if container, ok := msg.(chat.NestedToolContainer); ok {
+			for _, nested := range container.NestedTools() {
+				m.idInxMap[nested.ID()] = i
+			}
+		}
+		items[i] = msg
+	}
+	m.list.PrependItems(items...)
+}
+
+// EvictFront removes the first n items from the chat list to reclaim
+// memory (see UI.maybeEvictHistory), but only if none of them are
+// currently visible -- it never touches content the user might be
+// looking at. Returns whether the eviction happened.
+func (m *Chat) EvictFront(n int) bool {
+	if n <= 0 || n > m.list.Len() {
+		return false
+	}
+	visStart, _ := m.list.VisibleItemIndices()
+	if visStart < n {
+		return false
+	}
+	for range n {
+		m.list.RemoveItem(0)
+	}
+	m.rebuildIDIndexMap()
+	return true
+}
+
+// rebuildIDIndexMap recomputes idInxMap from the list's current items
+// and order. Used after an operation (like EvictFront) that removes
+// items from the middle or front of the list, where shifting the
+// existing map in place would be more bookkeeping than just rebuilding
+// it from the now-authoritative item order.
+func (m *Chat) rebuildIDIndexMap() {
+	items := m.Items()
+	m.idInxMap = make(map[string]int, len(items))
+	for i, msg := range items {
+		m.idInxMap[msg.ID()] = i
+		if container, ok := msg.(chat.NestedToolContainer); ok {
+			for _, nested := range container.NestedTools() {
+				m.idInxMap[nested.ID()] = i
+			}
+		}
+	}
+}
+
 // UpdateNestedToolIDs updates the ID map for nested tools within a container.
 // Call this after modifying nested tools so lookups by nested tool-call ID
 // (e.g. routing bash progress events) resolve to the containing item.
@@ -532,6 +596,13 @@ func (m *Chat) Blur() {
 // AtBottom returns whether the chat list is currently scrolled to the bottom.
 func (m *Chat) AtBottom() bool {
 	return m.list.AtBottom()
+}
+
+// AtTop returns whether the chat list is currently scrolled to its
+// very beginning. Used to trigger lazy-loading older history (see
+// UI.maybeLoadOlderMessages).
+func (m *Chat) AtTop() bool {
+	return m.list.AtTop()
 }
 
 // Dragging returns whether the mouse button is currently held down over

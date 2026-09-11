@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // WireTransport adapts Crush's standard Gemini requests (as emitted by the
@@ -21,9 +23,10 @@ import (
 // a plain GenerateContentRequest body and x-goog-api-key auth, and expects
 // raw GenerateContentResponse objects back. The Cloud Code Assist backend
 // instead exposes {endpoint}/v1internal:{method}, wraps the request body in
-// a {project, model, request} envelope, wraps each response in a {response}
-// envelope, and authenticates with a bearer token. WireTransport performs
-// that rewrite on the way out and unwraps the response on the way back.
+// a {project, requestId, request, model, userPromptId, userAgent} envelope,
+// wraps each response in a {response} envelope, and authenticates with a
+// bearer token. WireTransport performs that rewrite on the way out and
+// unwraps the response on the way back.
 type WireTransport struct {
 	// Base is the underlying RoundTripper. When nil,
 	// http.DefaultTransport is used.
@@ -52,6 +55,11 @@ func (t *WireTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// not break unrelated requests.
 		return base.RoundTrip(req)
 	}
+	// Restore the real model id if it was aliased past fantasy's
+	// google-provider model-name sniffing (see WrapCodeAssistWireFormat).
+	// The alias exists only inside fantasy and genai's URL builder; the
+	// backend must always be told the real name.
+	model = unaliasModelID(model)
 	stream := method == "streamGenerateContent"
 
 	// Read and parse the original Gemini request body.
@@ -67,11 +75,31 @@ func (t *WireTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	// Build the Cloud Code Assist request envelope.
+	id := t.Identity
+	if id == (Identity{}) {
+		id = GeminiCLIIdentity
+	}
+	ua := userAgent(model, id)
+
+	// Build the Cloud Code Assist request envelope. The real client's
+	// envelope message (google.internal.cloud.code.v1internal.
+	// GenerateContentRequest) also has requestType and enabledCreditTypes
+	// fields; their accepted values could not be recovered from the
+	// client binary, so they are omitted rather than guessed.
 	envelope := map[string]any{
 		"project": t.ProjectID,
 		"model":   model,
 		"request": original,
+		// requestId is per HTTP call, so a retry of the same logical
+		// request deliberately carries a new one.
+		"requestId": uuid.NewString(),
+		"userAgent": ua,
+	}
+	// userPromptId groups every round trip of one agent turn under a
+	// single logical prompt for the backend's quota accounting. Requests
+	// made outside a tracked turn omit the field instead of sending "".
+	if promptID := UserPromptIDFromContext(reqContext(req)); promptID != "" {
+		envelope["userPromptId"] = promptID
 	}
 	body, err := json.Marshal(envelope)
 	if err != nil {
@@ -81,7 +109,7 @@ func (t *WireTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Clone the request so the caller's copy is untouched, then rewrite
 	// the URL, headers, and body.
 	outReq := req.Clone(reqContext(req))
-	newURL := fmt.Sprintf("%s/v1internal:%s", codeAssistEndpoint, method)
+	newURL := fmt.Sprintf("%s/v1internal:%s", endpointFor(id), method)
 	if stream {
 		newURL += "?alt=sse"
 	}
@@ -100,13 +128,9 @@ func (t *WireTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	outReq.Header.Del("X-Goog-Api-Key")
 	outReq.Header.Set("Authorization", "Bearer "+t.AccessToken)
 	outReq.Header.Set("Content-Type", "application/json")
-	id := t.Identity
-	if id == (Identity{}) {
-		id = GeminiCLIIdentity
-	}
-	for k, v := range cliHeaders(model, id) {
-		outReq.Header.Set(k, v)
-	}
+	// The same string is sent as the User-Agent header and inside the
+	// envelope's userAgent field, so compute it once.
+	outReq.Header.Set("User-Agent", ua)
 
 	resp, err := base.RoundTrip(outReq)
 	if err != nil {

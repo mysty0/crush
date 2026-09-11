@@ -53,27 +53,41 @@ const (
 )
 
 // Identity identifies the client product making Cloud Code Assist
-// requests: the User-Agent product/version and the Client-Metadata
-// pluginType/ideType. Google's tier-eligibility logic for loadCodeAssist
-// keys off pluginType — see docs/antigravity-cli-oauth-findings.md, which
-// documents the exact PluginType/IdeType enums recovered from the
-// Antigravity CLI binary's raw protobuf descriptor. Notably
-// PluginType.GEMINI is marked `deprecated = true` in that schema, so
-// callers other than the reference Gemini CLI (e.g. the antigravity
-// package) must supply their own identity rather than reusing
-// GeminiCLIIdentity.
+// requests: the User-Agent product/version, plus the pluginType/ideType
+// pair that describes the calling plugin. Google's tier-eligibility logic
+// for loadCodeAssist keys off pluginType — see
+// docs/antigravity-cli-oauth-findings.md, which documents the exact
+// PluginType/IdeType enums recovered from the Antigravity CLI binary's raw
+// protobuf descriptor. Notably PluginType.GEMINI is marked
+// `deprecated = true` in that schema, so callers other than the reference
+// Gemini CLI (e.g. the antigravity package) must supply their own identity
+// rather than reusing GeminiCLIIdentity.
 type Identity struct {
 	// Product is the User-Agent product name, e.g. "GeminiCLI".
 	Product string
 	// Version is the User-Agent product version.
 	Version string
-	// PluginType is the Client-Metadata "pluginType" value, a
-	// ClientMetadata.PluginType enum name (e.g. "GEMINI", "CLOUD_CODE").
+	// PluginType is the ClientMetadata.PluginType enum name (e.g.
+	// "GEMINI", "CLOUD_CODE") identifying the calling plugin.
 	PluginType string
-	// IDEType is the Client-Metadata "ideType" value, a
-	// ClientMetadata.IdeType enum name (e.g. "IDE_UNSPECIFIED",
-	// "ANTIGRAVITY"). Defaults to "IDE_UNSPECIFIED" when empty.
+	// IDEType is the ClientMetadata.IdeType enum name (e.g.
+	// "IDE_UNSPECIFIED", "ANTIGRAVITY"). Defaults to "IDE_UNSPECIFIED"
+	// when empty.
 	IDEType string
+	// Endpoint overrides the Cloud Code Assist base URL this identity's
+	// requests are sent to. Empty means "use the package default"
+	// (BaseURL, codeAssistEndpoint's initial value).
+	//
+	// This exists because loadCodeAssist resolves an account to a
+	// different backend project -- and therefore a different quota pool
+	// -- depending on which host receives the request, confirmed by
+	// directly comparing live traffic: the same OAuth token sent to
+	// cloudcode-pa.googleapis.com resolved to a stale project with no
+	// usable quota (every inference call 429ed instantly), while the
+	// same token sent to daily-cloudcode-pa.googleapis.com -- the host
+	// the real Antigravity CLI binary actually uses -- resolved to the
+	// correct, working free-tier project. See antigravity.BaseURL.
+	Endpoint string
 }
 
 // GeminiCLIIdentity is the identity Gemini CLI itself reports.
@@ -115,6 +129,16 @@ var (
 	userinfoURL = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json"
 )
 
+// endpointFor returns the Cloud Code Assist base URL to use for id's
+// requests: id.Endpoint when set (see Identity.Endpoint), otherwise the
+// package default codeAssistEndpoint.
+func endpointFor(id Identity) string {
+	if id.Endpoint != "" {
+		return id.Endpoint
+	}
+	return codeAssistEndpoint
+}
+
 // refreshSkewSeconds trims this many seconds (5 minutes) off the reported
 // token lifetime so refreshes happen before the real expiry.
 const refreshSkewSeconds = 300
@@ -128,21 +152,28 @@ func clientSecret() string {
 	return string(b)
 }
 
-// cliHeaders returns the client identification headers that must
-// accompany every Cloud Code Assist and inference request. The model is
-// embedded in the User-Agent; when empty a default is substituted.
-func cliHeaders(model string, id Identity) map[string]string {
+// userAgent builds the client User-Agent string. The model is embedded in
+// it; when empty a default is substituted. It is exposed separately from
+// cliHeaders because the Cloud Code Assist request envelope carries the
+// same string in its own userAgent field, and the two must not drift.
+func userAgent(model string, id Identity) string {
 	if model == "" {
 		model = defaultModel
 	}
-	ideType := id.IDEType
-	if ideType == "" {
-		ideType = "IDE_UNSPECIFIED"
-	}
-	ua := fmt.Sprintf("%s/%s/%s (%s; %s; terminal)",
+	return fmt.Sprintf("%s/%s/%s (%s; %s; terminal)",
 		id.Product, id.Version, model, runtime.GOOS, runtime.GOARCH)
+}
+
+// cliHeaders returns the client identification headers that must
+// accompany every Cloud Code Assist and inference request.
+//
+// Only User-Agent is sent. Crush previously also sent a Client-Metadata
+// header, but reverse-engineering the real Antigravity CLI binary showed
+// the string "client-metadata" appears nowhere in it as a header name, so
+// no genuine client ever sends it. Sending a header the backend does not
+// expect is a needless fingerprinting signal, so it was removed.
+func cliHeaders(model string, id Identity) map[string]string {
 	return map[string]string{
-		"User-Agent":      ua,
-		"Client-Metadata": "ideType=" + ideType + ",platform=PLATFORM_UNSPECIFIED,pluginType=" + id.PluginType,
+		"User-Agent": userAgent(model, id),
 	}
 }

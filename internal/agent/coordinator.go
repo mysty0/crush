@@ -50,6 +50,7 @@ import (
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
+	"golang.org/x/net/http2"
 	"golang.org/x/sync/errgroup"
 
 	"charm.land/fantasy/providers/anthropic"
@@ -259,6 +260,12 @@ type coordinator struct {
 	// AgentProgress can report on them while they run.
 	subAgents *subAgentRegistry
 
+	// pollGuard interrupts a session stuck repeatedly blocking its own
+	// turn to poll a background task (sleep/job_output(wait=true) in a
+	// loop) instead of doing other work or trusting automatic delivery.
+	// See poll_guard_tool.go.
+	pollGuard *pollGuard
+
 	// bgCompletions holds the cancel func of every in-flight
 	// backgrounded sub-agent completion delivery, keyed by sub-agent
 	// session. Those turns are started by the coordinator itself
@@ -276,6 +283,10 @@ type coordinator struct {
 	// instructions are re-injected each turn (persists across turns and
 	// summarization).
 	loadedSkills *skills.LoadedStore
+	// autoActivated records sessions that have already had their
+	// auto-activating skills seeded, so a user's "stop <skill>" is not
+	// undone by re-seeding on the next turn.
+	autoActivated *csync.Map[string, struct{}]
 
 	// snapshots binds hashline section tags to the exact file content that
 	// minted them, per session. Shared between the read tool (producer) and
@@ -338,10 +349,12 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		workflows:           newWorkflowRegistry(),
 		schedules:           newScheduleRegistry(),
 		subAgents:           newSubAgentRegistry(),
+		pollGuard:           newPollGuard(),
 		allSkills:           allSkills,
 		activeSkills:        activeSkills,
 		skillTracker:        skillTracker,
 		loadedSkills:        skills.NewLoadedStore(),
+		autoActivated:       csync.NewMap[string, struct{}](),
 		snapshots:           hashline.NewStore(),
 		memory:              opts.Memory,
 		compressdMgr:        opts.Compressd,
@@ -431,6 +444,9 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 		attachments = filteredAttachments
 	}
 
+	// Seed skills that declare themselves auto-activating, once per
+	// session, before any explicit activation or deactivation runs.
+	c.autoActivateSkills(sessionID)
 	// Activate skills invoked from the command palette so their
 	// instructions persist across turns, not just the turn they were
 	// attached on. The palette attaches a skill's SKILL.md as a markdown
@@ -1228,6 +1244,13 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// commands) still apply to the delegated mutating calls.
 	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent && !writable)
 
+	// Interrupt a session stuck polling a background task in a blocking
+	// loop (sleep / job_output(wait=true), repeated) instead of doing
+	// other work or trusting automatic delivery. Applies to every agent,
+	// including sub-agents, since the same anti-pattern can happen at
+	// any nesting level.
+	filteredTools = wrapToolsWithPollGuard(filteredTools, c.pollGuard)
+
 	// Gate mutating tools on plan mode. This applies to every agent,
 	// including writable sub-agents, so a sub-agent dispatched while plan
 	// mode is active cannot bypass it. wrapToolsWithPlanMode only wraps
@@ -1318,15 +1341,60 @@ func (c *coordinator) buildModelFromSelected(ctx context.Context, modelCfg confi
 	}, nil
 }
 
-// debugHTTPClient returns an HTTP client that logs request/response
-// traffic when debug mode is enabled in config, or nil otherwise. It
-// centralizes the "opt into a debug HTTP client" check that every
-// build*Provider method otherwise repeated individually.
-func (c *coordinator) debugHTTPClient() *http.Client {
-	if c.cfg.Config().Options.Debug {
-		return log.NewHTTPClient()
+// providerTransportOnce builds the shared, HTTP/2-aware RoundTripper
+// used as the base for every model provider's HTTP client, and the
+// underlying *http2.Transport for direct configuration (ConfigureTransports
+// cannot be called a second time on the same *http.Transport, so this
+// keeps the one *http2.Transport it returns around for both use and
+// inspection -- see providerTransport and the tests in
+// coordinator_test.go). Built once and reused so pooled connections are
+// shared across providers.
+//
+// The HTTP/2 side is configured with ping-based idle detection: a
+// connection that goes silently dead mid-stream (a network blip, a
+// Wi-Fi roam, a laptop sleep/wake) otherwise sits in the client's
+// connection pool looking healthy -- canceling the one request riding
+// it only tears down that logical HTTP/2 stream, not the underlying TCP
+// connection, so the pool hands the same dead connection to the very
+// next request, which hangs identically. Left unconfigured, recovery
+// depends on the OS's own TCP retransmission timeout, which can take
+// many minutes. With ping enabled, an idle connection is probed after
+// readIdleTimeout and evicted if it doesn't answer within pingTimeout,
+// so a retry after a network blip gets a fresh connection instead of
+// the same poisoned one.
+var providerTransportOnce = sync.OnceValues(func() (http.RoundTripper, *http2.Transport) {
+	const (
+		readIdleTimeout = 30 * time.Second
+		pingTimeout     = 15 * time.Second
+	)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	h2, err := http2.ConfigureTransports(transport)
+	if err != nil {
+		slog.Warn("Failed to configure HTTP/2 ping-based dead connection detection", "error", err)
+		return transport, nil
 	}
-	return nil
+	h2.ReadIdleTimeout = readIdleTimeout
+	h2.PingTimeout = pingTimeout
+	return transport, h2
+})
+
+// providerTransport returns the shared RoundTripper from
+// providerTransportOnce; see its doc comment for what it configures and
+// why.
+func providerTransport() http.RoundTripper {
+	rt, _ := providerTransportOnce()
+	return rt
+}
+
+// baseHTTPClient returns the HTTP client every model provider builder
+// should use as its base, wrapping providerTransport with request/
+// response debug logging when debug mode is enabled in config.
+func (c *coordinator) baseHTTPClient() *http.Client {
+	transport := providerTransport()
+	if c.cfg.Config().Options.Debug {
+		transport = &log.HTTPRoundTripLogger{Transport: transport}
+	}
+	return &http.Client{Transport: transport}
 }
 
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
@@ -1372,10 +1440,7 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 	// leading Claude Code identity line into its own system block, which
 	// the subscription-OAuth endpoint requires (see cc_system_split.go).
 	// It is a no-op for non-Claude-Code system prompts.
-	var base http.RoundTripper = http.DefaultTransport
-	if hc := c.debugHTTPClient(); hc != nil {
-		base = hc.Transport
-	}
+	base := c.baseHTTPClient().Transport
 	// For a native Claude Code subscription provider, inject a fresh OAuth
 	// bearer token on every request. No api_key/shell helper is needed.
 	// Each subscription account is its own provider, and the source is
@@ -1400,7 +1465,7 @@ func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[st
 		openai.WithAPIKey(apiKey),
 		openai.WithUseResponsesAPI(),
 	}
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, openai.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
@@ -1416,7 +1481,7 @@ func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[stri
 	opts := []openrouter.Option{
 		openrouter.WithAPIKey(apiKey),
 	}
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, openrouter.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
@@ -1429,7 +1494,7 @@ func (c *coordinator) buildVercelProvider(_, apiKey string, headers map[string]s
 	opts := []vercel.Option{
 		vercel.WithAPIKey(apiKey),
 	}
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, vercel.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
@@ -1458,7 +1523,7 @@ func (c *coordinator) buildOpenaiCompatProvider(baseURL, apiKey string, headers 
 		httpClient = copilot.NewClient(isSubAgent, c.cfg.Config().Options.Debug)
 	}
 	if httpClient == nil {
-		httpClient = c.debugHTTPClient()
+		httpClient = c.baseHTTPClient()
 	}
 	if httpClient != nil {
 		opts = append(opts, openaicompat.WithHTTPClient(httpClient))
@@ -1481,7 +1546,7 @@ func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[str
 		azure.WithAPIKey(apiKey),
 		azure.WithUseResponsesAPI(),
 	}
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, azure.WithHTTPClient(hc))
 	}
 	if options == nil {
@@ -1499,7 +1564,7 @@ func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[str
 
 func (c *coordinator) buildBedrockProvider(apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
 	var opts []bedrock.Option
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, bedrock.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
@@ -1530,7 +1595,7 @@ func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[st
 		google.WithBaseURL(baseURL),
 		google.WithGeminiAPIKey(apiKey),
 	}
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, google.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
@@ -1541,7 +1606,7 @@ func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[st
 
 func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, options map[string]string) (fantasy.Provider, error) {
 	opts := []google.Option{}
-	if hc := c.debugHTTPClient(); hc != nil {
+	if hc := c.baseHTTPClient(); hc != nil {
 		opts = append(opts, google.WithHTTPClient(hc))
 	}
 	if len(headers) > 0 {
@@ -1561,10 +1626,7 @@ func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, optio
 // and injects the subscription bearer, chatgpt-account-id, and Codex beta
 // headers on every request via codex.AuthTransport.
 func (c *coordinator) buildCodexProvider(baseURL, apiKey string, headers map[string]string) (fantasy.Provider, error) {
-	var base http.RoundTripper = http.DefaultTransport
-	if hc := c.debugHTTPClient(); hc != nil {
-		base = hc.Transport
-	}
+	base := c.baseHTTPClient().Transport
 
 	return codex.NewProvider(codex.ProviderOptions{
 		BaseURL: baseURL,
@@ -1588,10 +1650,7 @@ func (c *coordinator) buildGeminiCliProvider(apiKey string, headers, oauthExtra 
 	if oauthExtra != nil {
 		projectID = oauthExtra["project_id"]
 	}
-	var base http.RoundTripper = http.DefaultTransport
-	if hc := c.debugHTTPClient(); hc != nil {
-		base = hc.Transport
-	}
+	base := c.baseHTTPClient().Transport
 	httpClient := &http.Client{Transport: &geminicli.WireTransport{
 		Base:        base,
 		AccessToken: apiKey,
@@ -1601,27 +1660,50 @@ func (c *coordinator) buildGeminiCliProvider(apiKey string, headers, oauthExtra 
 	opts := []google.Option{
 		// genai.NewClient hard-requires a non-empty APIKey whenever the
 		// backend isn't Vertex AI, even when Credentials/skipAuth are
-		// set (see google.golang.org/genai@v1.61.0 client.go), so
-		// WithSkipAuth alone left buildProvider always failing with
-		// "api key is required for Google AI backend" for both Gemini
-		// CLI and Antigravity. Requesting the Vertex AI backend avoids
-		// that check entirely once a custom BaseURL is set (genai's own
-		// project/location auth requirement is waived for a custom
-		// BaseURL) -- and it doesn't matter that these placeholder
-		// project/location values aren't real: geminicli.WireTransport
-		// discards genai's own request URL and body outright and
-		// rebuilds both from scratch, and it also injects the real
-		// bearer token, so genai's own auth path (already bypassed by
-		// the custom HTTPClient below) never runs.
-		google.WithVertex("unused-wiretransport-handles-auth", "global"),
+		// set (see google.golang.org/genai client.go), so WithSkipAuth
+		// alone left buildProvider always failing with "api key is
+		// required for Google AI backend". A placeholder key satisfies
+		// that check; its value is never used, because
+		// geminicli.WireTransport discards genai's own request URL and
+		// body outright, rebuilds both from scratch, strips
+		// x-goog-api-key, and injects the real bearer token.
+		//
+		// Requesting the Vertex backend would satisfy the same check,
+		// and used to -- but it must NOT be used here: fantasy's google
+		// provider treats the Vertex backend as a signal to strip
+		// FunctionCall.ID and FunctionResponse.ID from every request
+		// (real Vertex 400s when they are present). Cloud Code Assist
+		// is not Vertex and needs those ids: it converts tool calls to
+		// the upstream vendor's format server-side, and Anthropic
+		// rejects a tool_use block with no id, so stripping them breaks
+		// tool calling on the backend's Claude models with
+		// "messages.N.content.0.tool_use.id: Field required". Captured
+		// traffic from the real client confirms it sends both ids.
+		google.WithGeminiAPIKey("unused-wiretransport-handles-auth"),
 		google.WithBaseURL(geminicli.BaseURL),
-		google.WithSkipAuth(true),
+		// No WithSkipAuth: it installs dummy credentials, and genai
+		// rejects credentials and an API key together. The placeholder
+		// key above already stands in for auth, and WireTransport
+		// replaces it with the real bearer token regardless.
 		google.WithHTTPClient(httpClient),
 	}
 	if len(headers) > 0 {
 		opts = append(opts, google.WithHeaders(headers))
 	}
-	return google.New(opts...)
+	p, err := google.New(opts...)
+	if err != nil {
+		return nil, err
+	}
+	// Gemini's 429s carry their retry delay in the structured error
+	// details instead of a Retry-After header, which is the only place
+	// fantasy's retry middleware looks.
+	//
+	// The inner wrap keeps the backend's Claude and GPT models on the
+	// Code Assist wire path: they are served in Gemini's wire format
+	// like every other model here, but fantasy's google provider would
+	// otherwise divert them to its Anthropic provider on a model-name
+	// match and 404.
+	return geminicli.WrapRateLimitAware(geminicli.WrapCodeAssistWireFormat(p)), nil
 }
 
 func (c *coordinator) isAnthropicThinking(model config.SelectedModel) bool {
@@ -2196,6 +2278,11 @@ type subAgentParams struct {
 	// back into the parent session as a follow-up message (see
 	// completeSubAgentBackgrounded), exactly as if Ctrl+B had
 	// backgrounded it mid-flight.
+	//
+	// It is honored only for a dispatch from a top-level conversation.
+	// A sub-agent dispatching further work has nowhere to receive that
+	// follow-up, so runSubAgent ignores it there and runs the work
+	// synchronously instead.
 	Background bool
 }
 
@@ -2204,6 +2291,20 @@ type subAgentParams struct {
 // subAgentParams.ResumeSessionID), runs the agent with the given prompt, and
 // propagates the cost to the parent session.
 func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
+	// Backgrounding only makes sense when there is a conversation left
+	// to deliver the result into. A sub-agent has none: when its turn
+	// ends, the agent tool returns its final text and the session is
+	// finished. Backgrounding from inside one therefore throws the
+	// result away -- the sub-agent reports "started, waiting for
+	// results", immediately ends its turn on that non-answer, and the
+	// real result surfaces in the top-level conversation long after
+	// the agent that asked for it is gone. Run it synchronously
+	// instead; issuing several tool calls in one step already gives a
+	// sub-agent genuine parallelism, and this way it sees the answers.
+	if params.Background && c.sessionIsNested(ctx, params.SessionID) {
+		params.Background = false
+	}
+
 	var subSession session.Session
 	var err error
 	if params.ResumeSessionID != "" {
@@ -2290,7 +2391,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 			c.completeSubAgentBackgrounded(params, subSession, model, out)
 		}()
 		return fantasy.NewTextResponse(fmt.Sprintf(
-			"Started the sub-agent in the background (session %s). I'll follow up in this conversation once it finishes -- check on it any time with AgentProgress(session_id=%q).",
+			"Started the sub-agent in the background (session %s). Its result will be delivered here automatically as a follow-up message the moment it finishes -- you do not need to poll or wait for it. Continue with other work, or end your turn now; AgentProgress(session_id=%q) is available if you want an early look, but is optional.",
 			subSession.ID, subSession.ID,
 		)), nil
 	}
@@ -2313,7 +2414,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 			c.completeSubAgentBackgrounded(params, subSession, model, out)
 		}()
 		return fantasy.NewTextResponse(fmt.Sprintf(
-			"Moved the sub-agent to the background (session %s). I'll follow up in this conversation once it finishes -- check on it any time with AgentProgress(session_id=%q).",
+			"Moved the sub-agent to the background (session %s). Its result will be delivered here automatically as a follow-up message the moment it finishes -- you do not need to poll or wait for it. Continue with other work, or end your turn now; AgentProgress(session_id=%q) is available if you want an early look, but is optional.",
 			subSession.ID, subSession.ID,
 		)), nil
 
@@ -2515,6 +2616,20 @@ func (c *coordinator) topLevelAncestor(ctx context.Context, sess session.Session
 		sess = parent
 	}
 	return "", fmt.Errorf("session %q has no top-level ancestor within %d levels", start, maxSessionAncestorHops)
+}
+
+// sessionIsNested reports whether sessionID is a sub-agent session --
+// one dispatched from another session -- rather than a top-level,
+// user-facing conversation. A lookup failure reports false, leaving
+// the caller on its normal path.
+func (c *coordinator) sessionIsNested(ctx context.Context, sessionID string) bool {
+	sess, err := c.sessions.Get(ctx, sessionID)
+	if err != nil {
+		slog.Warn("Could not tell whether the dispatching session is a sub-agent",
+			"session", sessionID, "error", err)
+		return false
+	}
+	return sess.ParentSessionID != ""
 }
 
 // subAgentSessionIsRunning reports whether some task-agent instance is
@@ -2757,6 +2872,29 @@ func (c *coordinator) activateSkillAttachments(sessionID string, attachments []m
 				break
 			}
 		}
+	}
+}
+
+// autoActivateSkills seeds skills declaring "auto-activate: true" into the
+// session on its first turn, so they apply without the model having to call
+// the skill tool. Seeding happens once per session: users turn a skill off
+// for good with "stop <name>", or hide it entirely via
+// options.disabled_skills (which drops it from activeSkills upstream).
+func (c *coordinator) autoActivateSkills(sessionID string) {
+	if c.loadedSkills == nil || sessionID == "" || len(c.activeSkills) == 0 {
+		return
+	}
+	if _, seeded := c.autoActivated.Get(sessionID); seeded {
+		return
+	}
+	c.autoActivated.Set(sessionID, struct{}{})
+	for _, s := range c.activeSkills {
+		if !s.AutoActivate {
+			continue
+		}
+		c.loadedSkills.Add(sessionID, s.Name, s.Instructions)
+		slog.Debug("Skill auto-activated", "component", "skills",
+			"skill", s.Name, "session_id", sessionID)
 	}
 }
 

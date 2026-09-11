@@ -17,9 +17,10 @@ import (
 type ctrlCWorkspace struct {
 	*countingWorkspace
 
-	busySessions     map[string]bool
-	sessionBusyCalls int
-	canceled         []string
+	busySessions         map[string]bool
+	sessionBusyCalls     int
+	canceled             []string
+	cancelKeepQueueCalls int
 }
 
 func (w *ctrlCWorkspace) AgentIsSessionBusy(sessionID string) bool {
@@ -33,6 +34,7 @@ func (w *ctrlCWorkspace) AgentCancel(sessionID string) {
 }
 
 func (w *ctrlCWorkspace) AgentCancelKeepQueue(sessionID string) {
+	w.cancelKeepQueueCalls++
 	w.cancelCalls++
 	w.canceled = append(w.canceled, sessionID)
 }
@@ -161,4 +163,27 @@ func TestCtrlCDecisionProbesSessionOnce(t *testing.T) {
 	m.Update(ctrlCKey())
 	require.Equal(t, 1, ws.sessionBusyCalls,
 		"one Ctrl+C press must probe the session exactly once")
+}
+
+// TestCtrlCCancelDiscardsQueue pins the fix for a real report: canceling a
+// busy turn with Ctrl+C used to call AgentCancelKeepQueue and leave queued
+// follow-up prompts in place, so they silently ran as the next turn right
+// after the user asked to stop. Ctrl+C must discard the queue exactly like
+// Esc does, and the "N Queued" pill must reflect that immediately.
+func TestCtrlCCancelDiscardsQueue(t *testing.T) {
+	pinTTLs(t)
+
+	m, ws := newCtrlCUI(t, map[string]bool{"s1": true})
+	m.promptQueue = 2
+	m.promptQueueItems = []string{"a", "b"}
+
+	m.Update(ctrlCKey())
+
+	require.Equal(t, []string{"s1"}, ws.canceled,
+		"Ctrl+C must cancel the current session's turn")
+	require.Zero(t, ws.cancelKeepQueueCalls,
+		"Ctrl+C must not use the keep-queue cancel path")
+	require.Zero(t, m.promptQueue,
+		"the queue pill must clear immediately, not wait for a refresh")
+	require.Empty(t, m.promptQueueItems)
 }

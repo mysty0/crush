@@ -3,6 +3,7 @@ package config
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,12 +14,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/catwalk/pkg/embedded"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/discover"
 	"github.com/charmbracelet/crush/internal/home"
 	"github.com/charmbracelet/x/etag"
 )
@@ -150,6 +153,169 @@ var (
 	catwalkSyncer = &catwalkSync{}
 	hyperSyncer   = &hyperSync{}
 )
+
+// providersFast returns the known-provider catalog without making any
+// network calls: the on-disk cache if present, otherwise the embedded
+// catalog bundled with this release (plus a cached Hyper entry, if
+// any). Load uses this to build a usable config instantly on every
+// launch; refreshProvidersInBackground fetches the live catalog
+// afterward and merges it into the running config store.
+func providersFast(cfg *Config) []catwalk.Provider {
+	if cfg.Options.DisableDefaultProviders {
+		return nil
+	}
+	out := embedded.GetAll()
+	if cached, _, err := newCache[[]catwalk.Provider](cachePathFor("providers")).Get(); err == nil && len(cached) > 0 {
+		out = cached
+	}
+	if hp, _, err := newCache[catwalk.Provider](cachePathFor("hyper")).Get(); err == nil && hp.ID != "" {
+		out = append([]catwalk.Provider{hp}, out...)
+	}
+	return out
+}
+
+// refreshProvidersInBackground fetches the live provider catalog (the
+// same network call Providers makes) and, once it lands, updates
+// store's known-provider list so later reads (e.g. the model switcher,
+// which calls Providers directly) see the fresh catalog. It never
+// blocks the caller.
+func refreshProvidersInBackground(store *ConfigStore, refresher HyperTokenRefresher) {
+	// Skipped under test: package-level state (providerOnce, catwalkSyncer,
+	// hyperSyncer) is reset directly by test helpers between cases, and a
+	// goroutine outliving its originating test would race those resets.
+	if testing.Testing() || store.Config().Options.DisableProviderAutoUpdate {
+		return
+	}
+	go func() {
+		fresh, err := Providers(store.Config(), refresher)
+		if len(fresh) == 0 {
+			if err != nil {
+				slog.Warn("Background provider catalog refresh failed", "error", err)
+			}
+			return
+		}
+		store.writeMu.Lock()
+		store.knownProviders = fresh
+		store.writeMu.Unlock()
+	}()
+}
+
+// customModelsCachePath returns the on-disk cache path for a custom
+// provider's last successfully discovered model list, keyed by the
+// provider's config ID and a hash of its endpoint so that pointing the
+// same provider ID at a different BaseURL (or API key) never serves a
+// stale list discovered from somewhere else.
+func customModelsCachePath(providerID, baseURL, apiKey string) string {
+	sum := sha256.Sum256([]byte(baseURL + "\x00" + apiKey))
+	return cachePathFor(fmt.Sprintf("discover-%s-%x", providerID, sum[:8]))
+}
+
+// refreshCustomModelsInBackground re-runs model discovery for a custom
+// provider that already has a usable on-disk result and merges the
+// outcome into the live config store once it lands, without blocking
+// the caller. Used so a provider Load has seen before never blocks
+// startup on a fresh discovery call; see the discovery loop in
+// configureProviders.
+func refreshCustomModelsInBackground(store *ConfigStore, providerID, baseURL, apiKey string, fetch func(ctx context.Context) ([]catwalk.Model, error)) {
+	// Skipped under test: same rationale as refreshProvidersInBackground.
+	if testing.Testing() {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models, err := fetch(ctx)
+		if err != nil || len(models) == 0 {
+			return
+		}
+		_ = newCache[[]catwalk.Model](customModelsCachePath(providerID, baseURL, apiKey)).Store(models)
+		store.mutateInMemory(func(nc *Config) {
+			if pc, ok := nc.Providers.Get(providerID); ok {
+				pc.Models = models
+				nc.Providers.Set(providerID, pc)
+			}
+		})
+		store.SetupAgents()
+	}()
+}
+
+// discoverCustomProviderInBackground runs first-time model discovery for
+// a custom provider that has no cached success to fall back on --
+// including one that has never succeeded, e.g. because of a bad API key
+// or an unreachable/broken endpoint. Load never waits on this: the
+// provider is simply absent from the running config until discovery
+// succeeds (or forever, if it never does), at which point it is
+// spliced into the live store. This is what keeps a single slow or
+// permanently broken custom provider from adding its full discovery
+// latency to every launch, forever, since a failing call is never
+// cached.
+func discoverCustomProviderInBackground(store *ConfigStore, id string, pc ProviderConfig, fetch func(ctx context.Context) ([]catwalk.Model, error)) {
+	// Skipped under test: configureProviders discovers synchronously
+	// under testing.Testing() and never calls this; guarded again here
+	// so a direct call from a future test does not leak a goroutine.
+	if testing.Testing() {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models, err := fetch(ctx)
+		if err != nil || len(models) == 0 {
+			return
+		}
+		_ = newCache[[]catwalk.Model](customModelsCachePath(id, pc.BaseURL, pc.APIKey)).Store(models)
+
+		resolver := store.Resolver()
+		if resolver == nil {
+			return
+		}
+		prepared, ok := prepareDiscoveredProvider(id, pc, models, resolver)
+		if !ok {
+			return
+		}
+		store.mutateInMemory(func(nc *Config) {
+			nc.Providers.Set(id, prepared)
+		})
+		store.SetupAgents()
+	}()
+}
+
+// prepareDiscoveredProvider fills in the same defaults and runs the same
+// checks as the synchronous custom-provider validation loop in
+// configureProviders, for the single provider that just finished a
+// background discovery. It is intentionally a separate, minimal
+// implementation rather than a shared call with that loop: the loop's
+// control flow and log messages are covered by tests that assume
+// synchronous discovery, and this rare, best-effort late-arrival path
+// should not have to stay in lockstep with it.
+func prepareDiscoveredProvider(id string, pc ProviderConfig, models []catwalk.Model, resolver VariableResolver) (ProviderConfig, bool) {
+	pc.ID = id
+	pc.Name = cmp.Or(pc.Name, id)
+	pc.Type = cmp.Or(pc.Type, catwalk.TypeOpenAICompat)
+	if pc.Disable || pc.BaseURL == "" || len(models) == 0 {
+		return pc, false
+	}
+	if !slices.Contains(catwalk.KnownProviderTypes(), pc.Type) &&
+		pc.Type != hyper.Name &&
+		!discover.IsKnownCustomProvider(string(pc.Type)) {
+		return pc, false
+	}
+	baseURL, err := resolver.ResolveValue(pc.BaseURL)
+	if baseURL == "" || err != nil {
+		return pc, false
+	}
+	pc.Models = models
+	headers := make(map[string]string, len(pc.ExtraHeaders))
+	for k, v := range pc.ExtraHeaders {
+		resolved, err := resolver.ResolveValue(v)
+		if err != nil || resolved == "" {
+			continue
+		}
+		headers[k] = resolved
+	}
+	pc.ExtraHeaders = headers
+	return pc, true
+}
 
 // Providers returns the list of providers, taking into account cached results
 // and whether or not auto update is enabled.

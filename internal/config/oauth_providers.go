@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"testing"
 	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -35,17 +36,16 @@ func (c *Config) seedOAuthProviders(ctx context.Context, store *ConfigStore) {
 		pc.BaseURL = codex.BaseURL
 		pc = c.refreshOAuthProviderBeforeModelDiscovery(ctx, store, codex.ProviderID, pc)
 		if len(pc.Models) == 0 {
-			// Query the native /codex/models endpoint for the account's
-			// actual model line-up, falling back to a static list.
-			mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			models, err := codex.CachedModels(mctx, pc.OAuthToken.AccessToken)
-			cancel()
-			pc.Models = models
-			if err != nil {
-				c.OAuthModelWarnings = append(c.OAuthModelWarnings, fmt.Sprintf(
-					"%s: using a limited default model list (live model discovery failed: %s)", pc.Name, err,
-				))
-			}
+			// The static default list is used instantly unless this is
+			// the account behind the user's current model selection, in
+			// which case its live model list -- fetched from the native
+			// /codex/models endpoint -- is needed now to validate that
+			// selection; see seedModels.
+			token := pc.OAuthToken.AccessToken
+			pc.Models = seedModels(c, store, codex.ProviderID, pc.Name, codex.DefaultModels(),
+				func(ctx context.Context) ([]catwalk.Model, error) {
+					return codex.CachedModels(ctx, token)
+				})
 		}
 		pc.AutoDiscoverModels = &disableDiscovery
 		c.Providers.Set(codex.ProviderID, pc)
@@ -58,54 +58,177 @@ func (c *Config) seedOAuthProviders(ctx context.Context, store *ConfigStore) {
 		pc.BaseURL = geminicli.BaseURL
 		pc = c.refreshOAuthProviderBeforeModelDiscovery(ctx, store, geminicli.ProviderID, pc)
 		if len(pc.Models) == 0 {
-			// Query the native fetchAvailableModels endpoint for the
-			// account's actual model line-up, falling back to a static
-			// list.
+			// See the codex case above for why this is sometimes
+			// synchronous.
 			projectID := ""
 			if pc.OAuthExtra != nil {
 				projectID = pc.OAuthExtra["project_id"]
 			}
-			mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			models, err := geminicli.CachedModels(mctx, pc.OAuthToken.AccessToken, projectID, geminicli.GeminiCLIIdentity)
-			cancel()
-			pc.Models = models
-			if err != nil {
-				c.OAuthModelWarnings = append(c.OAuthModelWarnings, fmt.Sprintf(
-					"%s: using a limited default model list (live model discovery failed: %s)", pc.Name, err,
-				))
-			}
+			token := pc.OAuthToken.AccessToken
+			pc.Models = seedModels(c, store, geminicli.ProviderID, pc.Name, geminicli.DefaultModels(),
+				func(ctx context.Context) ([]catwalk.Model, error) {
+					return geminicli.CachedModels(ctx, token, projectID, geminicli.GeminiCLIIdentity)
+				})
 		}
 		pc.AutoDiscoverModels = &disableDiscovery
 		c.Providers.Set(geminicli.ProviderID, pc)
 	}
 
 	// EXPERIMENTAL: see docs/antigravity-cli-oauth-findings.md. Reuses
-	// geminicli's BaseURL and model discovery since Antigravity shares
-	// that exact Cloud Code Assist backend and wire format.
+	// geminicli's model discovery/wire format since Antigravity shares
+	// that Cloud Code Assist wire format, but NOT its BaseURL: confirmed
+	// by live traffic comparison that Antigravity's host resolves the
+	// same OAuth token to a different (working) backend project -- see
+	// antigravity.BaseURL's doc comment.
 	if pc, ok := c.Providers.Get(antigravity.ProviderID); ok && !pc.Disable && pc.OAuthToken != nil {
 		pc.ID = antigravity.ProviderID
 		pc.Name = cmp.Or(pc.Name, "Google Antigravity")
 		pc.Type = catwalk.TypeGoogle
-		pc.BaseURL = geminicli.BaseURL
+		pc.BaseURL = antigravity.BaseURL
 		pc = c.refreshOAuthProviderBeforeModelDiscovery(ctx, store, antigravity.ProviderID, pc)
 		if len(pc.Models) == 0 {
 			projectID := ""
 			if pc.OAuthExtra != nil {
 				projectID = pc.OAuthExtra["project_id"]
 			}
-			mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			models, err := geminicli.CachedModels(mctx, pc.OAuthToken.AccessToken, projectID, antigravity.Identity)
-			cancel()
-			pc.Models = models
-			if err != nil {
-				c.OAuthModelWarnings = append(c.OAuthModelWarnings, fmt.Sprintf(
-					"%s: using a limited default model list (live model discovery failed: %s)", pc.Name, err,
-				))
-			}
+			token := pc.OAuthToken.AccessToken
+			pc.Models = seedModels(c, store, antigravity.ProviderID, pc.Name, geminicli.DefaultModels(),
+				func(ctx context.Context) ([]catwalk.Model, error) {
+					return geminicli.CachedModels(ctx, token, projectID, antigravity.Identity)
+				})
 		}
 		pc.AutoDiscoverModels = &disableDiscovery
 		c.Providers.Set(antigravity.ProviderID, pc)
 	}
+}
+
+// seedModelsInBackground returns fallback immediately so Load never
+// blocks on a live model-discovery call, and fetches the account's real
+// model line-up in the background via fetch. Once the fetch succeeds,
+// the result is merged into the live config store so a session started
+// moments after Crush launches still ends up with the account's actual
+// models, without holding up startup for it.
+//
+// A failed fetch is retried with backoff (see
+// seedModelsInBackgroundRetryDelays) rather than given up on after one
+// attempt: a burst of Crush launches all refreshing OAuth tokens and
+// fetching model lists at once (e.g. many tmux panes restoring
+// simultaneously) can transiently fail or rate-limit a single request,
+// and with no retry that left the affected process permanently stuck
+// on the static fallback list for its entire lifetime -- invisibly,
+// since nothing was logged and there was nothing to wait for. If every
+// attempt still fails, that is logged so the failure is at least
+// diagnosable instead of silent.
+func seedModelsInBackground(store *ConfigStore, providerID string, fallback []catwalk.Model, fetch func(ctx context.Context) ([]catwalk.Model, error)) []catwalk.Model {
+	// Skipped under test: this would otherwise fire real network calls
+	// with a goroutine (and real sleeps) that outlive its originating
+	// test. fetchModelsWithRetry, the retry logic itself, takes
+	// injectable delays and is tested directly instead.
+	if testing.Testing() {
+		return fallback
+	}
+	go func() {
+		models, err := fetchModelsWithRetry(providerID, fetch, seedModelsInBackgroundRetryDelays)
+		if err != nil {
+			return
+		}
+		store.mutateInMemory(func(nc *Config) {
+			if pc, ok := nc.Providers.Get(providerID); ok {
+				pc.Models = models
+				nc.Providers.Set(providerID, pc)
+			}
+		})
+		store.SetupAgents()
+	}()
+	return fallback
+}
+
+// fetchModelsWithRetry calls fetch once per entry in delays, sleeping
+// for that entry's duration before each attempt after the first (so a
+// leading zero delay means "try immediately"), and returns as soon as
+// one attempt succeeds with a non-empty model list. If every attempt
+// fails, the last error is logged (so the failure is at least
+// diagnosable instead of silent) and returned.
+func fetchModelsWithRetry(providerID string, fetch func(ctx context.Context) ([]catwalk.Model, error), delays []time.Duration) ([]catwalk.Model, error) {
+	var lastErr error
+	for i, delay := range delays {
+		if i > 0 {
+			time.Sleep(delay)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		models, err := fetch(ctx)
+		cancel()
+		if err == nil && len(models) > 0 {
+			return models, nil
+		}
+		lastErr = err
+	}
+	slog.Warn("Giving up on background model discovery after repeated failures; the static default list will be used for the rest of this session",
+		"provider", providerID, "attempts", len(delays), "error", lastErr)
+	return nil, cmp.Or(lastErr, fmt.Errorf("model discovery returned no models after %d attempts", len(delays)))
+}
+
+// seedModelsInBackgroundRetryDelays is the wait before each retry
+// attempt in seedModelsInBackground (the first attempt has no delay).
+// Bounded at five attempts / under two minutes total so a permanently
+// broken account (bad token, wrong endpoint) does not retry forever,
+// while comfortably riding out a transient burst of rate limiting or
+// network congestion.
+var seedModelsInBackgroundRetryDelays = []time.Duration{
+	0, 5 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second,
+}
+
+// isSelectedModelProvider reports whether providerID is the provider
+// behind the user's currently configured large or small model. Compared
+// against the raw configured selection (cfg.Models), not the resolved
+// default -- this runs before resolveSelectedModels, and exists so that
+// exact provider can be checked for validation, above.
+func isSelectedModelProvider(cfg *Config, providerID string) bool {
+	for _, mt := range []SelectedModelType{SelectedModelTypeLarge, SelectedModelTypeSmall} {
+		if sel, ok := cfg.Models[mt]; ok && sel.Provider == providerID {
+			return true
+		}
+	}
+	return false
+}
+
+// seedModels resolves an OAuth-subscription provider's model list,
+// either synchronously or in the background, depending on whether
+// providerID is the provider behind the user's currently configured
+// large or small model (see isSelectedModelProvider).
+//
+// A provider the user isn't currently pointed at can safely defer to
+// the background (seedModelsInBackground): Load returns fast and the
+// live list is spliced in moments later, well before anyone is likely
+// to switch to it.
+//
+// But the provider the user IS currently pointed at must be resolved
+// synchronously. Load validates the configured model against exactly
+// the list returned here a few lines later (resolveSelectedModels):
+// deferring this fetch would mean that check runs against only the
+// static fallback list, which is missing any model newer than this
+// release's fallback -- e.g. one already selected in a previous
+// session, once the account gained access to it. Every affected
+// launch would then falsely conclude the user's valid selection is
+// "unavailable", substitute an unrelated fallback model, and surface a
+// misleading warning -- even though the model was never actually
+// unavailable, only not yet fetched.
+func seedModels(cfg *Config, store *ConfigStore, providerID, name string, fallback []catwalk.Model, fetch func(ctx context.Context) ([]catwalk.Model, error)) []catwalk.Model {
+	if !isSelectedModelProvider(cfg, providerID) {
+		return seedModelsInBackground(store, providerID, fallback, fetch)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	models, err := fetch(ctx)
+	if err != nil || len(models) == 0 {
+		if err != nil {
+			cfg.OAuthModelWarnings = append(cfg.OAuthModelWarnings, fmt.Sprintf(
+				"%s: using a limited default model list (live model discovery failed: %s)", name, err,
+			))
+		}
+		return fallback
+	}
+	return models
 }
 
 // seedClaudeCodeAccounts populates the wire configuration for every
@@ -136,17 +259,20 @@ func (c *Config) seedClaudeCodeAccounts(ctx context.Context, store *ConfigStore,
 		if len(pc.Models) == 0 {
 			// Two accounts can sit on different plans and so see
 			// different model line-ups; each is queried and cached under
-			// its own provider id. The token was just refreshed above, so
-			// it is handed over directly — resolving it through the store
-			// here would try to take the config write lock the loader
-			// already holds.
+			// its own provider id. The token was just refreshed above,
+			// so it is handed over directly — resolving it through the
+			// store here would try to take the config write lock the
+			// loader already holds. The default list is used instantly
+			// unless this account is behind the user's current model
+			// selection; see seedModels.
 			token := pc.OAuthToken.AccessToken
 			src := claudecode.NewTokenSource(claudecode.TokenFunc(
 				func(context.Context) (string, error) { return token, nil },
 			))
-			mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			pc.Models = claudecode.CachedModelsFor(mctx, id, src)
-			cancel()
+			pc.Models = seedModels(c, store, id, pc.Name, claudecode.DefaultModels(),
+				func(ctx context.Context) ([]catwalk.Model, error) {
+					return claudecode.CachedModelsFor(ctx, id, src), nil
+				})
 		}
 		pc.AutoDiscoverModels = disableDiscovery
 		c.Providers.Set(id, pc)

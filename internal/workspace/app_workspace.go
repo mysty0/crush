@@ -97,6 +97,46 @@ func (w *AppWorkspace) ListMessages(ctx context.Context, sessionID string) ([]me
 	return w.app.Messages.List(ctx, sessionID)
 }
 
+func (w *AppWorkspace) ListMessagesWindow(ctx context.Context, sessionID string, limit int) ([]message.Message, bool, error) {
+	// Drain any debounced updates first, same as ListMessages: a cold
+	// window read must not miss the latest in-memory streaming state.
+	if err := w.app.Messages.FlushAll(ctx); err != nil {
+		return nil, false, err
+	}
+
+	recent, err := w.app.Messages.ListRecent(ctx, sessionID, limit)
+	if err != nil {
+		return nil, false, err
+	}
+
+	merged := recent
+	if sess, err := w.app.Sessions.Get(ctx, sessionID); err == nil && sess.SummaryMessageID != "" {
+		if summaryMsg, err := w.app.Messages.Get(ctx, sess.SummaryMessageID); err == nil {
+			if since, err := w.app.Messages.ListSince(ctx, sessionID, summaryMsg.CreatedAt); err == nil && len(since) > len(recent) {
+				// Both recent and since are chronological suffixes of the
+				// same session; the longer one is always a superset, so
+				// this is a correct union without merging element by
+				// element.
+				merged = since
+			}
+		}
+	}
+
+	if len(merged) == 0 {
+		return merged, false, nil
+	}
+
+	older, err := w.app.Messages.ListBefore(ctx, sessionID, merged[0].CreatedAt, 1)
+	if err != nil {
+		return nil, false, err
+	}
+	return merged, len(older) > 0, nil
+}
+
+func (w *AppWorkspace) ListOlderMessages(ctx context.Context, sessionID string, beforeCreatedAt int64, limit int) ([]message.Message, error) {
+	return w.app.Messages.ListBefore(ctx, sessionID, beforeCreatedAt, limit)
+}
+
 func (w *AppWorkspace) ListUserMessages(ctx context.Context, sessionID string) ([]message.Message, error) {
 	return w.app.Messages.ListUserMessages(ctx, sessionID)
 }
@@ -548,6 +588,10 @@ func (w *AppWorkspace) ImportCopilot() (*oauth.Token, bool) {
 
 func (w *AppWorkspace) RefreshOAuthToken(ctx context.Context, scope config.Scope, providerID string) error {
 	return w.store.RefreshOAuthToken(ctx, scope, providerID)
+}
+
+func (w *AppWorkspace) ReloadConfigIfStale(ctx context.Context) (bool, error) {
+	return w.store.ReloadIfStale(ctx)
 }
 
 // -- Project lifecycle --

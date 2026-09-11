@@ -166,6 +166,18 @@ func (s *service) Rewind(ctx context.Context, sessionID, messageID string, mode 
 // order. The target user message and everything after it are dropped; the
 // cut is by position in the ordered message list (not by timestamp), so
 // messages sharing a one-second created_at are handled correctly.
+//
+// If the origin session has a summary cutoff (SummaryMessageID, set by
+// /compact or auto-compaction) and that summary message falls before the
+// target, the fork's cutoff is remapped to the copy's new ID so the fork
+// keeps sending only post-summary history, same as the origin did.
+// Getting this wrong silently resends the fork's *entire* raw history on
+// every turn instead of the compacted view -- for a long, previously
+// compacted session that is enough to blow past the provider's context
+// limit outright (seen in practice: a fork exceeded Anthropic's 1M-token
+// cap on its very first turn). If the summary message falls at or after
+// the target instead, it wasn't copied, so the fork legitimately starts
+// from full raw history -- there is nothing to remap.
 // Returns the new session's ID.
 func (s *service) forkConversation(ctx context.Context, sessionID string, target message.Message) (string, error) {
 	origin, err := s.sessions.Get(ctx, sessionID)
@@ -183,6 +195,7 @@ func (s *service) forkConversation(ctx context.Context, sessionID string, target
 		return "", fmt.Errorf("rewind: create fork session: %w", err)
 	}
 
+	var forkedSummaryMessageID string
 	for _, m := range all {
 		// Stop before the target message: the target (the user message
 		// being rewound to) and everything after it are dropped. Its text
@@ -190,8 +203,19 @@ func (s *service) forkConversation(ctx context.Context, sessionID string, target
 		if m.ID == target.ID {
 			break
 		}
-		if _, err := s.messages.Copy(ctx, fork.ID, m); err != nil {
+		copied, err := s.messages.Copy(ctx, fork.ID, m)
+		if err != nil {
 			return "", fmt.Errorf("rewind: copy message into fork: %w", err)
+		}
+		if origin.SummaryMessageID != "" && m.ID == origin.SummaryMessageID {
+			forkedSummaryMessageID = copied.ID
+		}
+	}
+
+	if forkedSummaryMessageID != "" {
+		fork.SummaryMessageID = forkedSummaryMessageID
+		if _, err := s.sessions.Save(ctx, fork); err != nil {
+			return "", fmt.Errorf("rewind: preserve summary cutoff on fork: %w", err)
 		}
 	}
 
@@ -202,6 +226,14 @@ func (s *service) forkConversation(ctx context.Context, sessionID string, target
 // target message and returns the number of files written. Selection is by
 // message order: for each path, the latest version whose owning message is
 // at or before the target in the conversation is used.
+//
+// Before writing, each file's current disk content is checked against this
+// session's own most recently recorded version for that path (regardless
+// of target position). A mismatch means something outside this rewind --
+// another session, git, an editor -- changed the file after this session
+// last saw it, and the recorded history no longer reflects the file's real
+// history. Restoring the old snapshot in that case would silently discard
+// that outside work, so the file is skipped instead of overwritten.
 func (s *service) restoreCode(ctx context.Context, sessionID, targetMessageID string) (int, error) {
 	all, err := s.messages.List(ctx, sessionID)
 	if err != nil {
@@ -229,7 +261,14 @@ func (s *service) restoreCode(ctx context.Context, sessionID, targetMessageID st
 	// at or before the target. Versions are returned in ascending order, so
 	// a later qualifying version overwrites an earlier one.
 	selected := make(map[string]history.File)
+	// latestKnown tracks this session's own most recent version of each
+	// path, independent of the target -- the file content this session
+	// last actually recorded on disk, used below to detect outside drift.
+	latestKnown := make(map[string]history.File)
 	for _, f := range files {
+		if cur, exists := latestKnown[f.Path]; !exists || f.Version >= cur.Version {
+			latestKnown[f.Path] = f
+		}
 		r, ok := rank[f.MessageID]
 		if !ok || r > targetRank {
 			continue
@@ -240,7 +279,16 @@ func (s *service) restoreCode(ctx context.Context, sessionID, targetMessageID st
 	}
 
 	restored := 0
-	for _, f := range selected {
+	for path, f := range selected {
+		if known, ok := latestKnown[path]; ok {
+			if onDisk, err := os.ReadFile(path); err == nil && string(onDisk) != known.Content {
+				// The file no longer matches what this session last
+				// recorded for it: something outside this rewind changed
+				// it since. Restoring the older snapshot would clobber
+				// that outside work, so leave the file alone.
+				continue
+			}
+		}
 		if err := os.WriteFile(f.Path, []byte(f.Content), 0o644); err != nil {
 			return restored, fmt.Errorf("rewind: restore %s: %w", f.Path, err)
 		}

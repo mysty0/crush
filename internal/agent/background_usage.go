@@ -49,6 +49,10 @@ func (c *coordinator) recordBackgroundUsage(ctx context.Context, model Model, pr
 		return
 	}
 
+	// Repair impossible cache figures before costing or recording them.
+	cacheInsideInput := modelCacheReadIsSubsetOfInput(model)
+	usage = normalizeUsage(usage, cacheInsideInput)
+
 	mc := model.CatwalkCfg
 	cost := mc.CostPer1MInCached/1e6*float64(usage.CacheCreationTokens) +
 		mc.CostPer1MOutCached/1e6*float64(usage.CacheReadTokens) +
@@ -74,7 +78,8 @@ func (c *coordinator) recordBackgroundUsage(ctx context.Context, model Model, pr
 	if summary != "" {
 		parts = append(parts, message.TextContent{Text: summary})
 	}
-	parts = append(parts,
+	parts = append(
+		parts,
 		message.TokenUsage{
 			InputTokens:         usage.InputTokens,
 			OutputTokens:        usage.OutputTokens,
@@ -93,7 +98,7 @@ func (c *coordinator) recordBackgroundUsage(ctx context.Context, model Model, pr
 		slog.Debug("Background usage: could not record message", "source", source, "err", err)
 	}
 
-	if err := c.sessions.UpdateTitleAndUsage(ctx, sessionID, title, promptTokens(usage), usage.OutputTokens, usage.CacheCreationTokens, usage.CacheReadTokens, cost); err != nil {
+	if err := c.sessions.UpdateTitleAndUsage(ctx, sessionID, title, promptTokens(usage, cacheInsideInput), usage.OutputTokens, usage.CacheCreationTokens, usage.CacheReadTokens, cost); err != nil {
 		slog.Debug("Background usage: could not update session usage", "source", source, "err", err)
 	}
 

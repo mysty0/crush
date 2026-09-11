@@ -76,6 +76,7 @@ func init() {
 		schemaCmd,
 		loginCmd,
 		statsCmd,
+		ccusageCmd,
 		usageCmd,
 		sessionCmd,
 	)

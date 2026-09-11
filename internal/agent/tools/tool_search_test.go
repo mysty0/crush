@@ -313,6 +313,10 @@ func TestDeferredToolSelfHealsMissingArgs(t *testing.T) {
 	// The correction must carry the schema, so recovery does not depend on how
 	// the upstream server happens to word its own errors.
 	assert.Contains(t, res.Content, "\"parameters\"")
+	// A call that skipped argument generation entirely is a different failure
+	// than a merely incomplete one, and must be named as such so the model
+	// doesn't have to infer it from the missing-parameter list.
+	assert.Contains(t, res.Content, "no arguments at all")
 
 	// Missing one of two.
 	res, err = d.Run(context.Background(), fantasy.ToolCall{Input: `{"expr":"up"}`})
@@ -320,6 +324,8 @@ func TestDeferredToolSelfHealsMissingArgs(t *testing.T) {
 	assert.True(t, res.IsError)
 	assert.Contains(t, res.Content, "datasourceUid")
 	assert.NotContains(t, res.Content, "missing required parameter(s): expr")
+	// A partial call is not called out as fully empty.
+	assert.NotContains(t, res.Content, "no arguments at all")
 
 	// A complete call passes straight through.
 	res, err = d.Run(context.Background(), fantasy.ToolCall{

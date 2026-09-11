@@ -98,14 +98,41 @@ func TestResolveFetchModelSelection(t *testing.T) {
 		},
 	}
 
-	t.Run("defaults to sonnet when no model is given", func(t *testing.T) {
+	t.Run("falls back to sonnet when no small model is configured", func(t *testing.T) {
 		t.Parallel()
 		env := testEnv(t)
 		coord := newIsolatedTestCoordinator(t, env, providerID, providerCfg)
+		// No small model in this fixture, so the Sonnet fallback applies.
+		delete(coord.cfg.Config().Models, config.SelectedModelTypeSmall)
 
 		selected, err := coord.resolveFetchModelSelection("")
 		require.NoError(t, err)
 		assert.Equal(t, "claude-sonnet-4-6", selected.Model)
+	})
+
+	// The configured small model must win over an available Sonnet.
+	//
+	// agentic_fetch used to prefer any Sonnet it could find on an enabled
+	// provider ahead of the small-model slot, so an explicitly configured
+	// small model was silently ignored and the work was billed to whatever
+	// provider happened to serve a Sonnet. That is especially wrong for
+	// the Cloud Code Assist providers, which list Claude models alongside
+	// Gemini: a session configured entirely on Gemini still had every
+	// fetch routed to Claude.
+	t.Run("prefers the configured small model over an available sonnet", func(t *testing.T) {
+		t.Parallel()
+		env := testEnv(t)
+		// providerCfg serves a Sonnet, so the old code would pick it.
+		coord := newIsolatedTestCoordinator(t, env, providerID, providerCfg)
+		coord.cfg.Config().Models[config.SelectedModelTypeSmall] = config.SelectedModel{
+			Provider: providerID,
+			Model:    "claude-opus-4-8",
+		}
+
+		selected, err := coord.resolveFetchModelSelection("")
+		require.NoError(t, err)
+		assert.Equal(t, "claude-opus-4-8", selected.Model,
+			"the configured small model must not be overridden by a discovered sonnet")
 	})
 
 	t.Run("honors an explicit model ID", func(t *testing.T) {

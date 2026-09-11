@@ -32,13 +32,6 @@ func NewWorkflowToolMessageItem(
 ) ToolMessageItem {
 	t := &WorkflowToolMessageItem{}
 	t.baseToolMessageItem = newBaseToolMessageItem(sty, toolCall, result, &WorkflowToolRenderContext{}, canceled)
-	// A workflow tool call is marked Finished as soon as its input is
-	// parsed, long before the multi-phase run completes. Keep spinning
-	// until a result arrives (or the turn is canceled) so the animation
-	// reflects that the workflow is still running.
-	t.spinningFunc = func(state SpinningState) bool {
-		return !state.HasResult() && !state.IsCanceled()
-	}
 	return t
 }
 

@@ -70,7 +70,8 @@ func NewAstGrepTool(workingDir string) fantasy.AgentTool {
 			if !compiledAny {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf(
 					"could not compile the pattern for any matched file. Check the pattern parses as %s code, or point path at files of the intended language.",
-					filepath.Ext(target))), nil
+					filepath.Ext(target),
+				)), nil
 			}
 			if total == 0 {
 				return fantasy.NewTextResponse("No matches found."), nil

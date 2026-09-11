@@ -21,6 +21,7 @@ import (
 //	model large [<provider>/<id>] [--think] [--reasoning-effort L]
 //	    [--max-tokens N] [--temperature F] [--top-p F] [--top-k N]
 //	    [--frequency-penalty F] [--presence-penalty F]
+//	    [--auto-continue-on-empty true|false] [--auto-continue-on-rate-limit true|false]
 //	    [--provider-options JSON]
 //	model small [<provider>/<id>] [...]
 //
@@ -154,6 +155,8 @@ var modelSelectFlags = []flagSpec{
 	{name: "--top-k", jsonKey: "top_k", kind: flagInt, op: opSet},
 	{name: "--frequency-penalty", jsonKey: "frequency_penalty", kind: flagFloat, op: opSet},
 	{name: "--presence-penalty", jsonKey: "presence_penalty", kind: flagFloat, op: opSet},
+	{name: "--auto-continue-on-empty", jsonKey: "auto_continue_on_empty", kind: flagBool, op: opSet},
+	{name: "--auto-continue-on-rate-limit", jsonKey: "auto_continue_on_rate_limit", kind: flagBool, op: opSet},
 	{name: "--provider-options", child: "provider_options", kind: flagJSONObject, op: opMergeChild},
 }
 

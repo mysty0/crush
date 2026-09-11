@@ -35,14 +35,6 @@ func NewBashToolMessageItem(
 ) ToolMessageItem {
 	t := &BashToolMessageItem{}
 	t.baseToolMessageItem = newBaseToolMessageItem(sty, toolCall, result, &BashToolRenderContext{workingDir: workingDir}, canceled)
-	// The tool call is marked Finished as soon as its input is parsed —
-	// before the command actually runs — so the default spinning logic
-	// (!Finished) would freeze the spinner during execution. Keep spinning
-	// until a result arrives (or the turn is canceled) so the animation
-	// reflects that the command is still running.
-	t.spinningFunc = func(state SpinningState) bool {
-		return !state.HasResult() && !state.IsCanceled()
-	}
 	return t
 }
 
@@ -170,28 +162,38 @@ type JobOutputToolRenderContext struct{}
 // RenderTool implements the [ToolRenderer] interface.
 func (j *JobOutputToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
-	if opts.IsPending() {
-		return pendingTool(sty, "Job", opts.Anim, opts.Compact)
-	}
 
 	var params tools.JobOutputParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
+		if !opts.HasResult() && !opts.IsCanceled() {
+			return pendingTool(sty, "Job", opts.Anim, opts.Compact)
+		}
 		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
 	}
 
+	// The tool call is marked Finished as soon as its arguments are
+	// parsed, well before job_output actually returns -- especially
+	// with wait=true, which can block for up to MaxJobOutputWaitSeconds
+	// -- so IsPending() cannot be trusted to mean "done." Key off the
+	// absence of a result instead, same fix Bash already has, and show
+	// a live spinner + elapsed timer next to the header so a long wait
+	// doesn't look frozen.
+	if !opts.HasResult() && !opts.IsCanceled() {
+		if opts.Compact || params.ShellID == "" {
+			return pendingTool(sty, "Job", opts.Anim, opts.Compact)
+		}
+		return runningJobHeader(sty, opts, cappedWidth, "Output", params.ShellID)
+	}
+
 	var description string
-	if opts.HasResult() && opts.Result.Metadata != "" {
+	if opts.Result.Metadata != "" {
 		var meta tools.JobOutputResponseMetadata
 		if err := json.Unmarshal([]byte(opts.Result.Metadata), &meta); err == nil {
 			description = cmp.Or(meta.Description, meta.Command)
 		}
 	}
 
-	content := ""
-	if opts.HasResult() {
-		content = opts.Result.Content
-	}
-	return renderJobTool(sty, opts, cappedWidth, "Output", params.ShellID, description, content)
+	return renderJobTool(sty, opts, cappedWidth, "Output", params.ShellID, description, opts.Result.Content)
 }
 
 // -----------------------------------------------------------------------------
@@ -221,28 +223,50 @@ type JobKillToolRenderContext struct{}
 // RenderTool implements the [ToolRenderer] interface.
 func (j *JobKillToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
-	if opts.IsPending() {
-		return pendingTool(sty, "Job", opts.Anim, opts.Compact)
-	}
 
 	var params tools.JobKillParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
+		if !opts.HasResult() && !opts.IsCanceled() {
+			return pendingTool(sty, "Job", opts.Anim, opts.Compact)
+		}
 		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
 	}
 
+	// Same "Finished means arguments parsed, not done running" trap as
+	// job_output -- see JobOutputToolRenderContext.RenderTool.
+	if !opts.HasResult() && !opts.IsCanceled() {
+		if opts.Compact || params.ShellID == "" {
+			return pendingTool(sty, "Job", opts.Anim, opts.Compact)
+		}
+		return runningJobHeader(sty, opts, cappedWidth, "Kill", params.ShellID)
+	}
+
 	var description string
-	if opts.HasResult() && opts.Result.Metadata != "" {
+	if opts.Result.Metadata != "" {
 		var meta tools.JobKillResponseMetadata
 		if err := json.Unmarshal([]byte(opts.Result.Metadata), &meta); err == nil {
 			description = cmp.Or(meta.Description, meta.Command)
 		}
 	}
 
-	content := ""
-	if opts.HasResult() {
-		content = opts.Result.Content
+	return renderJobTool(sty, opts, cappedWidth, "Kill", params.ShellID, description, opts.Result.Content)
+}
+
+// runningJobHeader renders the header for a job tool (job_output,
+// job_kill) that is genuinely still executing -- no result yet -- with a
+// live spinner appended next to it. Mirrors Bash's treatment of the same
+// "Finished means arguments parsed, not done running" trap: without this,
+// a long wait=true job_output call falls through to the generic
+// "Waiting for tool response..." fallback and looks frozen instead of
+// showing progress or an elapsed timer.
+func runningJobHeader(sty *styles.Styles, opts *ToolRenderOpts, width int, action, shellID string) string {
+	header := jobHeader(sty, opts.Status, action, shellID, "", width)
+	if opts.Anim != nil {
+		if animView := opts.Anim.Render(); animView != "" {
+			header += " " + animView
+		}
 	}
-	return renderJobTool(sty, opts, cappedWidth, "Kill", params.ShellID, description, content)
+	return header
 }
 
 // renderJobTool renders a job-related tool with the common pattern:

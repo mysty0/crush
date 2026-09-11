@@ -507,6 +507,10 @@ func (t *baseToolMessageItem) computeStatus() ToolStatus {
 }
 
 // isSpinning returns true if the tool should show animation.
+//
+// A tool call is marked Finished as soon as its input is parsed, which
+// happens long before it actually runs, so "still executing" means "no
+// result yet" rather than "not finished".
 func (t *baseToolMessageItem) isSpinning() bool {
 	if t.spinningFunc != nil {
 		return t.spinningFunc(SpinningState{
@@ -515,7 +519,7 @@ func (t *baseToolMessageItem) isSpinning() bool {
 			Status:   t.status,
 		})
 	}
-	return !t.toolCall.Finished && t.status != ToolStatusCanceled
+	return t.result == nil && t.status != ToolStatusCanceled
 }
 
 // SetSpinningFunc sets a custom function to determine if the tool should spin.
@@ -608,7 +612,15 @@ func toolEarlyStateContent(sty *styles.Styles, opts *ToolRenderOpts, width int) 
 	case ToolStatusAwaitingPermission:
 		msg = sty.Tool.StateWaiting.Render("Requesting permission...")
 	case ToolStatusRunning:
+		// Prefer the live spinner: its label grows an elapsed stopwatch
+		// (see RawRender), so a long wait shows how long it has been
+		// waiting instead of a frozen line of text.
 		msg = sty.Tool.StateWaiting.Render("Waiting for tool response...")
+		if opts.Anim != nil {
+			if animView := opts.Anim.Render(); animView != "" {
+				msg = animView
+			}
+		}
 	default:
 		return "", false
 	}

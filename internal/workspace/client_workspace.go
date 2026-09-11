@@ -208,6 +208,56 @@ func (w *ClientWorkspace) ListMessages(ctx context.Context, sessionID string) ([
 	return protoToMessages(msgs), nil
 }
 
+// ListMessagesWindow is a best-effort client-side equivalent of the
+// local AppWorkspace implementation: the client/server RPC surface has
+// no paginated messages endpoint yet, so this still fetches the full
+// history over the wire and windows it after the fact. That keeps the
+// receiving client's memory bounded (the point of this method) even
+// though it doesn't reduce network or server-side work; a follow-up
+// could add a real paginated RPC if that turns out to matter for
+// client/server mode.
+func (w *ClientWorkspace) ListMessagesWindow(ctx context.Context, sessionID string, limit int) ([]message.Message, bool, error) {
+	all, err := w.ListMessages(ctx, sessionID)
+	if err != nil {
+		return nil, false, err
+	}
+
+	start := 0
+	if len(all) > limit {
+		start = len(all) - limit
+	}
+	if sess, err := w.GetSession(ctx, sessionID); err == nil && sess.SummaryMessageID != "" {
+		for i, m := range all {
+			if m.ID == sess.SummaryMessageID && i < start {
+				start = i
+				break
+			}
+		}
+	}
+	return all[start:], start > 0, nil
+}
+
+// ListOlderMessages re-fetches the full history over the wire and slices
+// out the page immediately before beforeCreatedAt. This re-downloads
+// everything on every page (no paginated RPC exists yet -- see
+// ListMessagesWindow), but it is correct: the client only ever holds
+// the windowed slice in memory, never the full fetched response.
+func (w *ClientWorkspace) ListOlderMessages(ctx context.Context, sessionID string, beforeCreatedAt int64, limit int) ([]message.Message, error) {
+	all, err := w.ListMessages(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	end := len(all)
+	for i, m := range all {
+		if m.CreatedAt >= beforeCreatedAt {
+			end = i
+			break
+		}
+	}
+	start := max(0, end-limit)
+	return all[start:end], nil
+}
+
 func (w *ClientWorkspace) ListUserMessages(ctx context.Context, sessionID string) ([]message.Message, error) {
 	msgs, err := w.client.ListUserMessages(ctx, w.workspaceID(), sessionID)
 	if err != nil {
@@ -681,6 +731,13 @@ func (w *ClientWorkspace) RefreshOAuthToken(ctx context.Context, scope config.Sc
 		w.refreshWorkspace()
 	}
 	return err
+}
+
+// ReloadConfigIfStale is a no-op in client/server mode: the server owns
+// config loading, so an out-of-process edit (e.g. `crush login` run on
+// the server host) is picked up there rather than by any one client.
+func (w *ClientWorkspace) ReloadConfigIfStale(_ context.Context) (bool, error) {
+	return false, nil
 }
 
 // -- Project lifecycle --
