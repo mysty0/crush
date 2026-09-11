@@ -130,6 +130,7 @@ func quickStyle(o quickStyleOpts) Styles {
 			CursorLineNumber: base.Foreground(o.fgMostSubtle),
 			Placeholder:      base.Foreground(o.fgMostSubtle),
 			Prompt:           base.Foreground(o.accent),
+			Selection:        base.Foreground(o.onPrimary).Background(o.secondary),
 		},
 		Blurred: textarea.StyleState{
 			Base:             base,
@@ -139,6 +140,7 @@ func quickStyle(o quickStyleOpts) Styles {
 			CursorLineNumber: base.Foreground(o.fgMoreSubtle),
 			Placeholder:      base.Foreground(o.fgMostSubtle),
 			Prompt:           base.Foreground(o.fgMoreSubtle),
+			Selection:        base.Foreground(o.onPrimary).Background(o.secondary),
 		},
 		Cursor: textarea.CursorStyle{
 			Color: o.secondary,
@@ -960,6 +962,7 @@ func quickStyle(o quickStyleOpts) Styles {
 
 	s.Dialog.List = base.Margin(0, 0, 1, 0)
 	s.Dialog.ContentPanel = base.Background(o.bgLessVisible).Foreground(o.fgBase).Padding(1, 2)
+	s.Dialog.ContentPanelBg = o.bgLessVisible
 	s.Dialog.Spinner = base.Foreground(o.secondary)
 	s.Dialog.ScrollbarThumb = base.Foreground(o.secondary)
 	s.Dialog.ScrollbarTrack = base.Foreground(o.separator)
